@@ -50,7 +50,7 @@ jobs:
 
   test:
     needs: [pick]
-    runs-on: ubuntu-latest
+    runs-on: ${{ needs.pick.outputs.runner == 'ubuntu-latest' && fromJSON('["ubuntu-latest"]') || fromJSON(format('["self-hosted","{0}"]', needs.pick.outputs.runner)) }}
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -77,7 +77,16 @@ jobs:
         run: |
           TOKEN="$(gcloud auth print-access-token)"
           python3 -m pip install --upgrade pip
-          python3 -m pip install "biq-core[org]==0.8.0" \
+          # Version comes from server/pyproject.toml (single source of truth).
+          BIQ_CORE_VERSION=$(python3 -c "
+          import tomllib, pathlib
+          t = tomllib.loads(pathlib.Path('server/pyproject.toml').read_text())
+          for d in t['project']['dependencies']:
+              if 'biq-core' in d and '==' in d:
+                  print(d.split('==')[1].strip('\" ,'))
+                  break
+          ")
+          python3 -m pip install "biq-core[org]==${BIQ_CORE_VERSION}" \
             --extra-index-url "https://oauth2accesstoken:${TOKEN}@europe-west1-python.pkg.dev/basketiq-platform-prod/basketiq-python/simple/"
           python3 -m pip install -e "./server[firestore,test]"
       - name: Run pytest

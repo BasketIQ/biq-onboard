@@ -79,7 +79,7 @@ jobs:
 
   deploy-staging:
     needs: [pick]
-    runs-on: ubuntu-latest
+    runs-on: ${{ needs.pick.outputs.runner == 'ubuntu-latest' && fromJSON('["ubuntu-latest"]') || fromJSON(format('["self-hosted","{0}"]', needs.pick.outputs.runner)) }}
     environment: ${{ inputs.env }}
     timeout-minutes: 20
     steps:
@@ -121,7 +121,16 @@ jobs:
         run: |
           rm -rf wheelhouse && mkdir -p wheelhouse
           TOKEN="$(gcloud auth print-access-token)"
-          python3 -m pip download "biq-core[org]==0.8.0" \
+          # Version comes from server/pyproject.toml (single source of truth).
+          BIQ_CORE_VERSION=$(python3 -c "
+          import tomllib, pathlib
+          t = tomllib.loads(pathlib.Path('server/pyproject.toml').read_text())
+          for d in t['project']['dependencies']:
+              if 'biq-core' in d and '==' in d:
+                  print(d.split('==')[1].strip('\" ,'))
+                  break
+          ")
+          python3 -m pip download "biq-core[org]==${BIQ_CORE_VERSION}" \
             --only-binary=:all: \
             --platform manylinux2014_x86_64 \
             --python-version 312 \

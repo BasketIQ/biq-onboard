@@ -3,7 +3,7 @@ WORKDIR /srv
 
 COPY wheelhouse/ /srv/wheelhouse/
 COPY server/ /srv/server/
-RUN pip install --no-cache-dir --no-index --find-links /srv/wheelhouse "biq-core[org]==0.7.1" \
+RUN pip install --no-cache-dir --no-index --find-links /srv/wheelhouse "biq-core[org]==0.8.0" \
  && pip install --no-cache-dir "/srv/server[firestore]"
 
 ENV PORT=8080

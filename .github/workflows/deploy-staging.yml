@@ -50,7 +50,7 @@ jobs:
 
   test:
     needs: [pick]
-    runs-on: ${{ needs.pick.outputs.runner == 'ubuntu-latest' && fromJSON('["ubuntu-latest"]') || fromJSON(format('["self-hosted","{0}"]', needs.pick.outputs.runner)) }}
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Checkout

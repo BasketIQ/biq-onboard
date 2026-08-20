@@ -79,7 +79,7 @@ jobs:
 
   deploy-staging:
     needs: [pick]
-    runs-on: ${{ needs.pick.outputs.runner == 'ubuntu-latest' && fromJSON('["ubuntu-latest"]') || fromJSON(format('["self-hosted","{0}"]', needs.pick.outputs.runner)) }}
+    runs-on: ubuntu-latest
     environment: ${{ inputs.env }}
     timeout-minutes: 20
     steps:

@@ -78,14 +78,7 @@ jobs:
           TOKEN="$(gcloud auth print-access-token)"
           python3 -m pip install --upgrade pip
           # Version comes from server/pyproject.toml (single source of truth).
-          BIQ_CORE_VERSION=$(python3 -c "
-          import tomllib, pathlib
-          t = tomllib.loads(pathlib.Path('server/pyproject.toml').read_text())
-          for d in t['project']['dependencies']:
-              if 'biq-core' in d and '==' in d:
-                  print(d.split('==')[1].strip('\" ,'))
-                  break
-          ")
+          BIQ_CORE_VERSION=$(grep 'biq-core\[org\]==' server/pyproject.toml | head -1 | sed 's/.*==\([^"]*\).*/\1/')
           python3 -m pip install "biq-core[org]==${BIQ_CORE_VERSION}" \
             --extra-index-url "https://oauth2accesstoken:${TOKEN}@europe-west1-python.pkg.dev/basketiq-platform-prod/basketiq-python/simple/"
           python3 -m pip install -e "./server[firestore,test]"

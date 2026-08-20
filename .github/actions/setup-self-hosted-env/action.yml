@@ -1,0 +1,28 @@
+name: Setup self-hosted runner env
+description: >-
+  Prepares environment variables required by `actions/setup-node` /
+  `actions/setup-python` (and other toolcache-aware actions) when running on a
+  self-hosted macOS runner that lacks the GitHub-hosted convention path
+  `/Users/runner/hostedtoolcache`. Idempotent + no-op on ubuntu-latest / Linux
+  self-hosted. Invoke BEFORE setup-node / setup-python on any job whose
+  `runs-on` may resolve to a macOS self-hosted runner.
+inputs:
+  toolcache_dir:
+    description: Toolcache dir on macOS self-hosted. Default $HOME/.runner-cache/toolcache.
+    required: false
+    default: ''
+runs:
+  using: composite
+  steps:
+    - name: Prepare toolcache on macOS self-hosted
+      if: runner.os == 'macOS'
+      shell: bash
+      run: |
+        TOOLCACHE_DIR="${{ inputs.toolcache_dir }}"
+        if [ -z "$TOOLCACHE_DIR" ]; then
+          TOOLCACHE_DIR="$HOME/.runner-cache/toolcache"
+        fi
+        mkdir -p "$TOOLCACHE_DIR"
+        echo "AGENT_TOOLSDIRECTORY=$TOOLCACHE_DIR" >> "$GITHUB_ENV"
+        echo "RUNNER_TOOL_CACHE=$TOOLCACHE_DIR" >> "$GITHUB_ENV"
+        echo "::notice title=setup-self-hosted-env::macOS toolcache ready at $TOOLCACHE_DIR"

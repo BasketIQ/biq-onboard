@@ -1,0 +1,187 @@
+name: deploy
+
+# Reusable deploy engine (ADR-007 pattern, same as biq-methodology).
+
+run-name: "deploy ${{ inputs.env }} @ ${{ inputs.ref || 'main' }}"
+
+on:
+  workflow_call:
+    inputs:
+      env:
+        description: "Target environment (staging|production)"
+        required: true
+        type: string
+      ref:
+        description: "Ref to deploy"
+        required: false
+        type: string
+        default: main
+      confirm:
+        description: "Must equal DEPLOY-PRODUCTION when env=production."
+        required: false
+        type: string
+        default: ""
+  workflow_dispatch:
+    inputs:
+      env:
+        description: "Target environment"
+        required: true
+        type: choice
+        options: [staging, production]
+        default: staging
+      ref:
+        description: "Ref to deploy"
+        required: false
+        type: string
+        default: main
+      confirm:
+        description: "Must equal DEPLOY-PRODUCTION when env=production."
+        required: false
+        type: string
+        default: ""
+
+concurrency:
+  group: deploy-${{ inputs.env }}-biq-onboard
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+  deployments: write
+
+jobs:
+  pick:
+    name: Pick runner
+    runs-on: ubuntu-latest
+    outputs:
+      runner: ${{ steps.runner.outputs.runner }}
+    steps:
+      - name: Checkout (action only)
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            .github/actions/pick-runner
+          sparse-checkout-cone-mode: false
+      - id: runner
+        uses: ./.github/actions/pick-runner
+        with:
+          token: ${{ secrets.RUNNER_PICK_PAT }}
+          development_runner_name: ${{ vars.DEVELOPMENT_RUNNER_NAME }}
+          integration_runner_name: ${{ vars.INTEGRATION_RUNNER_NAME }}
+          integration2_runner_name: ${{ vars.INTEGRATION2_RUNNER_NAME }}
+          prefer_development: true
+          netdata_token: ${{ secrets.NETDATA_CLOUD_API_TOKEN }}
+          netdata_space_id: ${{ vars.NETDATA_CLOUD_SPACE_ID }}
+          netdata_room_id: ${{ vars.NETDATA_CLOUD_ROOM_ID }}
+          netdata_node_integration2: ${{ vars.NETDATA_NODE_INTEGRATION2 }}
+          netdata_node_integration: ${{ vars.NETDATA_NODE_INTEGRATION }}
+          netdata_node_development: ${{ vars.NETDATA_NODE_DEVELOPMENT }}
+
+  deploy-staging:
+    needs: [pick]
+    runs-on: ${{ needs.pick.outputs.runner == 'ubuntu-latest' && fromJSON('["ubuntu-latest"]') || fromJSON(format('["self-hosted","{0}"]', needs.pick.outputs.runner)) }}
+    environment: ${{ inputs.env }}
+    timeout-minutes: 20
+    steps:
+      - name: Guard environment (production gated — rule 02)
+        run: |
+          ENV="${{ inputs.env }}"
+          case "$ENV" in
+            staging) ;;
+            production)
+              if [ "${{ inputs.confirm }}" != "DEPLOY-PRODUCTION" ]; then
+                echo "::error::Refusing production deploy without confirm=DEPLOY-PRODUCTION (rule 02)."
+                exit 1
+              fi ;;
+            *)
+              echo "::error::unknown env '$ENV' (want staging|production)"; exit 1 ;;
+          esac
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || 'main' }}
+          persist-credentials: false
+
+      - name: Setup self-hosted env (toolcache)
+        uses: ./.github/actions/setup-self-hosted-env
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_BIQ_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOYER_SA }}
+          create_credentials_file: true
+          export_environment_variables: true
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Prefetch biq-core wheelhouse from GAR (ADR-009)
+        run: |
+          rm -rf wheelhouse && mkdir -p wheelhouse
+          TOKEN="$(gcloud auth print-access-token)"
+          python3 -m pip download "biq-core[org]==0.7.1" \
+            --only-binary=:all: \
+            --platform manylinux2014_x86_64 \
+            --python-version 312 \
+            --extra-index-url "https://oauth2accesstoken:${TOKEN}@europe-west1-python.pkg.dev/basketiq-platform-prod/basketiq-python/simple/" \
+            -d wheelhouse
+          echo "wheelhouse: $(ls wheelhouse | wc -l) wheels"
+
+      - name: Install gcloud beta component
+        run: gcloud components install beta -q --no-user-output-enabled
+
+      - name: Build container with Cloud Build
+        env:
+          PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+          AR_REPO: ${{ vars.GCP_AR_REPO }}
+          RUN_SERVICE: ${{ vars.GCP_RUN_SERVICE }}
+        run: |
+          IMAGE_URI="europe-west1-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/${RUN_SERVICE}:${GITHUB_SHA}"
+          echo "IMAGE_URI=${IMAGE_URI}" >> "${GITHUB_ENV}"
+          BUILD_ID=$(gcloud builds submit . \
+            --project "${PROJECT_ID}" \
+            --config cloudbuild.yaml \
+            --substitutions=_IMAGE="${IMAGE_URI}" \
+            --async --format='value(id)')
+          echo "BUILD_ID=${BUILD_ID}" >> "${GITHUB_ENV}"
+          gcloud beta builds log "${BUILD_ID}" --project "${PROJECT_ID}" --stream --quiet
+          gcloud builds describe "${BUILD_ID}" --project "${PROJECT_ID}" --format='value(status)' | grep -q '^SUCCESS$'
+
+      - name: Deploy to Cloud Run
+        env:
+          PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+          RUN_SERVICE: ${{ vars.GCP_RUN_SERVICE }}
+        run: |
+          PROJECT_NUMBER=$(gcloud projects describe "${PROJECT_ID}" --format='value(projectNumber)')
+          DEFAULT_SA="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
+          gcloud run deploy "${RUN_SERVICE}" \
+            --project "${PROJECT_ID}" \
+            --region europe-west1 \
+            --platform managed \
+            --image "${IMAGE_URI}" \
+            --allow-unauthenticated \
+            --port 8080 \
+            --set-env-vars "BIQ_ENV=prod,BIQ_ORG_STORE=firestore,BIQ_ROLES_STORE=firestore,GCP_PROJECT_ID=${{ vars.GCP_PROJECT_ID }},GOOGLE_CLOUD_PROJECT=${{ vars.GCP_PROJECT_ID }},BIQ_ONBOARD_USER=${{ secrets.BIQ_ONBOARD_USER }},BIQ_ONBOARD_PASSWORD=${{ secrets.BIQ_ONBOARD_PASSWORD }},BIQ_ONBOARD_SESSION_SECRET=${{ secrets.BIQ_ONBOARD_SESSION_SECRET }}" \
+            --service-account "${DEFAULT_SA}"
+
+      - name: Health check
+        env:
+          PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+          RUN_SERVICE: ${{ vars.GCP_RUN_SERVICE }}
+        run: |
+          URL=$(gcloud run services describe "${RUN_SERVICE}" \
+            --project "${PROJECT_ID}" \
+            --region europe-west1 \
+            --format='value(status.url)')
+          echo "SERVICE_URL=${URL}" >> "${GITHUB_ENV}"
+          for i in 1 2 3 4 5; do
+            echo "Health check attempt ${i}..."
+            HTTP_CODE=$(curl -sS -w "%{http_code}" -o /tmp/health.out "${URL}/health" || echo "000")
+            echo "HTTP ${HTTP_CODE}"
+            [ "${HTTP_CODE}" = "200" ] && exit 0
+            cat /tmp/health.out || true
+            sleep 10
+          done
+          exit 1

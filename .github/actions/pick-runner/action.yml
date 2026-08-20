@@ -1,0 +1,216 @@
+name: Pick self-hosted runner
+description: >-
+  Pick a BasketIQ self-hosted runner (integration2 -> integration, or development
+  when prefer_development: true) and fall back to ubuntu-latest when none is
+  free/online, no runner-read token is set, or the chosen host is critically
+  loaded per Netdata Cloud CPU. The BasketIQ self-hosted runners live at org
+  level (BasketIQ org, Default group, visibility=all) since 2026-05-21, so this
+  queries orgs/<owner>/actions/runners derived from github.repository. Signal is
+  runner.busy + status; Netdata is an optional circuit-breaker. Safe by
+  construction: empty token, missing jq, API error, all runners busy/offline,
+  or Netdata unavailable => ubuntu-latest (CI never hangs).
+inputs:
+  token:
+    description: "Token with org 'Self-hosted runners: Read'. Empty => ubuntu-latest."
+    required: false
+    default: ''
+  override:
+    description: "Bypass auto-detect: ubuntu-latest | development | integration | integration2 | self-hosted(=auto) | ''(=auto)"
+    required: false
+    default: ''
+  development_runner_name:
+    description: Exact name of the development (Mac mini M4) org runner. Empty disables it.
+    required: false
+    default: ''
+  integration_runner_name:
+    description: Exact name of the integration (Mac) org runner. Empty disables it.
+    required: false
+    default: ''
+  integration2_runner_name:
+    description: Exact name of the second integration (Linux/Mac) org runner. Empty disables it.
+    required: false
+    default: ''
+  prefer_development:
+    description: If true, try the development runner first. Ordinary jobs should leave false.
+    required: false
+    default: 'false'
+  netdata_token:
+    description: Netdata Cloud Bearer token (read scope on the space). Empty disables the CPU circuit-breaker.
+    required: false
+    default: ''
+  netdata_space_id:
+    description: Netdata Cloud space UUID containing the runner nodes.
+    required: false
+    default: ''
+  netdata_room_id:
+    description: Netdata Cloud room UUID where the runner nodes are members.
+    required: false
+    default: ''
+  netdata_node_integration2:
+    description: Netdata Cloud node UUID for the integration2 host. Empty disables CPU guard for this host.
+    required: false
+    default: ''
+  netdata_node_integration:
+    description: Netdata Cloud node UUID for the integration host. Empty disables CPU guard for this host.
+    required: false
+    default: ''
+  netdata_node_development:
+    description: Netdata Cloud node UUID for the development host. Empty disables CPU guard for this host.
+    required: false
+    default: ''
+  circuit_breaker_cpu:
+    description: CPU avg % above which a host is treated as busy. Default 90.
+    required: false
+    default: '90'
+  netdata_stale_seconds:
+    description: Netdata look-back window in seconds. Default 120.
+    required: false
+    default: '120'
+outputs:
+  runner:
+    description: Selected runner label (development | integration | integration2 | ubuntu-latest)
+    value: ${{ steps.choose.outputs.runner }}
+  runner_json:
+    description: JSON array suitable for runs-on (e.g., ["self-hosted","integration2"])
+    value: ${{ steps.choose.outputs.runner_json }}
+runs:
+  using: composite
+  steps:
+    - id: choose
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        REPO: ${{ github.repository }}
+        OVERRIDE: ${{ inputs.override }}
+        DEV_NAME: ${{ inputs.development_runner_name }}
+        INT_NAME: ${{ inputs.integration_runner_name }}
+        INT2_NAME: ${{ inputs.integration2_runner_name }}
+        PREFER_DEVELOPMENT: ${{ inputs.prefer_development }}
+        ND_TOKEN: ${{ inputs.netdata_token }}
+        ND_SPACE: ${{ inputs.netdata_space_id }}
+        ND_ROOM: ${{ inputs.netdata_room_id }}
+        ND_NODE_INTEGRATION2: ${{ inputs.netdata_node_integration2 }}
+        ND_NODE_INTEGRATION: ${{ inputs.netdata_node_integration }}
+        ND_NODE_DEVELOPMENT: ${{ inputs.netdata_node_development }}
+        ND_STALE_SECONDS: ${{ inputs.netdata_stale_seconds }}
+        CB_CPU: ${{ inputs.circuit_breaker_cpu }}
+      run: |
+        set -uo pipefail
+
+        emit() {
+          local label="$1"
+          local reason="${2:-}"
+          local json
+          if [[ "$label" == ubuntu-* ]]; then
+            json="[\"$label\"]"
+          else
+            json="[\"self-hosted\",\"$label\"]"
+          fi
+          {
+            echo "runner=$label"
+            echo "runner_json=$json"
+          } >> "$GITHUB_OUTPUT"
+          echo "::notice title=pick-runner::selected=$label ${reason}"
+        }
+
+        # ----- Override path -----
+        case "$OVERRIDE" in
+          ubuntu-latest|ubuntu-22.04|ubuntu-24.04) emit "$OVERRIDE" "override=$OVERRIDE"; exit 0 ;;
+          development) emit development "override=development"; exit 0 ;;
+          integration) emit integration "override=integration"; exit 0 ;;
+          integration2) emit integration2 "override=integration2"; exit 0 ;;
+          self-hosted|"") : ;;
+          *) echo "::error::Invalid override '$OVERRIDE'"; exit 1 ;;
+        esac
+
+        # ----- No token / no jq fast-fail -----
+        if [ -z "$GH_TOKEN" ]; then emit ubuntu-latest "no token"; exit 0; fi
+        if ! command -v jq >/dev/null 2>&1; then emit ubuntu-latest "no jq"; exit 0; fi
+
+        # ----- Query org runners -----
+        ORG="${REPO%%/*}"
+        if ! runners=$(gh api "orgs/$ORG/actions/runners" --paginate 2>&1); then
+          echo "::group::pick-runner api error"
+          printf '%s\n' "${runners:0:600}"
+          echo "::endgroup::"
+          emit ubuntu-latest "api error"
+          exit 0
+        fi
+
+        state() {
+          [ -z "$1" ] && { echo absent; return; }
+          echo "$runners" | jq -r --arg N "$1" '(.runners // []) | map(select(.name == $N))
+            | if length == 0 then "absent" elif .[0].status != "online" then "offline" elif .[0].busy == true then "busy" else "free" end' 2>/dev/null || echo absent
+        }
+
+        DEV=$(state "$DEV_NAME")
+        INT=$(state "$INT_NAME")
+        INT2=$(state "$INT2_NAME")
+        echo "::notice title=pick-runner::development=${DEV_NAME:-<unset>}($DEV) integration2=${INT2_NAME:-<unset>}($INT2) integration=${INT_NAME:-<unset>}($INT)"
+
+        # ----- Optional Netdata CPU circuit-breaker -----
+        ND_TOKEN_T=$(echo -n "$ND_TOKEN" | tr -d '[:space:]')
+        ND_SPACE_T=$(echo -n "$ND_SPACE" | tr -d '[:space:]')
+        ND_ROOM_T=$(echo -n "$ND_ROOM" | tr -d '[:space:]')
+        ND_NODE_INTEGRATION2_T=$(echo -n "$ND_NODE_INTEGRATION2" | tr -d '[:space:]')
+        ND_NODE_INTEGRATION_T=$(echo -n "$ND_NODE_INTEGRATION" | tr -d '[:space:]')
+        ND_NODE_DEVELOPMENT_T=$(echo -n "$ND_NODE_DEVELOPMENT" | tr -d '[:space:]')
+
+        netdata_cpu() {
+          local node_id="$1"
+          local now after payload resp
+          [ -z "$node_id" ] && return 1
+          [ -z "$ND_TOKEN_T" ] && return 1
+          now=$(date +%s)
+          after=$((now - ND_STALE_SECONDS))
+          payload=$(cat <<EOF
+        {"format":"json2","options":["jsonwrap","minify"],"scope":{"contexts":["system.cpu"],"nodes":["$node_id"]},"selectors":{"contexts":["*"],"nodes":["*"],"instances":["*"],"dimensions":["*"],"labels":["*"]},"aggregations":{"metrics":[{"group_by":["dimension"],"aggregation":"avg"}],"time":{"time_group":"average","time_resampling":0}},"window":{"after":$after,"before":$now,"points":1}}
+        EOF
+        )
+          resp=$(curl -sS --max-time 6 \
+            -X POST \
+            -H "Authorization: Bearer $ND_TOKEN_T" \
+            -H "Content-Type: application/json" \
+            -d "$payload" \
+            "https://app.netdata.cloud/api/v3/spaces/$ND_SPACE_T/rooms/$ND_ROOM_T/data" 2>/dev/null) || return 1
+          echo "$resp" | jq -r '.summary.nodes[0].sts.avg // empty' 2>/dev/null
+        }
+
+        cpu_exceeds_breaker() {
+          local cpu="$1"
+          [ -z "$cpu" ] && return 1
+          awk -v c="$cpu" -v t="$CB_CPU" 'BEGIN { exit !(c+0 > t+0) }'
+        }
+
+        if [ -n "$ND_TOKEN_T" ] && [ -n "$ND_SPACE_T" ] && [ -n "$ND_ROOM_T" ]; then
+          if [ "$INT2" = "free" ] && [ -n "$ND_NODE_INTEGRATION2_T" ]; then
+            cpu_st=$(netdata_cpu "$ND_NODE_INTEGRATION2_T" || true)
+            if [ -n "$cpu_st" ] && cpu_exceeds_breaker "$cpu_st"; then
+              echo "::warning title=pick-runner::integration2 host cpu=$cpu_st > circuit_breaker=$CB_CPU — treating as busy"
+              INT2="busy"
+            fi
+          fi
+          if [ "$INT" = "free" ] && [ -n "$ND_NODE_INTEGRATION_T" ]; then
+            cpu_in=$(netdata_cpu "$ND_NODE_INTEGRATION_T" || true)
+            if [ -n "$cpu_in" ] && cpu_exceeds_breaker "$cpu_in"; then
+              echo "::warning title=pick-runner::integration host cpu=$cpu_in > circuit_breaker=$CB_CPU — treating as busy"
+              INT="busy"
+            fi
+          fi
+          if [ "$DEV" = "free" ] && [ -n "$ND_NODE_DEVELOPMENT_T" ]; then
+            cpu_dev=$(netdata_cpu "$ND_NODE_DEVELOPMENT_T" || true)
+            if [ -n "$cpu_dev" ] && cpu_exceeds_breaker "$cpu_dev"; then
+              echo "::warning title=pick-runner::development host cpu=$cpu_dev > circuit_breaker=$CB_CPU — treating as busy"
+              DEV="busy"
+            fi
+          fi
+        fi
+
+        # ----- Final decision -----
+        if [ "${PREFER_DEVELOPMENT:-false}" = "true" ] && [ "$DEV" = free ]; then
+          emit development "development free"
+          exit 0
+        fi
+        if [ "$INT2" = "free" ]; then emit integration2 "integration2 free"; exit 0; fi
+        if [ "$INT" = "free" ]; then emit integration "integration2=$INT2, integration free"; exit 0; fi
+        emit ubuntu-latest "development=$DEV integration2=$INT2 integration=$INT"

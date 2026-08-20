@@ -121,7 +121,7 @@ jobs:
         run: |
           rm -rf wheelhouse && mkdir -p wheelhouse
           TOKEN="$(gcloud auth print-access-token)"
-          python3 -m pip download "biq-core[org]==0.7.1" \
+          python3 -m pip download "biq-core[org]==0.8.0" \
             --only-binary=:all: \
             --platform manylinux2014_x86_64 \
             --python-version 312 \

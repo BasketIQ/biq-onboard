@@ -201,6 +201,59 @@ def test_list_clubs(admin_client):
     assert r.json()["total"] >= 2
 
 
+def test_update_club_preserves_deactivated_status(admin_client):
+    """W2.0b regression: renaming a deactivated club must not reactivate it
+    or erase audit provenance (created_by, deactivated_at, deactivated_by).
+
+    upsert_club does set(club.model_dump()) with no merge=True, so any field
+    not carried explicitly is destroyed. status defaults to "active", which
+    silently reactivates a deactivated club on a back-office rename.
+    """
+    from biq_core.org import Club
+
+    from biq_onboard_server import org
+
+    registry = org.get_registry()
+
+    # Create a club, then deactivate it directly via the registry.
+    registry.upsert_club(
+        Club(
+            id="club_deact",
+            name="Old Name",
+            status="active",
+            created_by="founder@test.es",
+        )
+    )
+    registry.upsert_club(
+        Club(
+            id="club_deact",
+            name="Old Name",
+            status="deactivated",
+            created_by="founder@test.es",
+            deactivated_at="2026-08-01T00:00:00Z",
+            deactivated_by="admin@basketiq.io",
+        )
+    )
+
+    # Rename via the API — this used to drop status/created_by/deactivated_*.
+    r = admin_client.put("/api/admin/clubs/club_deact", json={"name": "New Name"})
+    assert r.status_code == 200
+    assert r.json()["club"]["name"] == "New Name"
+
+    # Verify the club is still deactivated and audit fields survived.
+    club = registry.get_club("club_deact")
+    assert club is not None
+    assert club.name == "New Name"
+    assert club.status == "deactivated", (
+        f"rename reactivated a deactivated club: status={club.status!r}"
+    )
+    assert club.created_by == "founder@test.es", (
+        f"created_by was erased by rename: {club.created_by!r}"
+    )
+    assert club.deactivated_at == "2026-08-01T00:00:00Z"
+    assert club.deactivated_by == "admin@basketiq.io"
+
+
 # ─── Users ───────────────────────────────────────────────────────────────────
 
 

@@ -1,0 +1,80 @@
+name: CI
+
+# Quality gate on every PR and push to main: server tests (biq-core[org]
+# from private GAR via WIF) + the W2.0b regression test that prevents
+# update_club from erasing audit provenance.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  id-token: write   # WIF, to read biq-core[org] from the private GAR index
+
+jobs:
+  pick:
+    name: Pick runner
+    runs-on: ubuntu-latest
+    outputs:
+      runner: ${{ steps.runner.outputs.runner }}
+    steps:
+      - name: Checkout (action only)
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            .github/actions/pick-runner
+          sparse-checkout-cone-mode: false
+      - id: runner
+        uses: ./.github/actions/pick-runner
+        with:
+          token: ${{ secrets.RUNNER_PICK_PAT }}
+          development_runner_name: ${{ vars.DEVELOPMENT_RUNNER_NAME }}
+          integration_runner_name: ${{ vars.INTEGRATION_RUNNER_NAME }}
+          integration2_runner_name: ${{ vars.INTEGRATION2_RUNNER_NAME }}
+          prefer_development: false
+          netdata_token: ${{ secrets.NETDATA_CLOUD_API_TOKEN }}
+          netdata_space_id: ${{ vars.NETDATA_CLOUD_SPACE_ID }}
+          netdata_room_id: ${{ vars.NETDATA_CLOUD_ROOM_ID }}
+          netdata_node_integration2: ${{ vars.NETDATA_NODE_INTEGRATION2 }}
+          netdata_node_integration: ${{ vars.NETDATA_NODE_INTEGRATION }}
+          netdata_node_development: ${{ vars.NETDATA_NODE_DEVELOPMENT }}
+
+  server:
+    needs: [pick]
+    runs-on: ${{ needs.pick.outputs.runner == 'ubuntu-latest' && fromJSON('["ubuntu-latest"]') || fromJSON(format('["self-hosted","{0}"]', needs.pick.outputs.runner)) }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup self-hosted env (toolcache)
+        uses: ./.github/actions/setup-self-hosted-env
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Authenticate to Google Cloud (biq-core[org] lives in private GAR)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_BIQ_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOYER_SA }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Install server (test extra) — biq-core from GAR (ADR-009)
+        run: |
+          TOKEN="$(gcloud auth print-access-token)"
+          pip install "./server[test]" \
+            --extra-index-url "https://oauth2accesstoken:${TOKEN}@europe-west1-python.pkg.dev/basketiq-platform-prod/basketiq-python/simple/"
+
+      - name: Server tests (in-memory store)
+        env:
+          BIQ_ORG_STORE: memory
+          BIQ_ROLES_STORE: memory
+        run: pytest -q
+        working-directory: server

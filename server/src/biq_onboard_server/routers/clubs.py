@@ -66,10 +66,19 @@ def update_club(club_id: str, payload: ClubUpdate, request: Request) -> dict:
         from fastapi import HTTPException
 
         raise HTTPException(status_code=404, detail="club not found")
+    # Carry every field we do not intend to change. upsert_club does
+    # set(club.model_dump()) with no merge=True (unlike upsert_user), so
+    # omitting a field here destroys it. status defaults to "active" in the
+    # Club model, which silently reactivates a deactivated club on rename.
+    # W2.0a will make upsert_club merge-safe; until then, carry explicitly.
     club = Club(
         id=club_id,
         name=payload.name or existing.name,
         short_name=payload.short_name or existing.short_name,
+        status=existing.status,
+        created_by=existing.created_by,
+        deactivated_at=existing.deactivated_at,
+        deactivated_by=existing.deactivated_by,
     )
     registry.upsert_club(club)
     return {"ok": True, "club": {"id": club.id, "name": club.name}}

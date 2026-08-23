@@ -236,17 +236,20 @@ def test_migration_is_idempotent(admin_client):
 # ─── R8 negative (THE GATE) ──────────────────────────────────────────────────
 
 
-def test_r8_negative_selected_but_not_staff_no_notification(admin_client):
-    """R8 negative (the gate): a coach who has *selected* a team but is *not*
-    in its ``staff_user_ids`` receives no notification and no responsibility.
+def test_selection_does_not_leak_into_staff_membership(admin_client):
+    """Membership and selection diverge: writing staff through the admin API
+    never derives it from a coach's ``team_ids`` selection (D9/D14, risk R8).
 
-    Under D14, membership is responsibility and selection is a display filter.
-    They diverge by design. The notification distribution list is
-    ``team.staff_user_ids``, never ``user.team_ids``.
+    Scope note — this is **not** the R8 gate. The full R8 criterion is *"a
+    coach who selected a team but is not staff receives no notification"*,
+    and that cannot be asserted here: recipient resolution does not exist
+    yet. ``TeamDirectoryPort`` lands in the engine-core gate and the reminder
+    path in ``OEE-9``; the R8 gate is asserted there, against a real
+    ``recipients()`` function.
 
-    This test verifies the divergence is real and machine-checkable:
-    - coach_1 is in staff_user_ids → is a recipient
-    - coach_2 selected the team but is NOT in staff_user_ids → is NOT a recipient
+    What this test does prove, which is the part that belongs to this gate:
+    the admin write path keeps the two sets independent, so a coach cannot
+    grant themselves responsibility for another team by selecting it.
     """
     club_id = _seed_club_with_team_and_users(admin_client, club_id="club_r8")
 
@@ -263,19 +266,17 @@ def test_r8_negative_selected_but_not_staff_no_notification(admin_client):
     assert c1_selection == ["team_a"]
     assert c2_selection == ["team_a"], "coach_2 selected the team"
 
-    # But only coach_1 is in staff_user_ids
+    # Membership reflects only what the admin wrote, not the selections.
     team = registry.get_team(club_id, "team_a")
-    assert "u_coach_1" in team.staff_user_ids
-    assert "u_coach_2" not in team.staff_user_ids, (
-        "coach_2 is in staff_user_ids — R8 gate fails: "
-        "selection leaked into membership"
+    assert team.staff_user_ids == ["u_coach_1"], (
+        "staff_user_ids is not exactly what the admin wrote — "
+        "selection leaked into membership (R8)"
     )
 
-    # Recipient resolution (tech spec §10.0):
-    #   recipients = TeamDirectoryPort.get(action.team_id).staff_user_ids
-    recipients = set(team.staff_user_ids)
-    assert "u_coach_1" in recipients, "coach_1 should be a recipient"
-    assert "u_coach_2" not in recipients, (
-        "coach_2 should NOT be a recipient — "
-        "they selected the team but are not in staff_user_ids (R8)"
+    # A later selection change must still not move membership.
+    registry.merge_user_fields("u_coach_2", {"team_ids": ["team_a"]})
+    team_after = registry.get_team(club_id, "team_a")
+    assert team_after.staff_user_ids == ["u_coach_1"], (
+        "re-selecting the team changed staff_user_ids — "
+        "selection must never write membership (D14)"
     )

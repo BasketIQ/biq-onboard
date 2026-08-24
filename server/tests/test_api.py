@@ -205,9 +205,10 @@ def test_update_club_preserves_deactivated_status(admin_client):
     """W2.0b regression: renaming a deactivated club must not reactivate it
     or erase audit provenance (created_by, deactivated_at, deactivated_by).
 
-    upsert_club does set(club.model_dump()) with no merge=True, so any field
-    not carried explicitly is destroyed. status defaults to "active", which
-    silently reactivates a deactivated club on a back-office rename.
+    update_club now uses merge_club_fields (biq-core 0.12.0), which writes
+    only the fields the caller sent. status defaults to "active" on the Club
+    model, so a full-overwrite upsert would silently reactivate a deactivated
+    club on a back-office rename.
     """
     from biq_core.org import Club
 
@@ -252,6 +253,43 @@ def test_update_club_preserves_deactivated_status(admin_client):
     )
     assert club.deactivated_at == "2026-08-01T00:00:00Z"
     assert club.deactivated_by == "admin@basketiq.io"
+
+
+def test_update_club_website_preserves_status_and_created_by(admin_client):
+    """W2.0b+ regression: writing website via merge_club_fields must not
+    disturb status or created_by.
+
+    merge_club_fields (biq-core 0.12.0) writes only the fields the caller
+    sent. This test proves the helper does not clobber unrelated fields when
+    a future admin path writes website alone.
+    """
+    from biq_core.org import Club
+
+    from biq_onboard_server import org
+
+    registry = org.get_registry()
+    registry.upsert_club(
+        Club(
+            id="club_web",
+            name="Web Club",
+            status="deactivated",
+            created_by="founder@test.es",
+        )
+    )
+
+    # Write website directly via merge_club_fields — the path a future admin
+    # endpoint or W2.1a-ii would use.
+    registry.merge_club_fields("club_web", {"website": "https://example.es/"})
+
+    club = registry.get_club("club_web")
+    assert club is not None
+    assert club.website == "https://example.es/"
+    assert club.status == "deactivated", (
+        f"website write reactivated a deactivated club: status={club.status!r}"
+    )
+    assert club.created_by == "founder@test.es", (
+        f"website write erased created_by: {club.created_by!r}"
+    )
 
 
 # ─── Users ───────────────────────────────────────────────────────────────────

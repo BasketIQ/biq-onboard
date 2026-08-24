@@ -58,32 +58,24 @@ def get_club(club_id: str, request: Request) -> dict:
 @router.put("/{club_id}")
 def update_club(club_id: str, payload: ClubUpdate, request: Request) -> dict:
     require_admin(request, club_id)
-    from biq_core.org import Club
-
     registry = org.get_registry()
     existing = registry.get_club(club_id)
     if existing is None:
         from fastapi import HTTPException
 
         raise HTTPException(status_code=404, detail="club not found")
-    # Carry every field we do not intend to change. biq-core 0.11.0 made
-    # upsert_club partial-write (model_dump(exclude_unset=True) + merge), so
-    # omitting a field would now preserve it rather than destroy it — but we
-    # carry explicitly anyway so the write does not depend on which biq-core
-    # is installed. Getting this wrong is severe: `status` defaults to
-    # "active" on the Club model, so a dropped field would silently reactivate
-    # a deactivated club on rename.
-    club = Club(
-        id=club_id,
-        name=payload.name or existing.name,
-        short_name=payload.short_name or existing.short_name,
-        status=existing.status,
-        created_by=existing.created_by,
-        deactivated_at=existing.deactivated_at,
-        deactivated_by=existing.deactivated_by,
-    )
-    registry.upsert_club(club)
-    return {"ok": True, "club": {"id": club.id, "name": club.name}}
+    # Use merge_club_fields (biq-core 0.12.0) so only the fields the caller
+    # sent are written; every other field (status, created_by, deactivated_*,
+    # website, theme, theme_job) is preserved by construction. The get_club
+    # check above handles the not-found case before merge_club_fields would
+    # raise KeyError.
+    fields: dict[str, object] = {}
+    if payload.name is not None:
+        fields["name"] = payload.name
+    if payload.short_name is not None:
+        fields["short_name"] = payload.short_name
+    registry.merge_club_fields(club_id, fields)
+    return {"ok": True, "club": {"id": club_id, "name": payload.name or existing.name}}
 
 
 @router.delete("/{club_id}")

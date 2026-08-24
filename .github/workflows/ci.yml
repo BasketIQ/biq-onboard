@@ -4,14 +4,24 @@ name: CI
 # from private GAR via WIF), including the regression test that prevents
 # update_club from erasing audit provenance.
 #
-# Uses the org-wide `pick-runner` pattern (rule 19) with safe fallback to
-# `ubuntu-latest`. The first OEE-1c CI run picked `integration2` and the
-# `server` job sat queued indefinitely — the repo was not in the self-hosted
-# runners' allow-list at that time. The `pick-runner` action handles this
-# safely: if all self-hosted runners are busy/offline or the repo lacks
-# access, it returns `ubuntu-latest` and the job runs on a hosted runner
-# instead of hanging. Revisit if biq-onboard is added to the runner
-# allow-list and the hosted minutes become a concern.
+# ── Rule 19 exception ──────────────────────────────────────────────────
+# This workflow does NOT use the org-wide `pick-runner` pattern
+# (rule 19). The first OEE-1c CI run that used pick-runner selected
+# `integration2` (the action saw it as free/online at org level), but
+# the `server` job sat queued indefinitely — the runner could not
+# accept jobs from this repo. Forcing the pattern makes CI hang, which
+# is worse than a documented exception.
+#
+# This was confirmed twice: run 32673723140 (Architect's original
+# attempt) and run 32677342847 (this audit's attempt to restore the
+# pattern). Both had `Pick runner` complete successfully, then `server`
+# queued indefinitely.
+#
+# To remove this exception: add `biq-onboard` to the self-hosted
+# runners' repository allow-list (org settings → Actions → Runners →
+# Default group → configure access). Then replace this workflow with
+# the standard pick-runner pattern (see `deploy.yml` in this repo for
+# the template).
 
 on:
   pull_request:
@@ -23,44 +33,13 @@ permissions:
   id-token: write   # WIF, to read biq-core[org] from the private GAR index
 
 jobs:
-  pick:
-    name: Pick runner
-    runs-on: ubuntu-latest
-    outputs:
-      runner: ${{ steps.runner.outputs.runner }}
-    steps:
-      - name: Checkout (action only)
-        uses: actions/checkout@v4
-        with:
-          sparse-checkout: |
-            .github/actions/pick-runner
-          sparse-checkout-cone-mode: false
-      - id: runner
-        uses: ./.github/actions/pick-runner
-        with:
-          token: ${{ secrets.RUNNER_PICK_PAT }}
-          development_runner_name: ${{ vars.DEVELOPMENT_RUNNER_NAME }}
-          integration_runner_name: ${{ vars.INTEGRATION_RUNNER_NAME }}
-          integration2_runner_name: ${{ vars.INTEGRATION2_RUNNER_NAME }}
-          prefer_development: false
-          netdata_token: ${{ secrets.NETDATA_CLOUD_API_TOKEN }}
-          netdata_space_id: ${{ vars.NETDATA_CLOUD_SPACE_ID }}
-          netdata_room_id: ${{ vars.NETDATA_CLOUD_ROOM_ID }}
-          netdata_node_integration2: ${{ vars.NETDATA_NODE_INTEGRATION2 }}
-          netdata_node_integration: ${{ vars.NETDATA_NODE_INTEGRATION }}
-          netdata_node_development: ${{ vars.NETDATA_NODE_DEVELOPMENT }}
-
   server:
-    needs: [pick]
-    runs-on: ${{ needs.pick.outputs.runner == 'ubuntu-latest' && fromJSON('["ubuntu-latest"]') || fromJSON(format('["self-hosted","{0}"]', needs.pick.outputs.runner)) }}
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       id-token: write
     steps:
       - uses: actions/checkout@v4
-
-      - name: Setup self-hosted env (toolcache)
-        uses: ./.github/actions/setup-self-hosted-env
 
       - uses: actions/setup-python@v5
         with:

@@ -79,30 +79,32 @@ not an asset. The `__main__` block was removed with it. The module
 docstring was updated to record that the batch entry point was removed
 rather than shipped untested.
 
-### 3.3 `biq-onboard` CI workflow — rule 19 violation, fixed
+### 3.3 `biq-onboard` CI workflow — inference confirmed, exception documented
 
-**Verdict: inference confirmed, but the fix violated rule 19. Restored
-pick-runner pattern.**
+**Verdict: inference confirmed. The `ubuntu-latest` pin is kept as a
+documented rule 19 exception.**
 
 The architect's inference was correct: CI run `32673723140` shows
 `Pick runner` completed successfully, then `server` sat `queued`
 indefinitely. The pick-runner action selected a self-hosted runner, but
 the repo was not in the runner's allow-list, so the job never started.
 
-However, the fix — pinning `runs-on: ubuntu-latest` and removing the
-`pick` job — violates rule 19 (`19-github-actions-runners.md`), which is
-mandatory org-wide: *"Aplica a todos los repos de BasketIQ con GitHub
-Actions."* The only documented exception is `hermes-*`. The rule also
-notes that `pick-runner` is safe by construction: if all self-hosted
-runners are busy/offline or the repo lacks access, it returns
-`ubuntu-latest` — exactly the fallback the architect wanted, but through
-the sanctioned mechanism.
+I attempted to restore the pick-runner pattern (rule 19 compliance).
+Run `32677342847` reproduced the exact same failure: `Pick runner`
+completed, `server` queued indefinitely. The pick-runner action sees
+`integration2` as free/online at the org level, but the runner cannot
+accept jobs from this repo. Forcing the pattern makes CI hang, which is
+worse than a documented exception.
 
-Restored the `pick` job and the `runs-on` inline expression, matching the
-pattern already used in `biq-onboard`'s own `deploy.yml` and
-`deploy-staging.yml`. The comment in `ci.yml` documents why: the repo was
-not in the allow-list at OEE-1c time, and `pick-runner` handles that
-safely.
+Rule 19 itself says: *"the exception should say why rather than silently
+diverging."* The architect's original fix was correct in substance
+(`ubuntu-latest`) but silent on the rule. The fix in this audit keeps
+`ubuntu-latest` and adds an explicit exception block at the top of
+`ci.yml` explaining:
+- what was attempted (pick-runner pattern);
+- what happened (queued indefinitely, twice);
+- what needs to change to remove the exception (add `biq-onboard` to the
+  self-hosted runners' repository allow-list in org settings).
 
 ### 3.4 `routers/clubs.py` — test already exists, fine
 
@@ -173,8 +175,10 @@ Changes in this audit PR (biq-onboard only):
 - `server/src/biq_onboard_server/migrate_staff.py`: removed 94 lines
   (untested batch `migrate_staff_membership()` + `__main__` block),
   updated docstring.
-- `.github/workflows/ci.yml`: restored `pick-runner` pattern (rule 19),
-  added `setup-self-hosted-env` step.
+- `.github/workflows/ci.yml`: kept `runs-on: ubuntu-latest` (rule 19
+  exception documented with evidence and remediation path). The
+  pick-runner pattern was attempted and failed twice — the repo cannot
+  dispatch to the self-hosted runners selected by the action.
 
 No changes to `biq-app` or `biq-season-plan` — their OEE-1c diffs are
 clean (version bump + `timezone` on `team_to_record`).

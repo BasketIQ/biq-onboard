@@ -1,8 +1,15 @@
 name: CI
 
 # Quality gate on every PR and push to main: server tests (biq-core[org]
-# from private GAR via WIF) + the W2.0b regression test that prevents
+# from private GAR via WIF), including the regression test that prevents
 # update_club from erasing audit provenance.
+#
+# Runs on ubuntu-latest rather than the org `pick-runner` pattern (rule 19).
+# This repo had no CI at all until OEE-1c, and it is not in the self-hosted
+# runners' repository allow-list: the first run picked `integration2` and the
+# job sat queued indefinitely while the host itself was up. Nothing here needs
+# a self-hosted runner — WIF, gcloud and the GAR install all work on a hosted
+# one. Revisit if biq-onboard is added to the runner allow-list.
 
 on:
   pull_request:
@@ -14,44 +21,13 @@ permissions:
   id-token: write   # WIF, to read biq-core[org] from the private GAR index
 
 jobs:
-  pick:
-    name: Pick runner
-    runs-on: ubuntu-latest
-    outputs:
-      runner: ${{ steps.runner.outputs.runner }}
-    steps:
-      - name: Checkout (action only)
-        uses: actions/checkout@v4
-        with:
-          sparse-checkout: |
-            .github/actions/pick-runner
-          sparse-checkout-cone-mode: false
-      - id: runner
-        uses: ./.github/actions/pick-runner
-        with:
-          token: ${{ secrets.RUNNER_PICK_PAT }}
-          development_runner_name: ${{ vars.DEVELOPMENT_RUNNER_NAME }}
-          integration_runner_name: ${{ vars.INTEGRATION_RUNNER_NAME }}
-          integration2_runner_name: ${{ vars.INTEGRATION2_RUNNER_NAME }}
-          prefer_development: false
-          netdata_token: ${{ secrets.NETDATA_CLOUD_API_TOKEN }}
-          netdata_space_id: ${{ vars.NETDATA_CLOUD_SPACE_ID }}
-          netdata_room_id: ${{ vars.NETDATA_CLOUD_ROOM_ID }}
-          netdata_node_integration2: ${{ vars.NETDATA_NODE_INTEGRATION2 }}
-          netdata_node_integration: ${{ vars.NETDATA_NODE_INTEGRATION }}
-          netdata_node_development: ${{ vars.NETDATA_NODE_DEVELOPMENT }}
-
   server:
-    needs: [pick]
-    runs-on: ${{ needs.pick.outputs.runner == 'ubuntu-latest' && fromJSON('["ubuntu-latest"]') || fromJSON(format('["self-hosted","{0}"]', needs.pick.outputs.runner)) }}
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       id-token: write
     steps:
       - uses: actions/checkout@v4
-
-      - name: Setup self-hosted env (toolcache)
-        uses: ./.github/actions/setup-self-hosted-env
 
       - uses: actions/setup-python@v5
         with:

@@ -9,78 +9,19 @@ Idempotent: running it twice produces the same membership — a user already
 in ``staff_user_ids`` is not re-added, and a user who was removed after the
 first migration is not re-seeded (the script only adds, never removes).
 
-Usage:
-
-*Production (Firestore) — per club, via the admin API:*
+Usage — per club, via the admin API:
 
     POST /api/admin/clubs/{club_id}/teams/migrate-staff
 
-This is the **only** supported production path. The Org Registry exposes no
-"list all clubs" primitive, so there is no way to enumerate clubs against
-Firestore; the batch entry point below therefore refuses to run on it rather
-than pretend to have migrated something.
-
-*Local / tests (memory backend) — batch across every club in the store:*
-
-    BIQ_ORG_STORE=memory python -m biq_onboard_server.migrate_staff
-
-The script prints a summary and exits 0 on success, 1 on error.
+This is the only supported path. The Org Registry exposes no
+``list_clubs`` primitive, so there is no way to enumerate clubs against
+Firestore; a batch entry point was removed rather than ship untested code
+that refused to run in production.
 """
 
 from __future__ import annotations
 
-import sys
-
 from . import org
-
-
-def migrate_staff_membership() -> dict:
-    """Seed ``staff_user_ids`` from per-coach ``team_ids`` selections.
-
-    For each club, for each user with a ``team_ids`` selection, add the
-    user's id to each selected team's ``staff_user_ids`` (if not already
-    present). Uses partial-write (``upsert_team`` with only the fields
-    that changed) so other fields are preserved.
-
-    Returns a summary dict with counts.
-    """
-    registry = org.get_registry()
-
-    # Club enumeration is only possible on the memory backend, whose store is
-    # a plain ``dict[club_id, dict[team_id, Team]]``. The Org Registry protocol
-    # has no ``list_clubs`` primitive, so against Firestore there is nothing to
-    # iterate — callers must go per club through the admin endpoint. Refuse
-    # loudly rather than report a successful migration that touched nothing.
-    store = getattr(registry, "_teams", None)
-    if store is None:
-        print(
-            "ERROR: batch mode requires the memory backend (BIQ_ORG_STORE=memory). "
-            "For Firestore, migrate one club at a time via "
-            "POST /api/admin/clubs/{club_id}/teams/migrate-staff.",
-            file=sys.stderr,
-        )
-        return {"error": "batch_mode_requires_memory_backend"}
-
-    clubs_processed: set[str] = set()
-    teams_updated = 0
-    users_seeded = 0
-    additions = 0
-
-    for club_id in list(store):
-        clubs_processed.add(club_id)
-        teams_this, users_this, additions_this = _migrate_club(registry, club_id)
-        teams_updated += teams_this
-        users_seeded += users_this
-        additions += additions_this
-
-    summary = {
-        "clubs_processed": len(clubs_processed),
-        "teams_updated": teams_updated,
-        "users_seeded": users_seeded,
-        "additions": additions,
-    }
-    print(f"Migration complete: {summary}")
-    return summary
 
 
 def _migrate_club(registry, club_id: str) -> tuple[int, int, int]:
@@ -153,9 +94,3 @@ def migrate_club(club_id: str) -> dict:
     }
     print(f"Club migration complete: {summary}")
     return summary
-
-
-if __name__ == "__main__":
-    result = migrate_staff_membership()
-    if "error" in result:
-        sys.exit(1)

@@ -4,12 +4,24 @@ name: CI
 # from private GAR via WIF), including the regression test that prevents
 # update_club from erasing audit provenance.
 #
-# Runs on ubuntu-latest rather than the org `pick-runner` pattern (rule 19).
-# This repo had no CI at all until OEE-1c, and it is not in the self-hosted
-# runners' repository allow-list: the first run picked `integration2` and the
-# job sat queued indefinitely while the host itself was up. Nothing here needs
-# a self-hosted runner — WIF, gcloud and the GAR install all work on a hosted
-# one. Revisit if biq-onboard is added to the runner allow-list.
+# ── Rule 19 exception ──────────────────────────────────────────────────
+# This workflow does NOT use the org-wide `pick-runner` pattern
+# (rule 19). The first OEE-1c CI run that used pick-runner selected
+# `integration2` (the action saw it as free/online at org level), but
+# the `server` job sat queued indefinitely — the runner could not
+# accept jobs from this repo. Forcing the pattern makes CI hang, which
+# is worse than a documented exception.
+#
+# This was confirmed twice: run 32673723140 (Architect's original
+# attempt) and run 32677342847 (this audit's attempt to restore the
+# pattern). Both had `Pick runner` complete successfully, then `server`
+# queued indefinitely.
+#
+# To remove this exception: add `biq-onboard` to the self-hosted
+# runners' repository allow-list (org settings → Actions → Runners →
+# Default group → configure access). Then replace this workflow with
+# the standard pick-runner pattern (see `deploy.yml` in this repo for
+# the template).
 
 on:
   pull_request:

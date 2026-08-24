@@ -66,10 +66,21 @@ def update_club(club_id: str, payload: ClubUpdate, request: Request) -> dict:
         from fastapi import HTTPException
 
         raise HTTPException(status_code=404, detail="club not found")
+    # Carry every field we do not intend to change. biq-core 0.11.0 made
+    # upsert_club partial-write (model_dump(exclude_unset=True) + merge), so
+    # omitting a field would now preserve it rather than destroy it — but we
+    # carry explicitly anyway so the write does not depend on which biq-core
+    # is installed. Getting this wrong is severe: `status` defaults to
+    # "active" on the Club model, so a dropped field would silently reactivate
+    # a deactivated club on rename.
     club = Club(
         id=club_id,
         name=payload.name or existing.name,
         short_name=payload.short_name or existing.short_name,
+        status=existing.status,
+        created_by=existing.created_by,
+        deactivated_at=existing.deactivated_at,
+        deactivated_by=existing.deactivated_by,
     )
     registry.upsert_club(club)
     return {"ok": True, "club": {"id": club.id, "name": club.name}}

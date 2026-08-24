@@ -1,0 +1,56 @@
+name: CI
+
+# Quality gate on every PR and push to main: server tests (biq-core[org]
+# from private GAR via WIF), including the regression test that prevents
+# update_club from erasing audit provenance.
+#
+# Runs on ubuntu-latest rather than the org `pick-runner` pattern (rule 19).
+# This repo had no CI at all until OEE-1c, and it is not in the self-hosted
+# runners' repository allow-list: the first run picked `integration2` and the
+# job sat queued indefinitely while the host itself was up. Nothing here needs
+# a self-hosted runner — WIF, gcloud and the GAR install all work on a hosted
+# one. Revisit if biq-onboard is added to the runner allow-list.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  id-token: write   # WIF, to read biq-core[org] from the private GAR index
+
+jobs:
+  server:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Authenticate to Google Cloud (biq-core[org] lives in private GAR)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_BIQ_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOYER_SA }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Install server (test extra) — biq-core from GAR (ADR-009)
+        run: |
+          TOKEN="$(gcloud auth print-access-token)"
+          pip install "./server[test]" \
+            --extra-index-url "https://oauth2accesstoken:${TOKEN}@europe-west1-python.pkg.dev/basketiq-platform-prod/basketiq-python/simple/"
+
+      - name: Server tests (in-memory store)
+        env:
+          BIQ_ORG_STORE: memory
+          BIQ_ROLES_STORE: memory
+        run: pytest -q
+        working-directory: server

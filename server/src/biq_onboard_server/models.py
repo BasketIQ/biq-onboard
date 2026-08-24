@@ -36,6 +36,8 @@ class TeamUpdate(BaseModel):
     category: str | None = None
     gender: str | None = None
     label: str | None = None
+    timezone: str | None = None
+    staff_user_ids: list[str] | None = None
 
 
 # ─── User ───────────────────────────────────────────────────────────────────

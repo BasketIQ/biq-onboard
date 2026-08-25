@@ -13,7 +13,7 @@ from fastapi import FastAPI
 from starlette.middleware.sessions import SessionMiddleware
 
 from . import auth
-from .routers import clubs, onboarding, roles, season, teams, users
+from .routers import clubs, onboarding, roles, season, teams, theme, users
 
 
 def create_app() -> FastAPI:
@@ -43,6 +43,7 @@ def create_app() -> FastAPI:
     app.include_router(roles.router, prefix="/api/admin", tags=["admin-roles"])
     app.include_router(onboarding.router, prefix="/api/admin", tags=["admin-onboarding"])
     app.include_router(season.router, prefix="/api/admin", tags=["admin-season"])
+    app.include_router(theme.router, prefix="/api/admin", tags=["admin-theme"])
 
     return app
 

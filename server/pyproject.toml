@@ -13,6 +13,7 @@ dependencies = [
     "httpx>=0.27.0",
     "itsdangerous>=2.1.0",
     "biq-core[org]==0.12.0",
+    "google-cloud-tasks>=2.16",
 ]
 
 [project.optional-dependencies]

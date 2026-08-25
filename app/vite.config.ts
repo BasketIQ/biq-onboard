@@ -1,8 +1,11 @@
 import { defineConfig } from 'vite';
 
+// Standalone app build for local preview / static hosting.
 export default defineConfig({
-  root: '.',
+  base: './',
   build: {
-    outDir: 'dist',
+    outDir: '../dist/app',
+    emptyOutDir: true,
+    cssCodeSplit: false,
   },
 });

@@ -1,15 +1,19 @@
 import { defineConfig } from 'vite';
 
-// Library build: produces a single self-contained ESM bundle consumed by
-// the biq-app shell. Mirrors the biq-methodology pattern.
+// Embeddable library build for the biq-app module shell.
+// Produces dist/embed/biq-onboard.js that defines <biq-onboard-app>.
+// Mirrors the biq-methodology pattern.
 export default defineConfig({
+  base: './',
+  publicDir: false,
   build: {
+    outDir: '../dist/embed',
+    emptyOutDir: true,
+    cssCodeSplit: false,
     lib: {
       entry: 'src/embed.ts',
       formats: ['es'],
       fileName: () => 'biq-onboard.js',
     },
-    outDir: 'dist',
-    emptyOutDir: true,
   },
 });

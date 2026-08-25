@@ -19,7 +19,8 @@ COPY server/ /srv/server/
 RUN pip install --no-cache-dir --no-index --find-links /srv/wheelhouse biq-core[org] \
  && pip install --no-cache-dir "/srv/server[firestore]"
 
-COPY --from=builder /build/dist/ /srv/static/
+COPY --from=builder /dist/app/ /srv/static/
+COPY --from=builder /dist/embed/ /srv/static/embed/
 ENV STATIC_DIR=/srv/static
 ENV PORT=8080
 EXPOSE 8080

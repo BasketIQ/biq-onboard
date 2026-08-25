@@ -286,3 +286,36 @@ def test_enqueue_production_calls_cloud_tasks(monkeypatch):
 
     # Clean up
     monkeypatch.delenv("BIQ_CLOUD_TASKS_QUEUE", raising=False)
+
+
+# ─── Logo rights affirmation (ADDENDUM-06 section C3) ───────────────────────
+
+
+def test_affirm_logo_rights_404_without_theme(admin_client, club_id):
+    """Logo rights endpoint requires an existing theme with a logo."""
+    r = admin_client.post(
+        f"/api/admin/clubs/{club_id}/theme/logo-rights",
+        json={"affirmed": True},
+    )
+    assert r.status_code == 404
+
+
+def test_affirm_logo_rights_404_without_logo(admin_client, club_id):
+    """Logo rights endpoint requires a theme with a logo."""
+    # Create a theme without a logo (manual override)
+    admin_client.put(
+        f"/api/admin/clubs/{club_id}/theme",
+        json={"seed_brand": "#FF5A00"},
+    )
+    r = admin_client.post(
+        f"/api/admin/clubs/{club_id}/theme/logo-rights",
+        json={"affirmed": True},
+    )
+    assert r.status_code == 404  # no logo in the theme
+
+
+def test_affirm_logo_rights_requires_auth(client):
+    assert client.post(
+        "/api/admin/clubs/any/theme/logo-rights",
+        json={"affirmed": True},
+    ).status_code == 401

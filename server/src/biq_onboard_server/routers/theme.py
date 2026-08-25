@@ -77,29 +77,94 @@ def _cloud_tasks_config() -> dict:
     }
 
 
+# Module-level Cloud Tasks client — lazily initialised so the import
+# never fails in dev/test environments without GCP credentials.
+_tasks_client = None
+
+
+def _get_tasks_client():
+    """Lazily build and cache the Cloud Tasks client.
+
+    Returns None if google-cloud-tasks is not installed, so the caller
+    can fall back to the synthetic dev path.
+    """
+    global _tasks_client
+    if _tasks_client is not None:
+        return _tasks_client
+    try:
+        from google.cloud import tasks_v2
+        _tasks_client = tasks_v2.CloudTasksClient()
+        return _tasks_client
+    except Exception:
+        return None
+
+
 def _enqueue_generation_task(club_id: str, source_url: str) -> str:
     """Enqueue a club-theme generation task to Cloud Tasks.
 
-    Returns the task ID. In dev (no GCP config), returns a synthetic ID.
+    Returns the task ID. When ``BIQ_CLOUD_TASKS_QUEUE`` is unset (local
+    dev), returns a synthetic ID — the job is not actually enqueued.
+    When the env var is set, creates a real Cloud Tasks task targeting
+    the Cloud Run Job URL with payload ``{ clubId, sourceUrl }``.
+
+    The explicit env-var gate (rather than probing for a project) makes
+    the dev/prod boundary unambiguous: no env var = synthetic, env var
+    = real Cloud Tasks call.
     """
     config = _cloud_tasks_config()
 
-    if not config["project_id"] or not config["job_url"]:
-        # Dev mode: no Cloud Tasks configured. Return a synthetic task ID.
+    # Explicit dev-mode gate: if the queue env var is not set, we are in
+    # local development and must not attempt a real Cloud Tasks call.
+    queue_env = os.environ.get("BIQ_CLOUD_TASKS_QUEUE", "")
+    if not queue_env:
         return f"dev-task-{int(time.time())}"
 
-    # In production, this would use the Cloud Tasks client library to
-    # create a task targeting the Cloud Run Job URL with the payload.
-    # The task payload is { clubId, sourceUrl }.
-    #
-    # For now, we store the pending job state and let the job be
-    # triggered manually or by a future Cloud Tasks integration.
-    # The actual gcloud tasks create call requires the google-cloud-tasks
-    # Python library, which is not yet a dependency.
-    #
-    # TODO: Add google-cloud-tasks dependency and implement the actual
-    # enqueue call once the job is deployed.
-    return f"task-{club_id}-{int(time.time())}"
+    # Production path: create a real Cloud Tasks task.
+    client = _get_tasks_client()
+    if client is None:
+        # Library not available — fall back to synthetic rather than
+        # crashing the request. This should not happen in production
+        # (google-cloud-tasks is in pyproject.toml dependencies).
+        return f"dev-task-{int(time.time())}"
+
+    import json as _json
+    from google.cloud import tasks_v2
+    from google.protobuf import timestamp_pb2
+
+    # Build the queue path
+    queue_path = client.queue_path(
+        config["project_id"],
+        config["location"],
+        config["queue"],
+    )
+
+    # Task payload — the Cloud Run Job receives this as its body
+    payload = _json.dumps({
+        "clubId": club_id,
+        "sourceUrl": source_url,
+    }).encode()
+
+    # Construct the task
+    task = tasks_v2.Task(
+        name=f"{queue_path}/tasks/club-theme-{club_id}-{int(time.time())}",
+        http_request=tasks_v2.HttpRequest(
+            http_method=tasks_v2.HttpMethod.POST,
+            url=config["job_url"],
+            headers={"Content-Type": "application/json"},
+            body=payload,
+            oidc_token=tasks_v2.OidcToken(
+                service_account_email=config["service_account_email"],
+            ),
+        ),
+    )
+
+    # Use a deterministic name to avoid duplicate tasks on retry
+    created = client.create_task(
+        request={"parent": queue_path, "task": task},
+    )
+
+    # Extract the task ID from the full name
+    return created.name.split("/")[-1]
 
 
 # ─── Lease management (ADDENDUM-06 section C5.2) ────────────────────────

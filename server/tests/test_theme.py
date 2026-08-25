@@ -191,3 +191,98 @@ def test_delete_theme_reverts(admin_client, club_id):
 def test_delete_theme_404_for_nonexistent_club(admin_client):
     r = admin_client.delete("/api/admin/clubs/nonexistent/theme")
     assert r.status_code == 404
+
+
+# ─── Cloud Tasks integration ────────────────────────────────────────────────
+
+
+def test_enqueue_dev_mode_returns_synthetic_id(monkeypatch):
+    """When BIQ_CLOUD_TASKS_QUEUE is unset, _enqueue_generation_task
+    returns a synthetic dev-mode ID and does not call Cloud Tasks."""
+    import os
+    monkeypatch.delenv("BIQ_CLOUD_TASKS_QUEUE", raising=False)
+    from biq_onboard_server.routers import theme as theme_mod
+    # Reset cached client
+    monkeypatch.setattr(theme_mod, "_tasks_client", None)
+    task_id = theme_mod._enqueue_generation_task("club_x", "https://example.com")
+    assert task_id.startswith("dev-task-")
+
+
+def test_enqueue_production_calls_cloud_tasks(monkeypatch):
+    """When BIQ_CLOUD_TASKS_QUEUE is set, _enqueue_generation_task
+    creates a real Cloud Tasks task via the client library."""
+    import json
+
+    # Set the env var to enable the production path
+    monkeypatch.setenv("BIQ_CLOUD_TASKS_QUEUE", "club-theme-generation")
+    monkeypatch.setenv("GCP_PROJECT_ID", "test-project")
+    monkeypatch.setenv("GCP_TASKS_LOCATION", "europe-west1")
+    monkeypatch.setenv("CLUB_THEME_JOB_URL", "https://job.run.app/gen")
+    monkeypatch.setenv("GCP_DEPLOYER_SA", "deployer@test-project.iam.gserviceaccount.com")
+
+    from biq_onboard_server.routers import theme as theme_mod
+
+    # Mock the Cloud Tasks client
+    class MockCreatedTask:
+        name = "projects/test-project/locations/europe-west1/queues/club-theme-generation/tasks/fake-task-123"
+
+    class MockHttpRequest:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class MockTask:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class MockCloudTasksClient:
+        def __init__(self):
+            self.create_task_calls = []
+
+        def queue_path(self, project, location, queue):
+            return f"projects/{project}/locations/{location}/queues/{queue}"
+
+        def create_task(self, request):
+            self.create_task_calls.append(request)
+            return MockCreatedTask()
+
+    # Build a mock module to replace google.cloud.tasks_v2
+    class MockTasksV2:
+        class Task:
+            def __init__(self, **kwargs):
+                pass
+
+        class HttpRequest:
+            def __init__(self, **kwargs):
+                pass
+
+        class HttpMethod:
+            POST = "POST"
+
+        class OidcToken:
+            def __init__(self, **kwargs):
+                pass
+
+        CloudTasksClient = MockCloudTasksClient
+
+    mock_client = MockCloudTasksClient()
+
+    # Patch _get_tasks_client to return our mock
+    monkeypatch.setattr(theme_mod, "_get_tasks_client", lambda: mock_client)
+    # Patch the tasks_v2 import inside the function
+    import sys
+    monkeypatch.setitem(sys.modules, "google.cloud.tasks_v2", MockTasksV2())
+
+    task_id = theme_mod._enqueue_generation_task("club_test", "https://example.com")
+
+    # Verify the task ID is from the created task
+    assert task_id == "fake-task-123"
+
+    # Verify create_task was called with the right payload
+    assert len(mock_client.create_task_calls) == 1
+    call = mock_client.create_task_calls[0]
+    assert "parent" in call
+    assert "club-theme-generation" in call["parent"]
+    assert "task" in call
+
+    # Clean up
+    monkeypatch.delenv("BIQ_CLOUD_TASKS_QUEUE", raising=False)

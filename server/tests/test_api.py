@@ -328,3 +328,62 @@ def test_create_and_list_teams(admin_client):
     r = admin_client.get("/api/admin/clubs/club_t/teams")
     assert r.status_code == 200
     assert r.json()["total"] == 1
+
+
+# ─── Team archive / unarchive (business remediation B) ───────────────────────
+
+
+def _make_team(admin_client, club_id="club_arch", team_id="team_arch_1"):
+    admin_client.post("/api/admin/clubs", json={"id": club_id, "name": "Club Arch"})
+    admin_client.post(
+        f"/api/admin/clubs/{club_id}/teams",
+        json={"id": team_id, "club_id": club_id, "name": "Arch Team"},
+    )
+    return club_id, team_id
+
+
+def test_archive_team_sets_archived_true(admin_client):
+    from biq_onboard_server import org
+
+    club_id, team_id = _make_team(admin_client)
+    r = admin_client.put(f"/api/admin/clubs/{club_id}/teams/{team_id}/archive")
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "team_id": team_id, "archived": True}
+
+    team = org.get_registry().get_team(club_id, team_id)
+    assert team is not None
+    assert team.archived is True
+
+
+def test_unarchive_team_sets_archived_false(admin_client):
+    from biq_onboard_server import org
+
+    club_id, team_id = _make_team(admin_client)
+    # Archive first, then unarchive.
+    admin_client.put(f"/api/admin/clubs/{club_id}/teams/{team_id}/archive")
+    r = admin_client.put(f"/api/admin/clubs/{club_id}/teams/{team_id}/unarchive")
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "team_id": team_id, "archived": False}
+
+    team = org.get_registry().get_team(club_id, team_id)
+    assert team is not None
+    assert team.archived is False
+
+
+def test_archive_nonexistent_team_404(admin_client):
+    admin_client.post("/api/admin/clubs", json={"id": "club_404", "name": "Club 404"})
+    r = admin_client.put("/api/admin/clubs/club_404/teams/no_such_team/archive")
+    assert r.status_code == 404
+
+
+def test_archive_team_requires_admin(client, admin_client):
+    """A non-admin authenticated user gets 403."""
+    club_id, team_id = _make_team(admin_client, club_id="club_403", team_id="team_403_1")
+    # Create a plain (no roles) user that can log in but is not an admin.
+    admin_client.post(
+        f"/api/admin/clubs/{club_id}/users",
+        json={"id": "plain_" + club_id, "club_id": club_id, "password": "secret123"},
+    )
+    client.post("/api/auth/login", json={"username": "plain_" + club_id, "password": "secret123"})
+    r = client.put(f"/api/admin/clubs/{club_id}/teams/{team_id}/archive")
+    assert r.status_code == 403

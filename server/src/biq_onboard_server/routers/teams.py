@@ -99,6 +99,62 @@ def delete_team(club_id: str, team_id: str, request: Request) -> dict:
     return {"ok": True, "team_id": team_id}
 
 
+@router.put("/{team_id}/archive")
+def archive_team(club_id: str, team_id: str, request: Request) -> dict:
+    """Archive or unarchive a team (business remediation B).
+
+    Sets archived=true on the team. Archived teams have their future
+    operational occurrences and actions cancelled by the OEE engine.
+    """
+    require_admin(request, club_id)
+    from biq_core.org import Team
+
+    registry = org.get_registry()
+    existing = registry.get_team(club_id, team_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="team not found")
+
+    team = Team(
+        id=team_id,
+        club_id=club_id,
+        name=existing.name,
+        category=existing.category,
+        gender=existing.gender,
+        label=existing.label,
+        timezone=existing.timezone,
+        staff_user_ids=existing.staff_user_ids,
+        archived=True,
+    )
+    registry.upsert_team(team)
+    return {"ok": True, "team_id": team_id, "archived": True}
+
+
+@router.put("/{team_id}/unarchive")
+def unarchive_team(club_id: str, team_id: str, request: Request) -> dict:
+    """Unarchive a team — resume normal operational reconciliation."""
+    require_admin(request, club_id)
+    from biq_core.org import Team
+
+    registry = org.get_registry()
+    existing = registry.get_team(club_id, team_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="team not found")
+
+    team = Team(
+        id=team_id,
+        club_id=club_id,
+        name=existing.name,
+        category=existing.category,
+        gender=existing.gender,
+        label=existing.label,
+        timezone=existing.timezone,
+        staff_user_ids=existing.staff_user_ids,
+        archived=False,
+    )
+    registry.upsert_team(team)
+    return {"ok": True, "team_id": team_id, "archived": False}
+
+
 @router.post("/migrate-staff")
 def migrate_staff(club_id: str, request: Request) -> dict:
     """One-shot membership migration (OEE-1c · A4).

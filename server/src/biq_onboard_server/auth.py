@@ -66,7 +66,7 @@ def require_admin(request: Request, club_id: str | None = None) -> str:
         return user
     if club_id:
         scope = f"club:{club_id}"
-        caps = effective_capabilities(org.get_registry(), org.get_roles(), user, scope)
+        caps = effective_capabilities(user, scope, org.get_roles())
         if "club.admin" not in caps and "roles.manage" not in caps:
             raise HTTPException(
                 status_code=403,

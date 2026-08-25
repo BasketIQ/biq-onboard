@@ -1,0 +1,370 @@
+/* biq-onboard-app styles — BasketSpark v1 canonical tokens.
+   Uses --biq-* custom properties provided by the shell :root. */
+
+:host {
+  display: block;
+  --onboard-radius: 12px;
+  --onboard-gap: 16px;
+}
+
+.onboard-app {
+  max-width: 480px;
+  margin: 0 auto;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--onboard-gap);
+}
+
+.onboard-nav {
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  background: var(--biq-surface-2);
+  border-radius: var(--onboard-radius);
+}
+
+.onboard-nav-item {
+  flex: 1;
+  padding: 10px 16px;
+  border: 0;
+  background: transparent;
+  color: var(--biq-muted);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.onboard-nav-item.active {
+  background: var(--biq-surface-1);
+  color: var(--biq-text);
+  box-shadow: var(--biq-shadow-sm);
+}
+
+.onboard-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--onboard-gap);
+}
+
+.onboard-section-title {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--biq-text);
+}
+
+.onboard-card {
+  background: var(--biq-card);
+  border-radius: var(--onboard-radius);
+  padding: 20px;
+  box-shadow: var(--biq-shadow-card);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.onboard-card-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--biq-text);
+}
+
+.onboard-card-desc {
+  margin: 0;
+  font-size: 14px;
+  color: var(--biq-muted);
+  line-height: 1.5;
+}
+
+.onboard-form-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: flex-end;
+}
+
+.onboard-input {
+  flex: 1;
+  min-width: 200px;
+  padding: 10px 14px;
+  border: 1px solid var(--biq-line);
+  border-radius: 8px;
+  font: inherit;
+  font-size: 14px;
+  color: var(--biq-text);
+  background: var(--biq-surface-1);
+}
+
+.onboard-input:focus {
+  outline: 2px solid var(--biq-orange);
+  outline-offset: -1px;
+  border-color: var(--biq-orange);
+}
+
+.onboard-btn {
+  padding: 10px 20px;
+  border: 0;
+  border-radius: 8px;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+
+.onboard-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.onboard-btn-primary {
+  background: var(--biq-orange);
+  color: var(--biq-on-orange);
+}
+
+.onboard-btn-secondary {
+  background: var(--biq-surface-3);
+  color: var(--biq-text);
+}
+
+.onboard-btn-danger {
+  background: transparent;
+  color: var(--biq-red);
+  border: 1px solid var(--biq-red);
+}
+
+.onboard-error {
+  padding: 12px 16px;
+  background: var(--biq-red-soft, #FCEAEC);
+  color: var(--biq-red);
+  border-radius: 8px;
+  font-size: 14px;
+}
+
+.onboard-loading {
+  padding: 24px;
+  text-align: center;
+  color: var(--biq-muted);
+  font-size: 14px;
+}
+
+.onboard-empty {
+  padding: 48px 24px;
+  text-align: center;
+  color: var(--biq-muted);
+}
+
+/* Branding state */
+.onboard-branding-state {
+  border-left: 4px solid var(--biq-amber);
+}
+
+.onboard-branding-state[data-branding-state="active"] {
+  border-left-color: var(--biq-green);
+}
+
+.onboard-branding-state[data-branding-state="rejected"] {
+  border-left-color: var(--biq-red);
+}
+
+.onboard-branding-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.onboard-badge {
+  padding: 4px 10px;
+  border: 1px solid;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.onboard-gate-failure {
+  padding: 12px;
+  background: var(--biq-red-soft, #FCEAEC);
+  border-radius: 8px;
+}
+
+.onboard-gate-failure h4 {
+  margin: 0 0 4px;
+  font-size: 14px;
+  color: var(--biq-red);
+}
+
+.onboard-gate-failure p {
+  margin: 0 0 8px;
+  font-size: 13px;
+  color: var(--biq-text);
+}
+
+.onboard-gate-failures {
+  margin: 0;
+  padding-left: 20px;
+  font-size: 13px;
+  color: var(--biq-muted);
+}
+
+.onboard-active-notice,
+.onboard-draft-notice {
+  padding: 12px;
+  border-radius: 8px;
+  font-size: 14px;
+}
+
+.onboard-active-notice {
+  background: var(--biq-green-soft, #EAF7F0);
+  color: var(--biq-green);
+}
+
+.onboard-draft-notice {
+  background: var(--biq-amber-soft, #FFF6D8);
+  color: var(--biq-amber);
+}
+
+.onboard-draft-notice p {
+  margin: 0 0 8px;
+}
+
+/* Logo section */
+.onboard-logo-preview {
+  max-width: 120px;
+  max-height: 120px;
+  border-radius: 8px;
+  border: 1px solid var(--biq-line);
+}
+
+.onboard-rights {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.onboard-rights-text {
+  margin: 0;
+  font-size: 13px;
+  color: var(--biq-muted);
+}
+
+.onboard-rights-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  color: var(--biq-text);
+  cursor: pointer;
+}
+
+.onboard-rights-confirmed {
+  margin: 0;
+  font-size: 13px;
+  color: var(--biq-green);
+}
+
+/* Preview */
+.onboard-preview-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.onboard-preview {
+  padding: 16px;
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 120px;
+}
+
+.onboard-preview-label {
+  font-size: 12px;
+  font-weight: 600;
+  opacity: 0.7;
+}
+
+.onboard-preview-swatch {
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  text-align: center;
+}
+
+/* Manual picker */
+.onboard-color-label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--biq-muted);
+}
+
+.onboard-color-input {
+  width: 60px;
+  height: 40px;
+  border: 1px solid var(--biq-line);
+  border-radius: 8px;
+  cursor: pointer;
+  background: none;
+}
+
+/* Revert card */
+.onboard-revert-card {
+  border: 1px solid var(--biq-line);
+}
+
+/* Profile */
+.onboard-profile-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 32px 20px;
+  background: var(--biq-card);
+  border-radius: var(--onboard-radius);
+  box-shadow: var(--biq-shadow-card);
+}
+
+.onboard-profile-avatar {
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  background: var(--biq-navy);
+  color: var(--biq-on-dark);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 28px;
+  font-weight: 700;
+}
+
+.onboard-profile-name {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--biq-text);
+}
+
+.onboard-profile-club {
+  margin: 0;
+  font-size: 14px;
+  color: var(--biq-muted);
+}
+
+.onboard-profile-role {
+  padding: 4px 12px;
+  background: var(--biq-surface-3);
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--biq-text);
+}

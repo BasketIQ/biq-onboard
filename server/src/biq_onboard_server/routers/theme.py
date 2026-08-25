@@ -416,3 +416,52 @@ def delete_theme(club_id: str, request: Request) -> dict:
         "ok": True,
         "status": "reverted",
     }
+
+
+# ─── Logo rights affirmation (ADDENDUM-06 section C3) ───────────────────
+
+
+class LogoRightsRequest(BaseModel):
+    affirmed: bool
+
+
+@router.post("/logo-rights")
+def affirm_logo_rights(club_id: str, payload: LogoRightsRequest, request: Request) -> dict:
+    """Affirm or revoke logo usage rights (ADDENDUM-06 section C3).
+
+    The admin confirms: "Confirmo que el club puede usar este escudo".
+    This is separate from colour activation: colours may auto-activate
+    without rights affirmation, but the logo must not display until
+    affirmed.
+    """
+    user = require_admin(request, club_id)
+
+    registry = org.get_registry()
+    club = registry.get_club(club_id)
+    if club is None:
+        raise HTTPException(status_code=404, detail="club not found")
+
+    theme = getattr(club, "theme", None)
+    if not theme or not isinstance(theme, dict):
+        raise HTTPException(status_code=404, detail="no theme found")
+
+    logo = theme.get("logo")
+    if not logo:
+        raise HTTPException(status_code=404, detail="no logo found")
+
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    if payload.affirmed:
+        logo["rightsConfirmedAt"] = now
+        logo["status"] = "confirmed"
+    else:
+        logo["rightsConfirmedAt"] = None
+        logo["status"] = "awaiting_rights"
+
+    # Whole-field replacement (section C9.3a)
+    theme["logo"] = logo
+    registry.merge_club_fields(club_id, {"theme": theme})
+
+    return {
+        "ok": True,
+        "logo": logo,
+    }

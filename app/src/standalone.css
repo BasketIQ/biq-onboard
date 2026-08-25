@@ -1,0 +1,31 @@
+/* Standalone CSS for dev/preview — mirrors the shell's theme.css tokens.
+   In embed mode the shell provides these via :root. */
+:root {
+  color-scheme: light;
+  --biq-navy: #0A153A;
+  --biq-navy-2: #13234C;
+  --biq-orange: #FF5A00;
+  --biq-orange-light: #FF7A2A;
+  --biq-orange-soft: #FFF0E8;
+  --biq-on-orange: #FFFFFF;
+  --biq-on-dark: #FFFFFF;
+  --biq-on-dark-muted: #B8C2D6;
+  --biq-bg: #F4F6FA;
+  --biq-bg-2: #F2F4F7;
+  --biq-surface-1: #FFFFFF;
+  --biq-surface-2: #F8F9FC;
+  --biq-surface-3: #EEF1F6;
+  --biq-card: var(--biq-surface-1);
+  --biq-line: #E4E8F0;
+  --biq-line-strong: #D1D8E3;
+  --biq-text: #0D1735;
+  --biq-muted: #68738A;
+  --biq-muted-2: #55627A;
+  --biq-blue: #2468F2;
+  --biq-green: #198754;
+  --biq-amber: #B77900;
+  --biq-red: #D63B49;
+  --biq-shadow-sm: 0 1px 2px rgba(10, 21, 58, .04);
+  --biq-shadow-card: 0 5px 18px rgba(10, 21, 58, .05);
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+}

@@ -50,36 +50,8 @@ permissions:
   deployments: write
 
 jobs:
-  pick:
-    name: Pick runner
-    runs-on: ubuntu-latest
-    outputs:
-      runner: ${{ steps.runner.outputs.runner }}
-    steps:
-      - name: Checkout (action only)
-        uses: actions/checkout@v4
-        with:
-          sparse-checkout: |
-            .github/actions/pick-runner
-          sparse-checkout-cone-mode: false
-      - id: runner
-        uses: ./.github/actions/pick-runner
-        with:
-          token: ${{ secrets.RUNNER_PICK_PAT }}
-          development_runner_name: ${{ vars.DEVELOPMENT_RUNNER_NAME }}
-          integration_runner_name: ${{ vars.INTEGRATION_RUNNER_NAME }}
-          integration2_runner_name: ${{ vars.INTEGRATION2_RUNNER_NAME }}
-          prefer_development: true
-          netdata_token: ${{ secrets.NETDATA_CLOUD_API_TOKEN }}
-          netdata_space_id: ${{ vars.NETDATA_CLOUD_SPACE_ID }}
-          netdata_room_id: ${{ vars.NETDATA_CLOUD_ROOM_ID }}
-          netdata_node_integration2: ${{ vars.NETDATA_NODE_INTEGRATION2 }}
-          netdata_node_integration: ${{ vars.NETDATA_NODE_INTEGRATION }}
-          netdata_node_development: ${{ vars.NETDATA_NODE_DEVELOPMENT }}
-
   deploy-staging:
-    needs: [pick]
-    runs-on: ${{ needs.pick.outputs.runner == 'ubuntu-latest' && fromJSON('["ubuntu-latest"]') || fromJSON(format('["self-hosted","{0}"]', needs.pick.outputs.runner)) }}
+    runs-on: ubuntu-latest
     environment: ${{ inputs.env }}
     timeout-minutes: 20
     steps:

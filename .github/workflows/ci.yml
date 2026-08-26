@@ -62,7 +62,7 @@ jobs:
 
       - name: Verify biq-core version matches pin (prevents local/CI skew)
         run: |
-          INSTALLED=$(python3 -c "import biq_core; print(biq_core.__version__)")
+          INSTALLED=$(python3 -c "from importlib.metadata import version; print(version('biq-core'))")
           PINNED=$(grep 'biq-core\[org\]==' server/pyproject.toml | head -1 | sed 's/.*==\([^"]*\).*/\1/')
           echo "Installed: $INSTALLED  Pinned: $PINNED"
           if [ "$INSTALLED" != "$PINNED" ]; then

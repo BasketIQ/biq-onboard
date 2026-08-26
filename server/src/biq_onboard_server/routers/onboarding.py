@@ -53,6 +53,7 @@ def list_staff(club_id: str, request: Request) -> dict:
         caps = effective_capabilities(m.id, scope, roles)
         result.append({
             "user_id": m.id,
+            "email": m.email,
             "display_name": m.display_name,
             "default_team_id": m.default_team_id,
             "org_role": m.role,

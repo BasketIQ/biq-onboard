@@ -352,6 +352,58 @@ def test_create_and_list_users(admin_client):
     assert r.json()["total"] == 1
 
 
+def test_create_user_assigns_methodology_role(admin_client):
+    """create_user must also create a RoleAssignment so the user gets capabilities."""
+    admin_client.post("/api/admin/clubs", json={"id": "club_cr", "name": "Club CR"})
+    r = admin_client.post(
+        "/api/admin/clubs/club_cr/users",
+        json={
+            "id": "director_cr",
+            "club_id": "club_cr",
+            "display_name": "Director",
+            "role": "sports_director",
+            "email": "director@example.com",
+            "password": "secret",
+        },
+    )
+    assert r.status_code == 200
+    assert r.json()["role_assigned"] == "sports_director"
+
+    # Verify the RoleAssignment exists via the staff endpoint
+    r = admin_client.get("/api/admin/clubs/club_cr/staff")
+    assert r.status_code == 200
+    director = next(m for m in r.json()["members"] if m["user_id"] == "director_cr")
+    assert "sports_director" in director["methodology_roles"]
+    assert "methodology.create" in director["capabilities"]
+
+
+def test_update_user_role_syncs_assignment(admin_client):
+    """update_user must remove the old RoleAssignment and create a new one."""
+    admin_client.post("/api/admin/clubs", json={"id": "club_ur", "name": "Club UR"})
+    admin_client.post(
+        "/api/admin/clubs/club_ur/users",
+        json={"id": "user_ur", "club_id": "club_ur", "role": "coach", "password": "secret"},
+    )
+    # Verify coach role assigned
+    r = admin_client.get("/api/admin/clubs/club_ur/staff")
+    user = next(m for m in r.json()["members"] if m["user_id"] == "user_ur")
+    assert "coach" in user["methodology_roles"]
+
+    # Update to sports_director
+    r = admin_client.put(
+        "/api/admin/clubs/club_ur/users/user_ur",
+        json={"role": "sports_director"},
+    )
+    assert r.status_code == 200
+
+    # Verify role was synced
+    r = admin_client.get("/api/admin/clubs/club_ur/staff")
+    user = next(m for m in r.json()["members"] if m["user_id"] == "user_ur")
+    assert "sports_director" in user["methodology_roles"]
+    assert "coach" not in user["methodology_roles"]
+    assert "methodology.create" in user["capabilities"]
+
+
 def test_reset_password(admin_client):
     admin_client.post("/api/admin/clubs", json={"id": "club_pw", "name": "Club PW"})
     admin_client.post(

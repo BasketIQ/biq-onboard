@@ -56,6 +56,7 @@ class UserCreate(BaseModel):
     id: str
     club_id: str
     display_name: str | None = None
+    email: str | None = None
     role: str = "coach"
     default_team_id: str | None = None
     password: str | None = None
@@ -63,6 +64,7 @@ class UserCreate(BaseModel):
 
 class UserUpdate(BaseModel):
     display_name: str | None = None
+    email: str | None = None
     role: str | None = None
     default_team_id: str | None = None
 

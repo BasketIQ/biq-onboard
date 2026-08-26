@@ -60,6 +60,16 @@ jobs:
           pip install "./server[test]" \
             --extra-index-url "https://oauth2accesstoken:${TOKEN}@europe-west1-python.pkg.dev/basketiq-platform-prod/basketiq-python/simple/"
 
+      - name: Verify biq-core version matches pin (prevents local/CI skew)
+        run: |
+          INSTALLED=$(python3 -c "import biq_core; print(biq_core.__version__)")
+          PINNED=$(grep 'biq-core\[org\]==' server/pyproject.toml | head -1 | sed 's/.*==\([^"]*\).*/\1/')
+          echo "Installed: $INSTALLED  Pinned: $PINNED"
+          if [ "$INSTALLED" != "$PINNED" ]; then
+            echo "::error::biq-core version skew: installed $INSTALLED != pinned $PINNED"
+            exit 1
+          fi
+
       - name: Server tests (in-memory store)
         env:
           BIQ_ORG_STORE: memory

@@ -14,9 +14,19 @@ The creation path carries over W2.1a-ii unchanged: ``Club.website`` is
 persisted from the submitted URL and non-``https`` schemes are rejected
 with a 422 without any network I/O (ADDENDUM-06 §C2.1/C2.3 rules move with
 the endpoint). The creator becomes the new club's first administrator.
+
+S2S channel (ADDENDUM-07 §5.1): when the request carries a valid
+``Authorization: Bearer`` shared-secret token (``BIQ_ONBOARD_S2S_SECRET``),
+the identity is taken from the ``X-BIQ-Acting-User-Id`` and
+``X-BIQ-Acting-Email`` headers instead of the local session. Fail-closed:
+bad/missing token ⇒ 401 even if a local session exists. When the secret is
+unset, the service behaves exactly as today (standalone sessions only).
 """
 
 from __future__ import annotations
+
+import hmac
+import os
 
 from fastapi import APIRouter, HTTPException, Request
 
@@ -30,6 +40,46 @@ router = APIRouter()  # mounted at /api/onboarding by app.py
 ADMIN_ROLES = ("administrator", "sports_director", "super_administrator")
 
 
+def _s2s_secret() -> str | None:
+    """Return the configured S2S secret, or None when S2S is disabled."""
+    return os.environ.get("BIQ_ONBOARD_S2S_SECRET") or None
+
+
+def _resolve_acting_identity(request: Request) -> tuple[str, str]:
+    """Resolve the acting user_id and email for the request.
+
+    S2S path: when ``Authorization: Bearer <secret>`` matches the configured
+    secret, the identity comes from ``X-BIQ-Acting-User-Id`` and
+    ``X-BIQ-Acting-Email`` headers. Fail-closed: bad/missing token ⇒ 401
+    even if a local session exists.
+
+    Standalone path: when no secret is configured, falls back to
+    ``session_user(request)`` with an empty email (the caller resolves it
+    from the registry).
+    """
+    secret = _s2s_secret()
+    if secret:
+        auth_header = request.headers.get("authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+            if hmac.compare_digest(token, secret):
+                user_id = request.headers.get("x-biq-acting-user-id", "")
+                email = request.headers.get("x-biq-acting-email", "")
+                if not user_id:
+                    raise HTTPException(
+                        status_code=403,
+                        detail="S2S request missing acting user identity",
+                    )
+                return user_id, email
+            # Bad token: fail-closed even if a session exists.
+            raise HTTPException(status_code=401, detail="invalid service token")
+        # Secret configured but no bearer header: fail-closed.
+        raise HTTPException(status_code=401, detail="invalid service token")
+
+    # Standalone mode — no S2S secret configured.
+    return session_user(request), ""
+
+
 def _caller_memberships(registry, email: str) -> list:
     """Membership rows (club_id != "") for the caller's email."""
     return [u for u in registry.find_users_by_email(email) if u.club_id]
@@ -38,20 +88,35 @@ def _caller_memberships(registry, email: str) -> list:
 @router.post("/clubs")
 def create_my_club(payload: ClubSelfCreate, request: Request) -> dict:
     """Create a club on the caller's behalf; caller becomes its administrator."""
-    user_id = session_user(request)
+    user_id, asserted_email = _resolve_acting_identity(request)
     registry = org.get_registry()
+
+    # In S2S mode the email may be asserted directly; in standalone mode the
+    # email is resolved from the registry (as before).
     caller = registry.get_user(user_id)
 
     if caller is None or not getattr(caller, "email", ""):
         # Unknown registry user: only the platform break-glass admin may pass
-        # (mirrors require_admin's semantics in auth.py).
+        # (mirrors require_admin's semantics in auth.py). In S2S mode, an
+        # unknown user_id with no registry record is a 403 (the asserted
+        # identity must exist in the registry for §6.3 evaluation).
         if not _is_break_glass_admin(user_id):
+            if _s2s_secret():
+                raise HTTPException(
+                    status_code=403,
+                    detail="asserted identity not found in registry",
+                )
             raise HTTPException(status_code=403, detail="not allowed to create clubs")
         caller_email = ""
         caller_display = ""
     else:
         caller_email = caller.email
         caller_display = caller.display_name or ""
+
+    # In S2S mode, prefer the asserted email when the registry record lacks
+    # one (e.g. a club-less user created through the shell's register flow).
+    if not caller_email and asserted_email:
+        caller_email = asserted_email
 
     # §6.3 server-side authorisation: new users (no membership) and admins of
     # an existing club may create; non-admin members get 403.

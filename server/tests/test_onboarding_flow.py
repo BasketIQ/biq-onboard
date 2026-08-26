@@ -210,3 +210,124 @@ def test_create_club_without_website_leaves_it_none(client, monkeypatch):
     assert resp.status_code == 200
     club = reg.get_club(resp.json()["club"]["id"])
     assert club.website is None
+
+
+# ---------------------------------------------------------------------------
+# S2S channel (ADDENDUM-07 §5.1 — shell-to-onboard shared-secret)
+# ---------------------------------------------------------------------------
+
+
+_S2S_SECRET = "test-s2s-shared-secret"
+
+
+def _s2s_headers(user_id: str, email: str, secret: str = _S2S_SECRET) -> dict:
+    return {
+        "Authorization": f"Bearer {secret}",
+        "X-BIQ-Acting-User-Id": user_id,
+        "X-BIQ-Acting-Email": email,
+    }
+
+
+def test_s2s_valid_identity_new_user_creates_club(client, monkeypatch):
+    """S2S: a valid token with an asserted new-user identity creates a club
+    and the creator becomes administrator."""
+    monkeypatch.setenv("BIQ_ONBOARD_S2S_SECRET", _S2S_SECRET)
+    reg = org.get_registry()
+    _seed_user(reg, "u_s2s_new", "s2s-new@basketiq.io")  # club-less row
+
+    resp = client.post(
+        "/api/onboarding/clubs",
+        json={"name": "CB S2S", "website": "https://s2s.es"},
+        headers=_s2s_headers("u_s2s_new", "s2s-new@basketiq.io"),
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["ok"] is True
+    memberships = [u for u in reg.find_users_by_email("s2s-new@basketiq.io") if u.club_id]
+    assert len(memberships) == 1
+    assert memberships[0].club_id == data["club"]["id"]
+    assert memberships[0].role == "administrator"
+
+
+def test_s2s_non_admin_member_gets_403(client, monkeypatch):
+    """S2S: §6.3 holds through the S2S channel — a non-admin member gets 403."""
+    monkeypatch.setenv("BIQ_ONBOARD_S2S_SECRET", _S2S_SECRET)
+    reg = org.get_registry()
+    _seed_user(reg, "u_s2s_coach", "s2s-coach@basketiq.io", role="coach", club_id="club_x")
+
+    resp = client.post(
+        "/api/onboarding/clubs",
+        json={"name": "CB S2S Forbidden"},
+        headers=_s2s_headers("u_s2s_coach", "s2s-coach@basketiq.io"),
+    )
+    assert resp.status_code == 403
+
+
+def test_s2s_admin_of_existing_club_can_create(client, monkeypatch):
+    """S2S: an admin of an existing club may create an additional club."""
+    monkeypatch.setenv("BIQ_ONBOARD_S2S_SECRET", _S2S_SECRET)
+    reg = org.get_registry()
+    _seed_user(reg, "u_s2s_admin", "s2s-admin@basketiq.io", role="administrator", club_id="club_y")
+
+    resp = client.post(
+        "/api/onboarding/clubs",
+        json={"name": "CB S2S Second"},
+        headers=_s2s_headers("u_s2s_admin", "s2s-admin@basketiq.io"),
+    )
+    assert resp.status_code == 200
+    new_id = resp.json()["club"]["id"]
+    assert new_id != "club_y"
+
+
+def test_s2s_bad_token_returns_401_fail_closed(client, monkeypatch):
+    """S2S: wrong token ⇒ 401 even if a valid local session exists."""
+    monkeypatch.setenv("BIQ_ONBOARD_S2S_SECRET", _S2S_SECRET)
+    reg = org.get_registry()
+    _seed_user(reg, "u_s2s_new", "s2s-new@basketiq.io")
+
+    # Establish a local session too (should NOT bypass the S2S gate).
+    client.post("/api/auth/login", json={"username": "admin", "password": "T3st1ng!"})
+
+    resp = client.post(
+        "/api/onboarding/clubs",
+        json={"name": "CB Bad Token"},
+        headers=_s2s_headers("u_s2s_new", "s2s-new@basketiq.io", secret="wrong-secret"),
+    )
+    assert resp.status_code == 401
+
+
+def test_s2s_missing_token_returns_401_fail_closed(client, monkeypatch):
+    """S2S: no bearer header ⇒ 401 when the secret is configured."""
+    monkeypatch.setenv("BIQ_ONBOARD_S2S_SECRET", _S2S_SECRET)
+    reg = org.get_registry()
+    _seed_user(reg, "u_s2s_new", "s2s-new@basketiq.io")
+
+    resp = client.post(
+        "/api/onboarding/clubs",
+        json={"name": "CB No Token"},
+    )
+    assert resp.status_code == 401
+
+
+def test_s2s_asserted_unknown_user_returns_403(client, monkeypatch):
+    """S2S: an asserted user_id that does not exist in the registry ⇒ 403."""
+    monkeypatch.setenv("BIQ_ONBOARD_S2S_SECRET", _S2S_SECRET)
+
+    resp = client.post(
+        "/api/onboarding/clubs",
+        json={"name": "CB Ghost"},
+        headers=_s2s_headers("u_does_not_exist", "ghost@basketiq.io"),
+    )
+    assert resp.status_code == 403
+
+
+def test_s2s_standalone_mode_still_works_without_secret(client, monkeypatch):
+    """When BIQ_ONBOARD_S2S_SECRET is unset, the service behaves as today
+    (standalone sessions only)."""
+    monkeypatch.delenv("BIQ_ONBOARD_S2S_SECRET", raising=False)
+    reg = org.get_registry()
+    _seed_user(reg, "u_new", "standalone@basketiq.io")
+    _as_session(monkeypatch, "u_new")
+
+    resp = client.post("/api/onboarding/clubs", json={"name": "CB Standalone"})
+    assert resp.status_code == 200

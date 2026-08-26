@@ -489,6 +489,16 @@ class BiqOnboardApp extends HTMLElement {
         body: JSON.stringify({ email, club_id: clubId }),
       });
       if (!res.ok) throw new Error('No se pudo seleccionar el club');
+      // ADDENDUM-07 §6 C2 — persist last-entered club for multi-membership
+      // auto-enter on the next login. Best-effort: failure doesn't block.
+      try {
+        await fetch('/api/preferences/last-club', {
+          method: 'PUT',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ club_id: clubId }),
+        });
+      } catch { /* best-effort */ }
       // Full navigation so the shell re-boots with the resolved club.
       window.location.replace('/');
     } catch (err) {
@@ -520,8 +530,53 @@ class BiqOnboardApp extends HTMLElement {
       body: JSON.stringify({ name, website }),
     });
     if (res.ok) {
-      // Club created and membership assigned server-side: reload so the
-      // shell boots straight home with the new club.
+      // ADDENDUM-07 §6: chain select-club to re-point the shell session to
+      // the new administrator row, then navigate to home. Only navigate when
+      // both succeeded; surface the select failure as a step error (the
+      // membership exists; the picker will offer it on the next visit —
+      // degraded, not stuck).
+      const data = await res.json().catch(() => null);
+      const clubId = data?.club?.id;
+      const email = this._org?.email || '';
+      if (clubId && email) {
+        try {
+          const selectRes = await fetch('/api/auth/select-club', {
+            method: 'POST',
+            credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email, club_id: clubId }),
+          });
+          if (selectRes.ok) {
+            // ADDENDUM-07 §6 C2 — persist last-entered club. Best-effort.
+            try {
+              await fetch('/api/preferences/last-club', {
+                method: 'PUT',
+                credentials: 'include',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ club_id: clubId }),
+              });
+            } catch { /* best-effort */ }
+            window.location.replace('/');
+            return;
+          }
+          this._stepError = {
+            scope: 'create',
+            message: 'El club se ha creado, pero no se pudo iniciar sesión automáticamente. Recarga para entrar.',
+          };
+          this._loading = false;
+          this.render();
+          return;
+        } catch {
+          this._stepError = {
+            scope: 'create',
+            message: 'El club se ha creado, pero no se pudo iniciar sesión automáticamente. Recarga para entrar.',
+          };
+          this._loading = false;
+          this.render();
+          return;
+        }
+      }
+      // Fallback: no club id or email in the response — reload.
       window.location.replace('/');
       return;
     }

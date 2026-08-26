@@ -9,9 +9,11 @@
     "build:lib": "vite build --config vite.lib.config.ts",
     "typecheck": "tsc",
     "test": "node --test tests/*.test.mjs",
-    "stylelint": "stylelint \"src/styles.css\""
+    "stylelint": "stylelint \"src/styles.css\"",
+    "screenshots": "node scripts/screenshot-club-step.mjs"
   },
   "devDependencies": {
+    "playwright": "^1.48.0",
     "stylelint": "^16.10.0",
     "stylelint-config-standard": "^36.0.1",
     "typescript": "^5.8.3",

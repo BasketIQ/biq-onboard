@@ -21,7 +21,8 @@ import { fileURLToPath } from 'url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const APP_ROOT = resolve(__dirname, '..');
-const DIST_EMBED = join(APP_ROOT, 'dist', 'embed', 'biq-onboard.js');
+const REPO_ROOT = resolve(APP_ROOT, '..');
+const DIST_EMBED = join(REPO_ROOT, 'dist', 'embed', 'biq-onboard.js');
 
 const OUTPUT_DIR = resolve(APP_ROOT, '..', '..', 'handoff', 'processed', 'evidence');
 

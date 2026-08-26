@@ -368,3 +368,76 @@
   font-weight: 600;
   color: var(--biq-text);
 }
+
+/* ─── Club step (ADDENDUM-07 §6) ─────────────────────────────────────── */
+
+.onboard-clubstep {
+  gap: 20px;
+  padding-top: 32px;
+}
+
+.onboard-step-head {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  text-align: center;
+  padding: 8px 0 0;
+}
+
+.onboard-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.onboard-club-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 44px;
+  padding: 14px 16px;
+  border: 1px solid var(--biq-line);
+  border-radius: 10px;
+  background: var(--biq-surface-1);
+  color: var(--biq-text);
+  font: inherit;
+  font-size: 15px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.onboard-club-row:hover,
+.onboard-club-row:focus-visible {
+  border-color: var(--biq-orange);
+  outline: none;
+}
+
+.onboard-club-role {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--biq-muted);
+  white-space: nowrap;
+}
+
+.onboard-field-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--biq-muted);
+}
+
+.onboard-input-block {
+  width: 100%;
+  flex: none;
+}
+
+.onboard-success {
+  padding: 12px 16px;
+  background: var(--biq-green-soft, #EAF7F0);
+  color: var(--biq-green);
+  border-radius: 8px;
+  font-size: 14px;
+}

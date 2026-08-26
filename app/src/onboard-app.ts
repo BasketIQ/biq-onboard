@@ -18,12 +18,22 @@ import styles from './styles.css?inline';
 
 // ─── Types ──────────────────────────────────────────────────────────────
 
+interface MembershipInfo {
+  club_id: string;
+  club_name?: string;
+  role: string;
+}
+
 interface OrgContext {
   club: { id: string; name?: string; website?: string } | null;
   team?: unknown;
   teams?: unknown[];
   season?: unknown;
   role?: string;
+  // ADDENDUM-07 §6 — identity + memberships for the club step
+  email?: string;
+  display_name?: string;
+  memberships?: MembershipInfo[];
 }
 
 interface ClubTheme {
@@ -109,6 +119,26 @@ const THEME_STATUS_COPY: Record<string, { label: string; color: string }> = {
 const escapeHtml = (s: string): string =>
   String(s || '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]!));
 
+// Roles that may create clubs (ADDENDUM-07 §6.3 — mirrors the server rule;
+// here it drives presentation only, the server enforces with 403).
+const ADMIN_ROLES = ['administrator', 'sports_director', 'super_administrator'];
+
+function canCreateClub(memberships: MembershipInfo[] | undefined): boolean {
+  const ms = memberships || [];
+  return ms.length === 0 || ms.some((m) => ADMIN_ROLES.includes(m.role));
+}
+
+// Normalise a club website: prepend https:// to bare domains ("cbnorte.es"),
+// reject non-https schemes (ADDENDUM-03 §5.2 / ADDENDUM-02 §9.1). Returns
+// null when the value is invalid; "" when empty/optional.
+function normaliseWebsiteUrl(raw: string): string | null {
+  const v = (raw || '').trim();
+  if (!v) return '';
+  if (/^https:\/\//i.test(v)) return v;
+  if (/^[a-z]+:\/\//i.test(v)) return null;
+  return 'https://' + v;
+}
+
 // ─── Main component ─────────────────────────────────────────────────────
 
 class BiqOnboardApp extends HTMLElement {
@@ -120,6 +150,9 @@ class BiqOnboardApp extends HTMLElement {
   private _themeJob: ThemeJob | null = null;
   private _loading = false;
   private _error: string | null = null;
+  // Club step (ADDENDUM-07 §6) per-card feedback
+  private _stepError: { scope: 'join' | 'create'; message: string } | null = null;
+  private _stepMessage = '';
 
   constructor() {
     super();
@@ -268,7 +301,11 @@ class BiqOnboardApp extends HTMLElement {
   private render(): void {
     const club = this._org?.club;
     if (!club) {
-      this.shadow.innerHTML = `<style>${styles}</style><div class="onboard-empty">Sin club asignado.</div>`;
+      // ADDENDUM-07 §6 — paso de club: sin club resuelto este módulo ES el
+      // paso 2 del onboarding (picker / unirse por ID / crear club).
+      this.shadow.innerHTML = `<style>${styles}</style>
+        <div class="onboard-app onboard-clubstep">${this.renderClubStep()}</div>`;
+      this.wireClubStepEvents();
       return;
     }
 
@@ -438,6 +475,196 @@ class BiqOnboardApp extends HTMLElement {
           Restablecer
         </button>
       </div>`;
+  }
+
+  // ─── Club step (ADDENDUM-07 §6) ───────────────────────────────────────
+
+  private async selectMembership(clubId: string): Promise<void> {
+    const email = this._org?.email || '';
+    try {
+      const res = await fetch('/api/auth/select-club', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, club_id: clubId }),
+      });
+      if (!res.ok) throw new Error('No se pudo seleccionar el club');
+      // Full navigation so the shell re-boots with the resolved club.
+      window.location.replace('/');
+    } catch (err) {
+      this._error = (err as Error).message;
+      this.render();
+    }
+  }
+
+  private async joinByClubId(clubId: string): Promise<void> {
+    const org_ = this._org;
+    const res = await fetch('/api/auth/register', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        email: org_?.email || '',
+        display_name: org_?.display_name || '',
+        club_id: clubId,
+      }),
+    });
+    return this.handleStepResponse(res, 'join');
+  }
+
+  private async createClub(name: string, website: string): Promise<void> {
+    const res = await fetch('/api/onboarding/clubs', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, website }),
+    });
+    if (res.ok) {
+      // Club created and membership assigned server-side: reload so the
+      // shell boots straight home with the new club.
+      window.location.replace('/');
+      return;
+    }
+    await this.handleStepResponse(res, 'create');
+  }
+
+  private async handleStepResponse(
+    res: Response,
+    scope: 'join' | 'create',
+  ): Promise<void> {
+    this._loading = false;
+    if (res.ok) {
+      // Join: a pending JoinRequest was created — confirm and stay on the
+      // step (membership is granted after admin approval).
+      this._stepMessage = 'Solicitud enviada. Un administrador del club revisará tu acceso.';
+      this._stepError = null;
+      this.render();
+      return;
+    }
+    const data = await res.json().catch(() => null);
+    const message =
+      (data && (data as { detail?: string }).detail) || `Error ${res.status}`;
+    this._stepError = { scope, message };
+    this.render();
+  }
+
+  private renderClubStep(): string {
+    const orgCtx = this._org;
+    const memberships = orgCtx?.memberships || [];
+    const showCreate = canCreateClub(memberships);
+    const err = this._stepError;
+
+    const pickerHtml = memberships.length
+      ? `
+      <section class="onboard-card">
+        <h3 class="onboard-card-title">Tus clubs</h3>
+        <p class="onboard-card-desc">Perteneces a varios clubs. Elige con cuál quieres entrar.</p>
+        <div class="onboard-picker" role="listbox" aria-label="Elige tu club">
+          ${memberships
+            .map(
+              (m) => `
+            <button class="onboard-club-row" data-pick-club="${escapeHtml(m.club_id)}" role="option">
+              <span class="onboard-club-name">${escapeHtml(m.club_name || m.club_id)}</span>
+              <span class="onboard-club-role">${escapeHtml(m.role === 'administrator' ? 'Administrador' : m.role)}</span>
+            </button>`,
+            )
+            .join('')}
+        </div>
+      </section>`
+      : '';
+
+    return `
+      <header class="onboard-step-head">
+        <h2 class="onboard-section-title">Tu club</h2>
+        <p class="onboard-card-desc">Únete a un club o crea uno nuevo para empezar a usar BasketIQ.</p>
+        ${this._error ? `<div class="onboard-error">${escapeHtml(this._error)}</div>` : ''}
+      </header>
+      ${this._loading && !err ? '<div class="onboard-loading">Cargando…</div>' : ''}
+      ${pickerHtml}
+      <section class="onboard-card">
+        <h3 class="onboard-card-title">Unirse a un club</h3>
+        <p class="onboard-card-desc">Si tu club ya usa BasketIQ, pide a un administrador el ID del club.</p>
+        <div class="onboard-form-row">
+          <input type="text" class="onboard-input" data-join-id placeholder="ID del club" aria-label="ID del club" />
+          <button class="onboard-btn onboard-btn-primary" data-join-btn>Solicitar acceso</button>
+        </div>
+        ${
+          err?.scope === 'join'
+            ? `<div class="onboard-error">${escapeHtml(err.message)}</div>`
+            : ''
+        }
+        ${this._stepMessage ? `<div class="onboard-success">${escapeHtml(this._stepMessage)}</div>` : ''}
+      </section>
+      ${
+        showCreate
+          ? `
+      <section class="onboard-card">
+        <h3 class="onboard-card-title">Crear un club nuevo</h3>
+        <p class="onboard-card-desc">Crea la organización de tu club. Serás su administrador; podremos tomar el escudo y los colores de su web para personalizar la app.</p>
+        <label class="onboard-field-label" for="create-name">Nombre del club</label>
+        <input type="text" id="create-name" class="onboard-input onboard-input-block" data-create-name placeholder="Club Baloncesto…" />
+        <label class="onboard-field-label" for="create-web">Web del club (opcional)</label>
+        <input type="url" id="create-web" class="onboard-input onboard-input-block" data-create-website placeholder="mi-club.es" />
+        <button class="onboard-btn onboard-btn-primary" data-create-btn>Crear club</button>
+        ${
+          err?.scope === 'create'
+            ? `<div class="onboard-error">${escapeHtml(err.message)}</div>`
+            : ''
+        }
+      </section>`
+          : ''
+      }`;
+  }
+
+  private wireClubStepEvents(): void {
+    this.shadow.querySelectorAll('[data-pick-club]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        this.selectMembership((btn as HTMLElement).dataset.pickClub || '');
+      });
+    });
+
+    const joinBtn = this.shadow.querySelector('[data-join-btn]');
+    const joinInput = this.shadow.querySelector('[data-join-id]') as HTMLInputElement | null;
+    if (joinBtn && joinInput) {
+      joinBtn.addEventListener('click', () => {
+        const clubId = joinInput.value.trim();
+        if (!clubId) return;
+        this._loading = true;
+        this._stepError = null;
+        this._stepMessage = '';
+        this.render();
+        this.joinByClubId(clubId);
+      });
+    }
+
+    const createBtn = this.shadow.querySelector('[data-create-btn]');
+    const nameInput = this.shadow.querySelector('[data-create-name]') as HTMLInputElement | null;
+    const webInput = this.shadow.querySelector('[data-create-website]') as HTMLInputElement | null;
+    if (createBtn && nameInput) {
+      createBtn.addEventListener('click', () => {
+        const name = nameInput.value.trim();
+        if (name.length < 2) {
+          this._stepError = { scope: 'create', message: 'El nombre del club es obligatorio (mínimo 2 caracteres).' };
+          this.render();
+          return;
+        }
+        let website = '';
+        if (webInput && webInput.value.trim()) {
+          const normalised = normaliseWebsiteUrl(webInput.value);
+          if (normalised === null) {
+            this._stepError = { scope: 'create', message: 'La web del club debe usar https://' };
+            this.render();
+            return;
+          }
+          website = normalised;
+        }
+        this._loading = true;
+        this._stepError = null;
+        this._stepMessage = '';
+        this.render();
+        this.createClub(name, website);
+      });
+    }
   }
 
   private renderProfile(): string {

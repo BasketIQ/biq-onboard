@@ -14,6 +14,15 @@ class ClubCreate(BaseModel):
     short_name: str | None = None
 
 
+class ClubSelfCreate(BaseModel):
+    """Self-service club creation (ADDENDUM-07 §6): the id is assigned by the
+    registry and the caller becomes administrator; only name (+ optional
+    website) is client-supplied."""
+
+    name: str
+    website: str | None = None
+
+
 class ClubUpdate(BaseModel):
     name: str | None = None
     short_name: str | None = None

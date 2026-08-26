@@ -11,6 +11,44 @@ from ..models import PasswordReset, UserCreate, UserUpdate
 router = APIRouter()
 
 
+@router.get("/users")
+def list_all_users(request: Request, email: str | None = None) -> dict:
+    """List users across all clubs, optionally filtered by email.
+
+    When ``email`` is provided, uses ``find_users_by_email`` to search
+    across every club — a user may have memberships in multiple clubs.
+    """
+    require_admin(request)
+    registry = org.get_registry()
+    if email:
+        users = registry.find_users_by_email(email)
+    else:
+        # List all users via Firestore stream (or memory registry)
+        users = []
+        if hasattr(registry, "_db"):
+            docs = registry._db.collection("orgs_users").stream()  # type: ignore[attr-defined]
+            from biq_core.org import User
+
+            users = [User(id=d.id, **{k: v for k, v in d.to_dict().items() if k != "password_hash"}) for d in docs]
+        elif hasattr(registry, "_users"):
+            users = list(registry._users.values())  # type: ignore[attr-defined]
+    return {
+        "users": [
+            {
+                "id": u.id,
+                "club_id": u.club_id,
+                "email": u.email,
+                "display_name": u.display_name,
+                "role": u.role,
+                "default_team_id": u.default_team_id,
+                "status": u.status,
+            }
+            for u in users
+        ],
+        "total": len(users),
+    }
+
+
 @router.post("/clubs/{club_id}/users")
 def create_user(club_id: str, payload: UserCreate, request: Request) -> dict:
     require_admin(request, club_id)
@@ -41,6 +79,7 @@ def list_users(club_id: str, request: Request) -> dict:
             {
                 "id": m.id,
                 "club_id": m.club_id,
+                "email": m.email,
                 "display_name": m.display_name,
                 "role": m.role,
                 "default_team_id": m.default_team_id,

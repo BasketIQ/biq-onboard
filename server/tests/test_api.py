@@ -126,6 +126,52 @@ def test_list_staff(admin_client):
     assert data["total_members"] == 9
     admin = next(m for m in data["members"] if "admin" in m["user_id"])
     assert "administrator" in admin["methodology_roles"]
+    # Staff entries should include the email field (may be None for seed users)
+    assert "email" in data["members"][0]
+
+
+def test_list_all_users(admin_client):
+    """GET /api/admin/users lists users across all clubs."""
+    admin_client.post(
+        "/api/admin/clubs/club_au1/onboard",
+        json={"club_id": "club_au1", "name": "Club AU1", "slug": "au1", "season": "2026/27"},
+    )
+    admin_client.post(
+        "/api/admin/clubs/club_au2/onboard",
+        json={"club_id": "club_au2", "name": "Club AU2", "slug": "au2", "season": "2026/27"},
+    )
+    r = admin_client.get("/api/admin/users")
+    assert r.status_code == 200
+    data = r.json()
+    # Two clubs × 9 default staff = 18 users
+    assert data["total"] == 18
+    # Each user should have the email field
+    assert "email" in data["users"][0]
+
+
+def test_list_all_users_by_email(admin_client):
+    """GET /api/admin/users?email=... filters by email across all clubs."""
+    admin_client.post(
+        "/api/admin/clubs/club_email/onboard",
+        json={
+            "club_id": "club_email",
+            "name": "Club Email",
+            "slug": "email",
+            "season": "2026/27",
+            "staff": [
+                {
+                    "username": "jjdelcampo",
+                    "display_name": "Juanjo",
+                    "roles": ["administrator"],
+                    "password": "test123",
+                }
+            ],
+        },
+    )
+    # Search by a non-existent email
+    r = admin_client.get("/api/admin/users", params={"email": "nobody@basketiq.io"})
+    assert r.status_code == 200
+    assert r.json()["total"] == 0
 
 
 # ─── Roles ───────────────────────────────────────────────────────────────────

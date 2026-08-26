@@ -177,12 +177,20 @@ def create_my_club(payload: ClubSelfCreate, request: Request) -> dict:
 
     # Assign the administrator role in the roles registry (best-effort, same
     # as the rest of the codebase; the user record is the source of truth).
+    # The creator also gets ``sports_director`` so they can create and manage
+    # methodology from day one — the club owner is its first director.
     try:
         from biq_core.roles import RoleAssignment, get_role_registry
 
-        get_role_registry().put_assignment(
+        registry = get_role_registry()
+        registry.put_assignment(
             RoleAssignment(
                 user_id=membership_id, role="administrator", scope=f"club:{club_id}"
+            )
+        )
+        registry.put_assignment(
+            RoleAssignment(
+                user_id=membership_id, role="sports_director", scope=f"club:{club_id}"
             )
         )
     except Exception:

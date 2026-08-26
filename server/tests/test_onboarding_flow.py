@@ -114,6 +114,42 @@ def test_new_user_with_no_club_can_create(client, monkeypatch):
     assert memberships[0].role == "administrator"
 
 
+def test_creator_also_gets_sports_director_role(client, monkeypatch):
+    """The club creator gets both ``administrator`` and ``sports_director``
+    in the roles registry so they can create methodology from day one
+    (the club owner is its first director)."""
+    from biq_core.roles import MemoryRoleRegistry, effective_capabilities
+
+    # Share a single MemoryRoleRegistry between the route handler and the test
+    # (get_role_registry() creates a new empty instance on every call).
+    shared_roles_reg = MemoryRoleRegistry()
+    import biq_onboard_server.routers.onboarding_flow as flow_mod
+
+    monkeypatch.setattr(
+        "biq_core.roles.get_role_registry",
+        lambda client=None: shared_roles_reg,
+    )
+
+    reg = org.get_registry()
+    _seed_user(reg, "u_new", "founder@basketiq.io")
+    _as_session(monkeypatch, "u_new")
+
+    resp = client.post("/api/onboarding/clubs", json={"name": "CB Founder"})
+    assert resp.status_code == 200
+    club_id = resp.json()["club"]["id"]
+
+    # Look up the membership user id.
+    memberships = [u for u in reg.find_users_by_email("founder@basketiq.io") if u.club_id]
+    assert len(memberships) == 1
+    membership_id = memberships[0].id
+
+    # The roles registry should have both administrator and sports_director.
+    caps = effective_capabilities(membership_id, f"club:{club_id}", shared_roles_reg)
+    assert "club.admin" in caps  # from administrator
+    assert "methodology.create" in caps  # from sports_director
+    assert "methodology.publish" in caps  # from sports_director
+
+
 def test_non_admin_member_posting_create_club_gets_403(client, monkeypatch):
     """ADDENDUM-07 §6.3: a plain coach of an existing club gets 403 and no
     club is created. Server-side enforcement — the client-side hiding of the

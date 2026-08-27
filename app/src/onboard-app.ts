@@ -480,13 +480,12 @@ class BiqOnboardApp extends HTMLElement {
   // ─── Club step (ADDENDUM-07 §6) ───────────────────────────────────────
 
   private async selectMembership(clubId: string): Promise<void> {
-    const email = this._org?.email || '';
     try {
       const res = await fetch('/api/auth/select-club', {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, club_id: clubId }),
+        body: JSON.stringify({ club_id: clubId }),
       });
       if (!res.ok) throw new Error('No se pudo seleccionar el club');
       // ADDENDUM-07 §6 C2 — persist last-entered club for multi-membership
@@ -508,16 +507,11 @@ class BiqOnboardApp extends HTMLElement {
   }
 
   private async joinByClubId(clubId: string): Promise<void> {
-    const org_ = this._org;
     const res = await fetch('/api/auth/register', {
       method: 'POST',
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        email: org_?.email || '',
-        display_name: org_?.display_name || '',
-        club_id: clubId,
-      }),
+      body: JSON.stringify({ club_id: clubId }),
     });
     return this.handleStepResponse(res, 'join');
   }
@@ -537,14 +531,13 @@ class BiqOnboardApp extends HTMLElement {
       // degraded, not stuck).
       const data = await res.json().catch(() => null);
       const clubId = data?.club?.id;
-      const email = this._org?.email || '';
-      if (clubId && email) {
+      if (clubId) {
         try {
           const selectRes = await fetch('/api/auth/select-club', {
             method: 'POST',
             credentials: 'include',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ email, club_id: clubId }),
+            body: JSON.stringify({ club_id: clubId }),
           });
           if (selectRes.ok) {
             // ADDENDUM-07 §6 C2 — persist last-entered club. Best-effort.
@@ -576,7 +569,7 @@ class BiqOnboardApp extends HTMLElement {
           return;
         }
       }
-      // Fallback: no club id or email in the response — reload.
+      // Fallback: no club id in the response — reload.
       window.location.replace('/');
       return;
     }
@@ -589,8 +582,13 @@ class BiqOnboardApp extends HTMLElement {
   ): Promise<void> {
     this._loading = false;
     if (res.ok) {
-      // Join: a pending JoinRequest was created — confirm and stay on the
-      // step (membership is granted after admin approval).
+      if (scope === 'join') {
+        // Join: a pending JoinRequest was created — redirect to home so the
+        // user lands on the authenticated shell and can resume from there
+        // once the admin approves the request.
+        window.location.replace('/');
+        return;
+      }
       this._stepMessage = 'Solicitud enviada. Un administrador del club revisará tu acceso.';
       this._stepError = null;
       this.render();

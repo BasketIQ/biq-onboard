@@ -123,46 +123,44 @@ jobs:
           gcloud beta builds log "${BUILD_ID}" --project "${PROJECT_ID}" --stream --quiet
           gcloud builds describe "${BUILD_ID}" --project "${PROJECT_ID}" --format='value(status)' | grep -q '^SUCCESS$'
 
-      - name: Ensure dedicated task-invoker SA (C5)
+      - name: Verify dedicated task-invoker SA (C5/R1)
         env:
           PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
         run: |
-          # C5: Create/use a dedicated least-privilege task-invoker SA.
-          # This SA is separate from the deployer SA and has only the
-          # roles/run.jobs.run permission needed to invoke Cloud Run Jobs.
-          #
-          # If the deployer SA lacks iam.serviceAccounts.create (current
-          # staging state), this step is non-blocking — the SA must be
-          # provisioned out-of-band via the governed IAM path. The
-          # GCP_TASK_INVOKER_SA variable is used as the canonical name.
+          # R1: Fail-closed verification of the dedicated task-invoker SA.
+          # The SA must be provisioned via the governed IAM path (console/terraform).
+          # The deployer SA typically lacks iam.serviceAccounts.create — that is
+          # expected. This step verifies the SA EXISTS and has the required binding.
+          # No best-effort: if the SA doesn't exist or binding is missing, fail.
           TASK_INVOKER_SA="biq-task-invoker@${PROJECT_ID}.iam.gserviceaccount.com"
           echo "TASK_INVOKER_SA=${TASK_INVOKER_SA}" >> "${GITHUB_ENV}"
 
-          # Try to create the SA (best-effort — may fail if deployer lacks permission)
+          # R1: Verify SA exists — fail closed if not
           if ! gcloud iam service-accounts describe "${TASK_INVOKER_SA}" --project "${PROJECT_ID}" >/dev/null 2>&1; then
-            echo "Attempting to create dedicated task-invoker SA: ${TASK_INVOKER_SA}"
-            if gcloud iam service-accounts create biq-task-invoker \
-              --project "${PROJECT_ID}" \
-              --display-name="BIQ Cloud Tasks → Run Jobs invoker (least-privilege)" 2>&1; then
-              echo "SA created successfully"
-            else
-              echo "::warning::Could not create task-invoker SA (deployer lacks iam.serviceAccounts.create)."
-              echo "::warning::The SA ${TASK_INVOKER_SA} must be provisioned via the governed IAM path."
-              echo "::warning::Using the SA name in deployment config — enqueue will fail until IAM is provisioned."
-            fi
-          else
-            echo "Task-invoker SA already exists: ${TASK_INVOKER_SA}"
+            echo "::error::Dedicated task-invoker SA does not exist: ${TASK_INVOKER_SA}"
+            echo "::error::Provision it via the governed IAM path (console/terraform) with:"
+            echo "::error::  roles/run.jobs.run on club-theme-generation Cloud Run Job"
+            echo "::error::  roles/iam.serviceAccountTokenCreator for Cloud Tasks service agent"
+            exit 1
           fi
+          echo "Verified: task-invoker SA exists: ${TASK_INVOKER_SA}"
 
-          # Grant the invoker SA permission to run the club-theme-generation job (best-effort)
+          # R1: Verify the SA has run.jobs.run on the club-theme-generation job
           JOB_NAME="club-theme-generation"
           JOB_LOCATION="europe-west1"
-          gcloud run jobs add-iam-policy-binding "${JOB_NAME}" \
+          POLICY=$(gcloud run jobs get-iam-policy "${JOB_NAME}" \
             --project "${PROJECT_ID}" \
             --region "${JOB_LOCATION}" \
-            --member="serviceAccount:${TASK_INVOKER_SA}" \
-            --role="roles/run.jobs.run" \
-            --condition=None 2>/dev/null || echo "::warning::Could not bind run.jobs.run — provision via IAM console"
+            --format="json(bindings)" 2>/dev/null || echo '{"bindings":[]}')
+
+          if echo "${POLICY}" | jq -e --arg sa "serviceAccount:${TASK_INVOKER_SA}" \
+            '.bindings[]? | select(.role=="roles/run.jobs.run") | .members[]? | select(.==$sa)' >/dev/null 2>&1; then
+            echo "Verified: ${TASK_INVOKER_SA} has roles/run.jobs.run on ${JOB_NAME}"
+          else
+            echo "::error::${TASK_INVOKER_SA} is missing roles/run.jobs.run on ${JOB_NAME}"
+            echo "::error::Grant the binding via: gcloud run jobs add-iam-policy-binding ${JOB_NAME} --region ${JOB_LOCATION} --member serviceAccount:${TASK_INVOKER_SA} --role roles/run.jobs.run"
+            exit 1
+          fi
 
           echo "Dedicated task-invoker SA name: ${TASK_INVOKER_SA}"
 

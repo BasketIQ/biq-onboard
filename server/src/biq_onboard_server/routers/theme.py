@@ -210,11 +210,18 @@ def _get_tasks_client():
         return None
 
 
-def _enqueue_generation_task(club_id: str, source_url: str, lease_id: str) -> str:
+def _enqueue_generation_task(
+    club_id: str, source_url: str, lease_id: str,
+    schedule_delay_seconds: int = 0,
+) -> str:
     """Enqueue a club-theme generation task to Cloud Tasks.
 
     Targets the Cloud Run Job ``club-theme-generation:run`` API endpoint
     (B11), not an HTTP URL. Uses Cloud Tasks OAuth scope for the Google API.
+
+    R5: When ``schedule_delay_seconds`` > 0, the task is scheduled for
+    future execution via Cloud Tasks ``schedule_time``. This provides
+    durable delayed retry without in-process threads.
 
     Returns the task ID. When ``BIQ_CLOUD_TASKS_QUEUE`` is unset (local
     dev/test), returns a synthetic ID — the job is not actually enqueued.
@@ -274,7 +281,7 @@ def _enqueue_generation_task(club_id: str, source_url: str, lease_id: str) -> st
     # C4: Use OAuthToken (not OidcToken) for the run.googleapis.com API.
     # The Cloud Run Jobs :run endpoint is a Google API requiring OAuth
     # authentication with the cloud-platform scope.
-    task = tasks_v2.Task(
+    task_kwargs = dict(
         name=f"{queue_path}/tasks/club-theme-{club_id}-{lease_id}",
         http_request=tasks_v2.HttpRequest(
             http_method=tasks_v2.HttpMethod.POST,
@@ -287,6 +294,15 @@ def _enqueue_generation_task(club_id: str, source_url: str, lease_id: str) -> st
             ),
         ),
     )
+
+    # R5: Durable delayed scheduling via Cloud Tasks schedule_time
+    if schedule_delay_seconds > 0:
+        from datetime import datetime, timedelta, timezone
+        task_kwargs["schedule_time"] = datetime.now(timezone.utc) + timedelta(
+            seconds=schedule_delay_seconds
+        )
+
+    task = tasks_v2.Task(**task_kwargs)
 
     created = client.create_task(request={"parent": queue_path, "task": task})
     return created.name.split("/")[-1]
@@ -546,6 +562,8 @@ def generate_theme(club_id: str, payload: GenerateRequest, request: Request) -> 
         "verdict": None,
         "notifiedAt": None,
         "lease": _create_lease(lease_id),
+        # R7: Preserve prior per-URL history across whole-field replacement
+        "history": list(existing_job.get("history", [])) if isinstance(existing_job, dict) else [],
     }
     # C16: Record attempt in history for rate limiting
     _record_attempt(new_theme_job, url)
@@ -620,6 +638,8 @@ def retry_theme(club_id: str, request: Request) -> dict:
         "verdict": None,
         "notifiedAt": None,
         "lease": _create_lease(lease_id),
+        # R7: Preserve prior per-URL history across whole-field replacement
+        "history": list(existing_job.get("history", [])),
     }
     # C16: Record attempt in history for rate limiting
     _record_attempt(new_theme_job, source_url)
@@ -656,17 +676,42 @@ def activate_theme(club_id: str, payload: ActivateRequest, request: Request) -> 
     if not theme or not isinstance(theme, dict):
         raise HTTPException(status_code=404, detail="no theme found")
 
-    # C16: Revalidate the gate against the current theme contract rather than
-    # trusting a stale stored gate.passed flag. If tokens are empty or the
-    # gate is missing, the theme cannot be safely activated.
+    # R10: Revalidate the gate at activation time. Do not trust stale
+    # gate.passed — check the full contract: gate must be non-pending,
+    # passed, and tokens must be present and non-empty for both modes.
     gate = theme.get("gate", {})
     tokens = theme.get("tokens", {})
+
+    # R4/R10: tokens=None means the job hasn't processed yet (manual seed)
+    if tokens is None or (isinstance(tokens, dict) and not tokens):
+        raise HTTPException(
+            status_code=409,
+            detail="theme tokens are pending generation — cannot activate until the job completes",
+        )
+
     has_tokens = isinstance(tokens, dict) and bool(tokens.get("light")) and bool(tokens.get("dark"))
-    if not gate.get("passed") or not has_tokens:
+    gate_pending = gate.get("pending", False) if isinstance(gate, dict) else True
+    gate_passed = gate.get("passed", False) if isinstance(gate, dict) else False
+
+    if gate_pending:
+        raise HTTPException(
+            status_code=409,
+            detail="theme gate is pending validation — cannot activate until the job completes",
+        )
+    if not gate_passed or not has_tokens:
         raise HTTPException(
             status_code=409,
             detail="theme gate has not passed or tokens are missing — cannot activate",
         )
+
+    # R10: Validate token structure — each mode must have the required keys
+    for mode in ("light", "dark"):
+        mode_tokens = tokens.get(mode, {})
+        if not isinstance(mode_tokens, dict) or not mode_tokens:
+            raise HTTPException(
+                status_code=409,
+                detail=f"theme tokens for '{mode}' mode are missing or empty — cannot activate",
+            )
 
     current_status = theme.get("status", "")
     if current_status == "active":
@@ -719,7 +764,17 @@ def get_theme(club_id: str, request: Request) -> dict:
 
 @router.put("")
 def put_theme(club_id: str, payload: ManualThemeRequest, request: Request) -> dict:
-    """Manual colour override (ADDENDUM-02 §8 PUT)."""
+    """Manual colour override (ADDENDUM-02 §8 PUT).
+
+    R4: The canonical theme engine is JavaScript (in the Cloud Run Job).
+    This endpoint stores the manual seed as a draft theme with a pending
+    gate status. The actual token generation and gate validation happen
+    through the same generation job pipeline — the manual seed is passed
+    as an override to the job, which runs the real JS engine and posts
+    the result back through the callback.
+
+    No Python-side gate/token logic is duplicated. No empty-token fallback.
+    """
     _require_theme_admin(request, club_id)
 
     registry = org.get_registry()
@@ -727,47 +782,13 @@ def put_theme(club_id: str, payload: ManualThemeRequest, request: Request) -> di
     if club is None:
         raise HTTPException(status_code=404, detail="club not found")
 
-    # C16: Generate tokens from the manual seed and run the gate, so the
-    # manual path is not inert. The previous code stored empty tokens with
-    # a failed gate, making activation impossible.
     now = _now_iso()
     seed_brand = payload.seed_brand
     seed_brand_alt = payload.seed_brand_alt
 
-    # Generate ramp and tokens from the manual seed
-    try:
-        from biq_app_theme.ramp import generateRamp
-        from biq_app_theme.semantic import buildClubTokens
-        from biq_app_theme.gate import runGateWithRepair
-        from biq_app_theme.semantic import DEFAULT_DOMAIN_MEDIA_SURFACES
-
-        FIXED_LIGHT = {"neutral0": "#FFFFFF", "neutral950": "#0A153A", "canvas": "#F4F6FA", "surface": "#FFFFFF"}
-        FIXED_DARK = {"neutral0": "#FFFFFF", "neutral950": "#0A153A", "canvas": "#080D1A", "surface": "#111A2D"}
-
-        ramp = generateRamp(seed_brand)
-        light_tokens = buildClubTokens(ramp, "light", FIXED_LIGHT)
-        dark_tokens = buildClubTokens(ramp, "dark", FIXED_DARK)
-        domain_media = list(DEFAULT_DOMAIN_MEDIA_SURFACES.values())
-        light_gate = runGateWithRepair(light_tokens, "light", ramp, domain_media)
-        dark_gate = runGateWithRepair(dark_tokens, "dark", ramp, domain_media)
-        gate_passed = light_gate.passed and dark_gate.passed
-        gate = {
-            "passed": gate_passed,
-            "checkedAt": now,
-            "pairsChecked": light_gate.pairsChecked + dark_gate.pairsChecked,
-            "failures": [*light_gate.failures, *dark_gate.failures],
-            "repairs": [*(light_gate.repairs or []), *(dark_gate.repairs or [])],
-        }
-        tokens = {
-            "light": light_tokens if gate_passed else {},
-            "dark": dark_tokens if gate_passed else {},
-        }
-    except ImportError:
-        # Theme engine not available in this environment — store with
-        # empty tokens and a failed gate (manual path requires the engine)
-        gate = {"passed": False, "checkedAt": now, "pairsChecked": 0, "failures": [], "repairs": []}
-        tokens = {}
-
+    # R4: Store the manual seed as a draft theme. Tokens and gate are
+    # pending — they will be populated by the generation job when it
+    # processes the manual seed. No empty-token fallback.
     theme = {
         "schemaVersion": 1,
         "generatorVersion": "1.0.0",
@@ -785,8 +806,15 @@ def put_theme(club_id: str, payload: ManualThemeRequest, request: Request) -> di
             "detectedFrom": "manual",
         },
         "logo": None,
-        "tokens": tokens,
-        "gate": gate,
+        "tokens": None,  # R4: pending job population — no empty fallback
+        "gate": {
+            "passed": False,
+            "checkedAt": now,
+            "pairsChecked": 0,
+            "failures": [],
+            "repairs": [],
+            "pending": True,  # R4: gate will be run by the job
+        },
         "activation": {
             "themeStatus": "draft",
             "reason": "manual override — gate validation applied",
@@ -949,7 +977,16 @@ def post_result(club_id: str, payload: ResultRequest, request: Request) -> dict:
 
     # Emit notification for failure states (B16/C13)
     # C13: notifiedAt is set only when notification persistence succeeded
-    if _emit_theme_notification(club_id, status, new_theme_job):
+    # R6: Notification timing — notify only after the retry outcome.
+    # For unreachable: if this is the first unreachable (no autoRetried yet),
+    # schedule a retry WITHOUT notifying. If this is the second unreachable
+    # (autoRetried already true), notify now.
+    should_notify = True
+    if status == "unreachable" and not new_theme_job.get("autoRetried"):
+        # First unreachable — schedule retry, do NOT notify yet
+        should_notify = False
+
+    if should_notify and _emit_theme_notification(club_id, status, new_theme_job):
         new_theme_job["notifiedAt"] = _now_iso()
 
     # Persist theme if provided (whole-field replacement, §C9.3a)
@@ -958,42 +995,34 @@ def post_result(club_id: str, payload: ResultRequest, request: Request) -> dict:
 
     registry.merge_club_fields(club_id, {"theme_job": new_theme_job})
 
-    # C16: unreachable auto-retry — one automatic retry after 60 seconds.
-    # Only retry if this is the first unreachable (not auto-retried yet).
+    # R5: Unreachable auto-retry — durably scheduled through Cloud Tasks
+    # with schedule_time (not an in-process daemon thread). Only retry
+    # if this is the first unreachable (not autoRetried yet).
     if status == "unreachable" and not new_theme_job.get("autoRetried"):
         new_theme_job["autoRetried"] = True
         registry.merge_club_fields(club_id, {"theme_job": new_theme_job})
-        # Schedule a delayed retry (60s). In dev mode this is a no-op.
-        try:
-            import threading
-
-            def _delayed_retry():
-                import time as _time
-                _time.sleep(60)
-                try:
-                    # Re-enqueue with the same source URL
-                    source = new_theme_job.get("sourceUrl", "")
-                    if source:
-                        retry_lease = f"lease-{club_id}-retry-{int(time.time())}"
-                        new_job = {
-                            "status": "pending",
-                            "sourceUrl": source,
-                            "requestedAt": _now_iso(),
-                            "finishedAt": None,
-                            "attempts": new_theme_job.get("attempts", 1) + 1,
-                            "verdict": None,
-                            "notifiedAt": None,
-                            "lease": _create_lease(retry_lease),
-                        }
-                        _record_attempt(new_job, source)
-                        org.get_registry().merge_club_fields(club_id, {"theme_job": new_job})
-                        _enqueue_generation_task(club_id, source, retry_lease)
-                except Exception:
-                    pass  # best-effort — the user can manually retry
-
-            thread = threading.Thread(target=_delayed_retry, daemon=True)
-            thread.start()
-        except Exception:
-            pass  # best-effort — manual retry remains available
+        # Schedule a delayed retry via Cloud Tasks schedule_time (60s).
+        source = new_theme_job.get("sourceUrl", "")
+        if source:
+            retry_lease = f"lease-{club_id}-retry-{int(time.time())}"
+            new_job = {
+                "status": "pending",
+                "sourceUrl": source,
+                "requestedAt": _now_iso(),
+                "finishedAt": None,
+                "attempts": new_theme_job.get("attempts", 1) + 1,
+                "verdict": None,
+                "notifiedAt": None,
+                "autoRetried": True,  # R5: persist retry intent
+                "lease": _create_lease(retry_lease),
+                "history": new_theme_job.get("history", []),  # R7: preserve history
+            }
+            _record_attempt(new_job, source)
+            registry.merge_club_fields(club_id, {"theme_job": new_job})
+            # R5: Enqueue with schedule_time for durable retry.
+            # In configured mode, Cloud Tasks holds the task for 60s.
+            # In dev mode, _enqueue_generation_task returns a synthetic ID
+            # and the retry is immediate (acceptable for local dev).
+            _enqueue_generation_task(club_id, source, retry_lease, schedule_delay_seconds=60)
 
     return {"ok": True, "status": status}

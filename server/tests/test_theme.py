@@ -476,3 +476,167 @@ def test_result_rejects_source_url_mismatch(client, monkeypatch):
     )
     assert resp.status_code == 409
     assert "source url" in resp.json()["detail"].lower()
+
+
+# ─── R7: Rate-limit history preservation ───────────────────────────────
+
+
+def test_r7_history_preserved_across_replacement(monkeypatch):
+    """R7: When generate_theme() creates a new theme_job, prior history
+    must be preserved so the 5/hour + 20/day counters accumulate.
+    """
+    from biq_onboard_server.routers import theme
+    from biq_onboard_server import org
+    from biq_core.org import Club
+    from datetime import datetime, timezone
+
+    org.reset_for_tests()
+    monkeypatch.delenv("BIQ_CLOUD_TASKS_QUEUE", raising=False)
+
+    reg = org.get_registry()
+    # Seed a club with existing history (3 prior attempts)
+    now_iso = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    reg.upsert_club(Club(
+        id="r7club",
+        name="R7 Club",
+        website="https://example.com",
+        status="active",
+        theme_job={
+            "status": "failed",
+            "sourceUrl": "https://example.com",
+            "history": [
+                {"sourceUrl": "https://example.com", "requestedAt": now_iso},
+                {"sourceUrl": "https://example.com", "requestedAt": now_iso},
+                {"sourceUrl": "https://example.com", "requestedAt": now_iso},
+            ],
+        },
+    ))
+
+    # Check rate limit — should see 3 attempts, allow more
+    assert theme._check_rate_limit("r7club", "https://example.com") == True
+
+    # Now generate a new theme — history should be preserved + new entry added
+    # Clear the lease so generate doesn't see an active job, but keep history
+    club = reg.get_club("r7club")
+    club.theme_job["lease"] = None
+    club.theme_job["status"] = "failed"
+    club.theme_job["finishedAt"] = now_iso
+    reg.upsert_club(club)
+
+    # Use the generate endpoint via the test client
+    from biq_onboard_server.app import create_app
+    from fastapi.testclient import TestClient
+    c = TestClient(create_app())
+    c.post("/api/auth/login", json={"username": "admin", "password": "T3st1ng!"})
+
+    resp = c.post("/api/admin/clubs/r7club/theme/generate",
+                  json={"homepage_url": "https://example.com"})
+    assert resp.status_code == 200, resp.text
+
+    # Verify history was preserved (3 prior + 1 new = 4)
+    club = reg.get_club("r7club")
+    history = club.theme_job.get("history", [])
+    assert len(history) == 4, \
+        f"R7: History should have 4 entries (3 prior + 1 new), got {len(history)}"
+
+
+def test_r7_rate_limit_5_per_hour(monkeypatch):
+    """R7: 6th attempt within 1 hour should be rejected."""
+    from biq_onboard_server.routers import theme
+    from biq_onboard_server import org
+    from biq_core.org import Club
+    from datetime import datetime, timezone, timedelta
+
+    org.reset_for_tests()
+    reg = org.get_registry()
+    now = datetime.now(timezone.utc)
+    # Create 5 entries within the last hour
+    history = []
+    for i in range(5):
+        ts = (now - timedelta(minutes=i * 5)).isoformat().replace("+00:00", "Z")
+        history.append({"sourceUrl": "https://example.com", "requestedAt": ts})
+
+    reg.upsert_club(Club(
+        id="r7hour",
+        name="R7 Hour Club",
+        website="https://example.com",
+        status="active",
+        theme_job={
+            "status": "failed",
+            "sourceUrl": "https://example.com",
+            "history": history,
+        },
+    ))
+
+    # 6th attempt should be rejected
+    assert theme._check_rate_limit("r7hour", "https://example.com") == False, \
+        "R7: 6th attempt within 1 hour should be rate-limited"
+
+
+def test_r7_rate_limit_20_per_day(monkeypatch):
+    """R7: 21st attempt within 1 day should be rejected."""
+    from biq_onboard_server.routers import theme
+    from biq_onboard_server import org
+    from biq_core.org import Club
+    from datetime import datetime, timezone, timedelta
+
+    org.reset_for_tests()
+    reg = org.get_registry()
+    now = datetime.now(timezone.utc)
+    # Create 20 entries within the last day, spread >1hr apart so hour limit doesn't hit
+    # 20 entries over 23 hours: each ~1.15 hours apart, 5 per hour max
+    history = []
+    for i in range(20):
+        # Spread: 0.1, 1.2, 2.3, ... hours ago — within 24h, >1hr apart groups
+        ts = (now - timedelta(minutes=int(i * 70))).isoformat().replace("+00:00", "Z")
+        history.append({"sourceUrl": "https://example.com", "requestedAt": ts})
+
+    reg.upsert_club(Club(
+        id="r7day",
+        name="R7 Day Club",
+        website="https://example.com",
+        status="active",
+        theme_job={
+            "status": "failed",
+            "sourceUrl": "https://example.com",
+            "history": history,
+        },
+    ))
+
+    # 21st attempt should be rejected
+    assert theme._check_rate_limit("r7day", "https://example.com") == False, \
+        "R7: 21st attempt within 1 day should be rate-limited"
+
+
+def test_r7_rate_limit_url_separation(monkeypatch):
+    """R7: Rate limits are per club + normalized URL — different URLs don't count."""
+    from biq_onboard_server.routers import theme
+    from biq_onboard_server import org
+    from biq_core.org import Club
+    from datetime import datetime, timezone, timedelta
+
+    org.reset_for_tests()
+    reg = org.get_registry()
+    now = datetime.now(timezone.utc)
+    # 5 attempts to example.com
+    history = []
+    for i in range(5):
+        ts = (now - timedelta(minutes=i * 5)).isoformat().replace("+00:00", "Z")
+        history.append({"sourceUrl": "https://example.com", "requestedAt": ts})
+
+    reg.upsert_club(Club(
+        id="r7url",
+        name="R7 URL Club",
+        website="https://example.com",
+        status="active",
+        theme_job={
+            "status": "failed",
+            "sourceUrl": "https://example.com",
+            "history": history,
+        },
+    ))
+
+    # Same URL — should be rate-limited
+    assert theme._check_rate_limit("r7url", "https://example.com") == False
+    # Different URL — should be allowed
+    assert theme._check_rate_limit("r7url", "https://other.com") == True

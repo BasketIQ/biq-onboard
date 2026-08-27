@@ -139,7 +139,7 @@ jobs:
           if ! gcloud iam service-accounts describe "${TASK_INVOKER_SA}" --project "${PROJECT_ID}" >/dev/null 2>&1; then
             echo "::error::Dedicated task-invoker SA does not exist: ${TASK_INVOKER_SA}"
             echo "::error::Provision it via the governed IAM path (console/terraform) with:"
-            echo "::error::  roles/run.jobs.run on club-theme-generation Cloud Run Job"
+            echo "::error::  roles/run.jobsExecutorWithOverrides on club-theme-generation Cloud Run Job"
             echo "::error::  roles/iam.serviceAccountTokenCreator for Cloud Tasks service agent"
             exit 1
           fi
@@ -154,15 +154,28 @@ jobs:
             --format="json(bindings)" 2>/dev/null || echo '{"bindings":[]}')
 
           if echo "${POLICY}" | jq -e --arg sa "serviceAccount:${TASK_INVOKER_SA}" \
-            '.bindings[]? | select(.role=="roles/run.jobs.run") | .members[]? | select(.==$sa)' >/dev/null 2>&1; then
-            echo "Verified: ${TASK_INVOKER_SA} has roles/run.jobs.run on ${JOB_NAME}"
+            '.bindings[]? | select(.role=="roles/run.jobsExecutorWithOverrides") | .members[]? | select(.==$sa)' >/dev/null 2>&1; then
+            echo "Verified: ${TASK_INVOKER_SA} has roles/run.jobsExecutorWithOverrides on ${JOB_NAME}"
           else
-            echo "::error::${TASK_INVOKER_SA} is missing roles/run.jobs.run on ${JOB_NAME}"
-            echo "::error::Grant the binding via: gcloud run jobs add-iam-policy-binding ${JOB_NAME} --region ${JOB_LOCATION} --member serviceAccount:${TASK_INVOKER_SA} --role roles/run.jobs.run"
+            echo "::error::${TASK_INVOKER_SA} is missing roles/run.jobsExecutorWithOverrides on ${JOB_NAME}"
+            echo "::error::Grant the binding via: gcloud run jobs add-iam-policy-binding ${JOB_NAME} --region ${JOB_LOCATION} --member serviceAccount:${TASK_INVOKER_SA} --role roles/run.jobsExecutorWithOverrides"
             exit 1
           fi
 
           echo "Dedicated task-invoker SA name: ${TASK_INVOKER_SA}"
+
+          # V1: Verify Cloud Tasks service agent has tokenCreator on the invoker SA
+          PROJECT_NUM=$(gcloud projects describe "${PROJECT_ID}" --format="value(projectNumber)" 2>/dev/null || echo "")
+          CT_SA="service-${PROJECT_NUM}@gcp-sa-cloudtasks.iam.gserviceaccount.com"
+          SA_POLICY=$(gcloud iam service-accounts get-iam-policy "${TASK_INVOKER_SA}" --project "${PROJECT_ID}" --format="json" 2>/dev/null || echo "{}")
+          if echo "${SA_POLICY}" | jq -e --arg ct_sa "serviceAccount:${CT_SA}" \
+            '.bindings[]? | select(.role=="roles/iam.serviceAccountTokenCreator") | .members[]? | select(.==$ct_sa)' >/dev/null 2>&1; then
+            echo "Verified: Cloud Tasks SA (${CT_SA}) has roles/iam.serviceAccountTokenCreator on ${TASK_INVOKER_SA}"
+          else
+            echo "::error::Cloud Tasks SA (${CT_SA}) is missing roles/iam.serviceAccountTokenCreator on ${TASK_INVOKER_SA}"
+            echo "::error::Grant via: gcloud iam service-accounts add-iam-policy-binding ${TASK_INVOKER_SA} --project ${PROJECT_ID} --member serviceAccount:${CT_SA} --role roles/iam.serviceAccountTokenCreator"
+            exit 1
+          fi
 
       - name: Deploy to Cloud Run
         env:

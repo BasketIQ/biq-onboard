@@ -196,6 +196,41 @@ def create_my_club(payload: ClubSelfCreate, request: Request) -> dict:
     except Exception:
         pass
 
+    # B9/B10: if website present, enqueue theme generation asynchronously.
+    # Club creation never fails or rolls back because optional generation
+    # cannot enqueue/complete.
+    if website:
+        try:
+            from .theme import _enqueue_generation_task, _create_lease
+            import time as _time
+            from datetime import datetime, timezone
+
+            lease_id = f"lease-{club_id}-{int(_time.time())}"
+            now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            theme_job = {
+                "status": "pending",
+                "sourceUrl": website,
+                "requestedAt": now,
+                "finishedAt": None,
+                "attempts": 1,
+                "verdict": None,
+                "notifiedAt": None,
+                "lease": _create_lease(lease_id),
+            }
+            registry.merge_club_fields(club_id, {"theme_job": theme_job})
+
+            # Enqueue after state is persisted (B10: worker cannot race absent state)
+            try:
+                _enqueue_generation_task(club_id, website, lease_id)
+            except Exception:
+                # Enqueue failure → club succeeds, persisted recoverable job failure (B9)
+                theme_job["status"] = "failed"
+                theme_job["finishedAt"] = now
+                theme_job["reason"] = "enqueue failed after club creation"
+                registry.merge_club_fields(club_id, {"theme_job": theme_job})
+        except Exception:
+            pass  # best-effort — club creation must not fail
+
     return {
         "ok": True,
         "club": {"id": club_id, "name": club_name, "website": website or None},

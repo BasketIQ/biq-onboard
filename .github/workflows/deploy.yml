@@ -137,7 +137,7 @@ jobs:
             --image "${IMAGE_URI}" \
             --allow-unauthenticated \
             --port 8080 \
-            --set-env-vars "BIQ_ENV=prod,BIQ_ORG_STORE=firestore,BIQ_ROLES_STORE=firestore,GCP_PROJECT_ID=${{ vars.GCP_PROJECT_ID }},GOOGLE_CLOUD_PROJECT=${{ vars.GCP_PROJECT_ID }},BIQ_ONBOARD_USER=${{ secrets.BIQ_ONBOARD_USER }},BIQ_ONBOARD_PASSWORD=${{ secrets.BIQ_ONBOARD_PASSWORD }},BIQ_ONBOARD_SESSION_SECRET=${{ secrets.BIQ_ONBOARD_SESSION_SECRET }}" \
+            --set-env-vars "BIQ_ENV=prod,BIQ_ORG_STORE=firestore,BIQ_ROLES_STORE=firestore,GCP_PROJECT_ID=${{ vars.GCP_PROJECT_ID }},GOOGLE_CLOUD_PROJECT=${{ vars.GCP_PROJECT_ID }},BIQ_ONBOARD_USER=${{ secrets.BIQ_ONBOARD_USER }},BIQ_ONBOARD_PASSWORD=${{ secrets.BIQ_ONBOARD_PASSWORD }},BIQ_ONBOARD_SESSION_SECRET=${{ secrets.BIQ_ONBOARD_SESSION_SECRET }},BIQ_ONBOARD_S2S_SECRET=${{ secrets.BIQ_ONBOARD_S2S_SECRET }},BIQ_THEME_JOB_RESULT_TOKEN=${{ secrets.BIQ_THEME_JOB_RESULT_TOKEN }},BIQ_CLOUD_TASKS_QUEUE=club-theme-generation,GCP_TASKS_QUEUE=club-theme-generation,GCP_TASKS_LOCATION=europe-west1,GCP_THEME_JOB_NAME=club-theme-generation,GCP_TASK_INVOKER_SA=${{ vars.GCP_TASK_INVOKER_SA }},BIQ_ONBOARD_CALLBACK_URL=${{ vars.BIQ_ONBOARD_CALLBACK_URL }}" \
             --service-account "${DEFAULT_SA}"
 
       - name: Health check

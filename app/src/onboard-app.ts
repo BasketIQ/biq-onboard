@@ -114,6 +114,53 @@ const THEME_STATUS_COPY: Record<string, { label: string; color: string }> = {
   pending: { label: 'Pendiente', color: 'var(--biq-blue)' },
 };
 
+// B14: themeJob state matrix — presentation + action per canonical state
+const THEME_JOB_COPY: Record<string, { title: string; description: string; action?: string }> = {
+  pending: {
+    title: 'Personalización en cola',
+    description: 'Tu tema se generará automáticamente en unos segundos.',
+  },
+  running: {
+    title: 'Analizando la web del club',
+    description: 'Extrayendo colores y generando el tema.',
+  },
+  succeeded: {
+    title: 'Tema disponible y activo',
+    description: 'El tema del club está activo. Puedes ajustarlo, regenerarlo o revertirlo.',
+    action: 'adjust/regenerate/revert',
+  },
+  uncertain: {
+    title: 'Revisión necesaria',
+    description: 'La web parece legítima pero no tenemos suficiente confianza para aplicar los colores automáticamente.',
+    action: 'Sí, usarlo / cambiar URL',
+  },
+  rejected_not_a_club: {
+    title: 'No parece un club',
+    description: 'La URL indicada no corresponde a un club de baloncesto.',
+    action: 'Corregir URL / tema manual',
+  },
+  unsupported_source: {
+    title: 'Fuente no soportada',
+    description: 'No podemos extraer colores de este tipo de página.',
+    action: 'Añadir web / tema manual',
+  },
+  unreachable: {
+    title: 'No se pudo acceder',
+    description: 'La web del club no respondió después de varios intentos.',
+    action: 'Reintentar / cambiar URL',
+  },
+  failed: {
+    title: 'Error técnico',
+    description: 'Se produjo un error al generar el tema.',
+    action: 'Reintentar / tema manual',
+  },
+  reverted: {
+    title: 'Tema BasketIQ por defecto',
+    description: 'El tema se ha revertido al BasketIQ por defecto.',
+    action: 'Generar de nuevo',
+  },
+};
+
 // ─── Helpers ────────────────────────────────────────────────────────────
 
 const escapeHtml = (s: string): string =>
@@ -153,6 +200,8 @@ class BiqOnboardApp extends HTMLElement {
   // Club step (ADDENDUM-07 §6) per-card feedback
   private _stepError: { scope: 'join' | 'create'; message: string } | null = null;
   private _stepMessage = '';
+  private _pollTimer: ReturnType<typeof setTimeout> | null = null;
+  private _pollingClubId: string | null = null;
 
   constructor() {
     super();
@@ -189,7 +238,7 @@ class BiqOnboardApp extends HTMLElement {
     this._error = null;
     this.render();
     try {
-      const res = await fetch(`/api/admin/clubs/${clubId}/theme`, {
+      const res = await fetch(`/api/clubs/${clubId}/theme`, {
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
       });
@@ -197,12 +246,73 @@ class BiqOnboardApp extends HTMLElement {
       const data = await res.json();
       this._theme = data.theme || null;
       this._themeJob = data.themeJob || null;
+      // B14: start polling if pending/running
+      this._maybeStartPolling(clubId);
+      // B15: emit state event to shell
+      this._emitThemeStateEvent(clubId);
     } catch (err) {
       this._error = (err as Error).message;
     } finally {
       this._loading = false;
       this.render();
     }
+  }
+
+  // B14: Poll only pending/running with bounded backoff
+  private _maybeStartPolling(clubId: string): void {
+    const status = this._themeJob?.status;
+    if (status !== 'pending' && status !== 'running') {
+      this._stopPolling();
+      return;
+    }
+    if (this._pollingClubId === clubId && this._pollTimer) return;
+    this._pollingClubId = clubId;
+    this._pollTimer = setTimeout(() => this._pollTheme(clubId), 3000);
+  }
+
+  private _stopPolling(): void {
+    if (this._pollTimer) {
+      clearTimeout(this._pollTimer);
+      this._pollTimer = null;
+    }
+    this._pollingClubId = null;
+  }
+
+  private async _pollTheme(clubId: string): Promise<void> {
+    // Stop if component disconnected or club changed
+    if (!this.isConnected || this._pollingClubId !== clubId) return;
+    try {
+      const res = await fetch(`/api/clubs/${clubId}/theme`, {
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      if (!res.ok) return;
+      const data = await res.json();
+      const prevStatus = this._themeJob?.status;
+      this._theme = data.theme || null;
+      this._themeJob = data.themeJob || null;
+      const newStatus = this._themeJob?.status;
+      // B15: emit event on status change
+      if (prevStatus !== newStatus) {
+        this._emitThemeStateEvent(clubId);
+      }
+      // Continue polling if still pending/running
+      this._maybeStartPolling(clubId);
+      this.render();
+    } catch {
+      this._stopPolling();
+    }
+  }
+
+  // B15: Emit composed/bubbling state event for shell refresh
+  private _emitThemeStateEvent(clubId: string): void {
+    const status = this._themeJob?.status || 'none';
+    const themeStatus = this._theme?.status || null;
+    this.dispatchEvent(new CustomEvent('biq-theme-state', {
+      bubbles: true,
+      composed: true,
+      detail: { clubId, state: status, themeStatus },
+    }));
   }
 
   // ─── Actions ──────────────────────────────────────────────────────────
@@ -212,7 +322,7 @@ class BiqOnboardApp extends HTMLElement {
     this._error = null;
     this.render();
     try {
-      const res = await fetch(`/api/admin/clubs/${clubId}/theme/generate`, {
+      const res = await fetch(`/api/clubs/${clubId}/theme/generate`, {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
@@ -235,7 +345,7 @@ class BiqOnboardApp extends HTMLElement {
     this._error = null;
     this.render();
     try {
-      const res = await fetch(`/api/admin/clubs/${clubId}/theme`, {
+      const res = await fetch(`/api/clubs/${clubId}/theme`, {
         method: 'PUT',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
@@ -258,7 +368,7 @@ class BiqOnboardApp extends HTMLElement {
     this._error = null;
     this.render();
     try {
-      const res = await fetch(`/api/admin/clubs/${clubId}/theme`, {
+      const res = await fetch(`/api/clubs/${clubId}/theme`, {
         method: 'DELETE',
         credentials: 'include',
       });
@@ -278,7 +388,7 @@ class BiqOnboardApp extends HTMLElement {
     this._loading = true;
     this.render();
     try {
-      const res = await fetch(`/api/admin/clubs/${clubId}/theme/logo-rights`, {
+      const res = await fetch(`/api/clubs/${clubId}/theme/logo-rights`, {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
@@ -287,6 +397,53 @@ class BiqOnboardApp extends HTMLElement {
       if (!res.ok && res.status !== 404) {
         // 404 = endpoint not implemented yet; that's OK for now
         throw new Error(`HTTP ${res.status}`);
+      }
+      await this.loadThemeData(clubId);
+    } catch (err) {
+      this._error = (err as Error).message;
+      this._loading = false;
+      this.render();
+    }
+  }
+
+  // B14: Activate a draft/uncertain theme
+  private async activateTheme(clubId: string): Promise<void> {
+    this._loading = true;
+    this._error = null;
+    this.render();
+    try {
+      const res = await fetch(`/api/clubs/${clubId}/theme/activate`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ confirmed: true }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => null);
+        throw new Error(data?.detail || `HTTP ${res.status}`);
+      }
+      await this.loadThemeData(clubId);
+    } catch (err) {
+      this._error = (err as Error).message;
+      this._loading = false;
+      this.render();
+    }
+  }
+
+  // B14: Retry a failed theme generation
+  private async retryTheme(clubId: string): Promise<void> {
+    this._loading = true;
+    this._error = null;
+    this.render();
+    try {
+      const res = await fetch(`/api/clubs/${clubId}/theme/retry`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => null);
+        throw new Error(data?.detail || `HTTP ${res.status}`);
       }
       await this.loadThemeData(clubId);
     } catch (err) {
@@ -336,6 +493,12 @@ class BiqOnboardApp extends HTMLElement {
     const verdict = job?.verdict?.verdict || (theme?.activation?.themeStatus === 'active' ? 'club_confirmed' : 'uncertain');
     const verdictCopy = VERDICT_COPY[verdict] || VERDICT_COPY.uncertain;
     const statusCopy = theme ? THEME_STATUS_COPY[theme.status] || THEME_STATUS_COPY.pending : null;
+    // B14: themeJob state matrix
+    const jobStatus = job?.status || '';
+    const jobCopy = jobStatus ? THEME_JOB_COPY[jobStatus] : null;
+    const isPolling = jobStatus === 'pending' || jobStatus === 'running';
+    const canActivate = theme && (theme.status === 'draft' || theme.status === 'uncertain' || (jobStatus === 'succeeded' && theme.status !== 'active'));
+    const canRetry = jobStatus === 'failed' || jobStatus === 'unreachable' || jobStatus === 'rejected_not_a_club' || jobStatus === 'unsupported_source';
 
     return `
       <section class="onboard-section">
@@ -348,13 +511,23 @@ class BiqOnboardApp extends HTMLElement {
           <p class="onboard-card-desc">Introduce la URL de la web del club. Extraeremos los colores del tema automáticamente.</p>
           <div class="onboard-form-row">
             <input type="url" class="onboard-input" data-website-input value="${escapeHtml(website)}" placeholder="https://www.miclub.com" />
-            <button class="onboard-btn onboard-btn-primary" data-generate-btn ${this._loading ? 'disabled' : ''}>
-              ${this._loading ? 'Generando…' : 'Generar tema'}
+            <button class="onboard-btn onboard-btn-primary" data-generate-btn ${this._loading || isPolling ? 'disabled' : ''}>
+              ${isPolling ? 'Procesando…' : this._loading ? 'Generando…' : 'Generar tema'}
             </button>
           </div>
         </div>
 
-        ${this._loading && !theme ? '<div class="onboard-loading">Cargando…</div>' : ''}
+        ${jobCopy ? `
+          <div class="onboard-card onboard-theme-job-state" data-job-state="${jobStatus}">
+            <h3 class="onboard-card-title">${escapeHtml(jobCopy.title)}</h3>
+            <p class="onboard-card-desc">${escapeHtml(jobCopy.description)}</p>
+            ${isPolling ? '<div class="onboard-loading">Procesando…</div>' : ''}
+            ${canActivate ? `<button class="onboard-btn onboard-btn-primary" data-activate-btn ${this._loading ? 'disabled' : ''}>Sí, usarlo</button>` : ''}
+            ${canRetry ? `<button class="onboard-btn onboard-btn-primary" data-retry-btn ${this._loading ? 'disabled' : ''}>Reintentar</button>` : ''}
+          </div>
+        ` : ''}
+
+        ${this._loading && !theme && !jobCopy ? '<div class="onboard-loading">Cargando…</div>' : ''}
 
         ${theme ? this.renderBrandingState(theme, verdictCopy, statusCopy) : ''}
         ${theme?.logo ? this.renderLogoSection(theme) : ''}
@@ -794,6 +967,18 @@ class BiqOnboardApp extends HTMLElement {
       affirmBtn.addEventListener('click', () => {
         if (!affirmBtn.disabled) this.affirmLogoRights(clubId);
       });
+    }
+
+    // B14: Activate theme button
+    const activateBtn = this.shadow.querySelector('[data-activate-btn]');
+    if (activateBtn) {
+      activateBtn.addEventListener('click', () => this.activateTheme(clubId));
+    }
+
+    // B14: Retry theme button
+    const retryBtn = this.shadow.querySelector('[data-retry-btn]');
+    if (retryBtn) {
+      retryBtn.addEventListener('click', () => this.retryTheme(clubId));
     }
   }
 }

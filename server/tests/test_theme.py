@@ -204,7 +204,7 @@ def test_enqueue_dev_mode_returns_synthetic_id(monkeypatch):
     from biq_onboard_server.routers import theme as theme_mod
     # Reset cached client
     monkeypatch.setattr(theme_mod, "_tasks_client", None)
-    task_id = theme_mod._enqueue_generation_task("club_x", "https://example.com")
+    task_id = theme_mod._enqueue_generation_task("club_x", "https://example.com", "lease-test-1")
     assert task_id.startswith("dev-task-")
 
 
@@ -272,7 +272,7 @@ def test_enqueue_production_calls_cloud_tasks(monkeypatch):
     import sys
     monkeypatch.setitem(sys.modules, "google.cloud.tasks_v2", MockTasksV2())
 
-    task_id = theme_mod._enqueue_generation_task("club_test", "https://example.com")
+    task_id = theme_mod._enqueue_generation_task("club_test", "https://example.com", "lease-test-1")
 
     # Verify the task ID is from the created task
     assert task_id == "fake-task-123"

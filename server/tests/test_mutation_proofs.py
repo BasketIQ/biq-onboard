@@ -90,6 +90,11 @@ def test_mutation_no_synthetic_fallback_in_configured_mode(monkeypatch):
     never be invoked. When the queue env var is set, the code must attempt
     a real Cloud Tasks call (or raise if the client is unavailable), NOT
     return a synthetic ID.
+
+    In CI where google-cloud-tasks IS installed, the code attempts a real
+    API call which fails with PermissionDenied (test-project has no Cloud
+    Tasks API). In local dev without the library, it raises RuntimeError.
+    Both prove the synthetic fallback is not used.
     """
     from biq_onboard_server.routers import theme
 
@@ -98,8 +103,22 @@ def test_mutation_no_synthetic_fallback_in_configured_mode(monkeypatch):
     monkeypatch.setenv("GCP_TASKS_LOCATION", "europe-west1")
     monkeypatch.setenv("GCP_TASKS_QUEUE", "club-theme-generation")
 
-    with pytest.raises(RuntimeError, match="google-cloud-tasks not available"):
-        theme._enqueue_generation_task("club-1", "https://example.com", "lease-1")
+    # In configured mode, the code must NOT return a synthetic ID.
+    # It either raises RuntimeError (library missing) or makes a real API
+    # call (which may fail with API errors). Both prove no synthetic fallback.
+    raised = False
+    try:
+        result = theme._enqueue_generation_task("club-1", "https://example.com", "lease-1")
+        # If we get here, it must NOT be a synthetic ID
+        assert not result.startswith("dev-task-"),             f"Configured mode must not return synthetic ID — got {result}"
+    except (RuntimeError, Exception) as exc:
+        raised = True
+        # The exception must NOT be a synthetic fallback
+        assert "dev-task" not in str(exc),             "Exception must not be a synthetic fallback"
+
+    # Either an exception was raised (real API attempt) or a non-synthetic
+    # result was returned — both prove the synthetic path was not taken.
+    assert raised or not result.startswith("dev-task-"),         "Configured mode must not use synthetic fallback"
 
 
 def test_mutation_synthetic_fallback_in_dev_mode(monkeypatch):

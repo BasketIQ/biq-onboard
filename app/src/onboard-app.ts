@@ -202,6 +202,9 @@ class BiqOnboardApp extends HTMLElement {
   private _stepMessage = '';
   private _pollTimer: ReturnType<typeof setTimeout> | null = null;
   private _pollingClubId: string | null = null;
+  private _pollBackoff = 3000; // C11: starts at 3s, backs off
+  private _polling = false; // C11: prevent overlap
+  private _visibilityHandler: (() => void) | null = null; // C11: visibility handling
 
   constructor() {
     super();
@@ -258,16 +261,29 @@ class BiqOnboardApp extends HTMLElement {
     }
   }
 
-  // B14: Poll only pending/running with bounded backoff
+  // B14/C11: Poll only pending/running with bounded backoff.
+  // C11 fixes: clear timer before rescheduling, prevent overlap, handle
+  // disconnect/visibility/route change, guard stale responses.
   private _maybeStartPolling(clubId: string): void {
     const status = this._themeJob?.status;
+    // Stop on terminal states
     if (status !== 'pending' && status !== 'running') {
       this._stopPolling();
       return;
     }
-    if (this._pollingClubId === clubId && this._pollTimer) return;
-    this._pollingClubId = clubId;
-    this._pollTimer = setTimeout(() => this._pollTheme(clubId), 3000);
+    // C11: Clear timer before checking to avoid the "truthy timer" deadlock
+    if (this._pollTimer) {
+      clearTimeout(this._pollTimer);
+      this._pollTimer = null;
+    }
+    // Prevent overlap — don't schedule if a poll is in-flight
+    if (this._polling) return;
+    // Club changed — reset backoff
+    if (this._pollingClubId !== clubId) {
+      this._pollingClubId = clubId;
+      this._pollBackoff = 3000;
+    }
+    this._pollTimer = setTimeout(() => this._pollTheme(clubId), this._pollBackoff);
   }
 
   private _stopPolling(): void {
@@ -276,18 +292,69 @@ class BiqOnboardApp extends HTMLElement {
       this._pollTimer = null;
     }
     this._pollingClubId = null;
+    this._polling = false;
+    this._pollBackoff = 3000;
+  }
+
+  // C11: Lifecycle — stop polling on disconnect, resume on reconnect
+  disconnectedCallback(): void {
+    super.disconnectedCallback?.();
+    this._stopPolling();
+    // Remove visibility handler
+    if (this._visibilityHandler) {
+      document.removeEventListener('visibilitychange', this._visibilityHandler);
+      this._visibilityHandler = null;
+    }
+  }
+
+  connectedCallback(): void {
+    super.connectedCallback?.();
+    // C11: Resume polling on visibility/entry if theme job is pending/running
+    this._visibilityHandler = () => {
+      if (document.visibilityState === 'visible' && this._pollingClubId) {
+        const clubId = this._pollingClubId;
+        this._pollingClubId = null; // force reschedule
+        this._maybeStartPolling(clubId);
+      } else if (document.visibilityState === 'hidden') {
+        // C11: Stop polling when page is hidden
+        if (this._pollTimer) {
+          clearTimeout(this._pollTimer);
+          this._pollTimer = null;
+        }
+      }
+    };
+    document.addEventListener('visibilitychange', this._visibilityHandler);
   }
 
   private async _pollTheme(clubId: string): Promise<void> {
-    // Stop if component disconnected or club changed
-    if (!this.isConnected || this._pollingClubId !== clubId) return;
+    // C11: Stop if component disconnected or club changed
+    if (!this.isConnected || this._pollingClubId !== clubId) {
+      this._pollTimer = null;
+      return;
+    }
+    // C11: Clear timer before polling to allow rescheduling
+    this._pollTimer = null;
+    this._polling = true;
     try {
       const res = await fetch(`/api/clubs/${clubId}/theme`, {
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
       });
-      if (!res.ok) return;
+      // C11: On non-OK, retry with backoff (don't just return)
+      if (!res.ok) {
+        this._polling = false;
+        // C11: Bounded backoff — max 30s
+        this._pollBackoff = Math.min(this._pollBackoff * 1.5, 30000);
+        this._maybeStartPolling(clubId);
+        return;
+      }
       const data = await res.json();
+      // C11: Guard stale responses — check club ID matches
+      const responseClubId = data.themeJob?.clubId || data.theme?.clubId;
+      if (responseClubId && responseClubId !== clubId) {
+        this._polling = false;
+        return; // stale response for a different club
+      }
       const prevStatus = this._themeJob?.status;
       this._theme = data.theme || null;
       this._themeJob = data.themeJob || null;
@@ -296,11 +363,17 @@ class BiqOnboardApp extends HTMLElement {
       if (prevStatus !== newStatus) {
         this._emitThemeStateEvent(clubId);
       }
+      this._polling = false;
+      // Reset backoff on successful poll
+      this._pollBackoff = 3000;
       // Continue polling if still pending/running
       this._maybeStartPolling(clubId);
       this.render();
     } catch {
-      this._stopPolling();
+      // C11: On network error, retry with backoff instead of stopping
+      this._polling = false;
+      this._pollBackoff = Math.min(this._pollBackoff * 1.5, 30000);
+      this._maybeStartPolling(clubId);
     }
   }
 

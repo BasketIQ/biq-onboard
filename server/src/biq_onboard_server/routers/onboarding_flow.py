@@ -179,16 +179,20 @@ def create_my_club(payload: ClubSelfCreate, request: Request) -> dict:
     # as the rest of the codebase; the user record is the source of truth).
     # The creator also gets ``sports_director`` so they can create and manage
     # methodology from day one — the club owner is its first director.
+    #
+    # C3: Keep distinct org_registry and role_registry variables. The previous
+    # code reassigned `registry` to the role registry, shadowing the Org
+    # Registry and causing theme_job persistence to fail silently.
     try:
         from biq_core.roles import RoleAssignment, get_role_registry
 
-        registry = get_role_registry()
-        registry.put_assignment(
+        role_registry = get_role_registry()
+        role_registry.put_assignment(
             RoleAssignment(
                 user_id=membership_id, role="administrator", scope=f"club:{club_id}"
             )
         )
-        registry.put_assignment(
+        role_registry.put_assignment(
             RoleAssignment(
                 user_id=membership_id, role="sports_director", scope=f"club:{club_id}"
             )
@@ -199,37 +203,40 @@ def create_my_club(payload: ClubSelfCreate, request: Request) -> dict:
     # B9/B10: if website present, enqueue theme generation asynchronously.
     # Club creation never fails or rolls back because optional generation
     # cannot enqueue/complete.
+    #
+    # C3: Use the org_registry (not the role_registry) for merge_club_fields.
+    # Do not swallow orchestration defects with a broad except:pass —
+    # persist a visible failed job when enqueue fails.
     if website:
+        from .theme import _enqueue_generation_task, _create_lease
+        import time as _time
+        from datetime import datetime, timezone
+
+        lease_id = f"lease-{club_id}-{int(_time.time())}"
+        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        theme_job = {
+            "status": "pending",
+            "sourceUrl": website,
+            "requestedAt": now,
+            "finishedAt": None,
+            "attempts": 1,
+            "verdict": None,
+            "notifiedAt": None,
+            "lease": _create_lease(lease_id),
+        }
+        # Persist pending state BEFORE dispatch (B10: worker cannot race absent state)
+        registry.merge_club_fields(club_id, {"theme_job": theme_job})
+
+        # Enqueue after state is persisted. Enqueue failure → club succeeds,
+        # persisted recoverable job failure (B9). Do NOT swallow this with a
+        # broad except:pass (C3).
         try:
-            from .theme import _enqueue_generation_task, _create_lease
-            import time as _time
-            from datetime import datetime, timezone
-
-            lease_id = f"lease-{club_id}-{int(_time.time())}"
-            now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-            theme_job = {
-                "status": "pending",
-                "sourceUrl": website,
-                "requestedAt": now,
-                "finishedAt": None,
-                "attempts": 1,
-                "verdict": None,
-                "notifiedAt": None,
-                "lease": _create_lease(lease_id),
-            }
+            _enqueue_generation_task(club_id, website, lease_id)
+        except Exception as exc:
+            theme_job["status"] = "failed"
+            theme_job["finishedAt"] = now
+            theme_job["reason"] = f"enqueue failed after club creation: {exc}"
             registry.merge_club_fields(club_id, {"theme_job": theme_job})
-
-            # Enqueue after state is persisted (B10: worker cannot race absent state)
-            try:
-                _enqueue_generation_task(club_id, website, lease_id)
-            except Exception:
-                # Enqueue failure → club succeeds, persisted recoverable job failure (B9)
-                theme_job["status"] = "failed"
-                theme_job["finishedAt"] = now
-                theme_job["reason"] = "enqueue failed after club creation"
-                registry.merge_club_fields(club_id, {"theme_job": theme_job})
-        except Exception:
-            pass  # best-effort — club creation must not fail
 
     return {
         "ok": True,

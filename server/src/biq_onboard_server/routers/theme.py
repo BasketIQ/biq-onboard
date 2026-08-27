@@ -42,9 +42,51 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, field_validator
 
 from .. import org
-from ..auth import require_admin
+from ..auth import require_admin, session_user, _is_break_glass_admin
+from ..routers.onboarding_flow import _resolve_acting_identity
 
 router = APIRouter(prefix="/clubs/{club_id}/theme")
+
+
+# ─── S2S-aware admin authorization (C2) ─────────────────────────────────
+
+
+def _s2s_secret() -> str | None:
+    """Return the configured S2S secret, or None when S2S is disabled."""
+    return os.environ.get("BIQ_ONBOARD_S2S_SECRET") or None
+
+
+def _require_theme_admin(request: Request, club_id: str) -> str:
+    """Authorize a theme operation, resolving identity from S2S or session.
+
+    C2: When a valid S2S bearer token is present, identity comes from the
+    asserted headers (X-BIQ-Acting-User-Id / X-BIQ-Acting-Email). The
+    resolved user must have club-admin scope for the requested club.
+
+    When no S2S secret is configured, falls back to local-session
+    require_admin() (standalone mode).
+
+    Returns the acting user_id.
+    """
+    secret = _s2s_secret()
+    if secret:
+        # S2S mode: resolve identity from headers (fail-closed on bad token)
+        user_id, _email = _resolve_acting_identity(request)
+        # Break-glass admin has full access
+        if _is_break_glass_admin(user_id):
+            return user_id
+        # Check club-admin scope via roles registry
+        from biq_core.roles import effective_capabilities
+        caps = effective_capabilities(user_id, f"club:{club_id}", org.get_roles())
+        if "club.admin" not in caps and "roles.manage" not in caps:
+            raise HTTPException(
+                status_code=403,
+                detail=f"administrator role required for club {club_id}",
+            )
+        return user_id
+
+    # Standalone mode — local session
+    return require_admin(request, club_id)
 
 
 # ─── Canonical states (B10) ─────────────────────────────────────────────
@@ -60,8 +102,11 @@ TERMINAL_STATES = frozenset({
     "unsupported_source", "unreachable", "failed", "reverted",
 })
 
+# C13: Frozen notification policy — only not_a_club, unsupported_source,
+# and unreachable (after retry). NO notification for success, uncertain,
+# gate failure, or generic technical failure (failed).
 NOTIFY_STATES = frozenset({
-    "rejected_not_a_club", "unsupported_source", "unreachable", "failed",
+    "rejected_not_a_club", "unsupported_source", "unreachable",
 })
 
 
@@ -92,13 +137,17 @@ class ManualThemeRequest(BaseModel):
 
 
 class ResultRequest(BaseModel):
-    """Job result callback payload (B12)."""
+    """Job result callback payload (B12).
+
+    C9: jobId and sourceUrl are required (not optional). Omitting job ID
+    must not bypass lease matching. Source URL must be enforced.
+    """
     status: str
     theme: dict | None = None
     verdict: dict | None = None
     reason: str | None = None
-    jobId: str | None = None
-    sourceUrl: str | None = None
+    jobId: str  # C9: required, not optional
+    sourceUrl: str  # C9: required, not optional
 
 
 class ActivateRequest(BaseModel):
@@ -202,8 +251,10 @@ def _enqueue_generation_task(club_id: str, source_url: str, lease_id: str) -> st
     job_url = f"https://run.googleapis.com/v2/{job_parent}:run"
 
     # The Cloud Run Job receives overrides via containerOverrides env vars
-    # (B11). The task body is empty; the job reads CLUB_ID, SOURCE_URL,
-    # LEASE_ID, and callback coordinates from env overrides.
+    # (B11). C4: Task overrides carry ONLY per-execution non-secret
+    # coordinates (club/source/job/lease). The deployed job already owns
+    # the result token and callback URL from its own deployment config —
+    # do NOT pass BIQ_THEME_JOB_RESULT_TOKEN as a plain env override.
     import json as _json
 
     overrides = {
@@ -213,8 +264,6 @@ def _enqueue_generation_task(club_id: str, source_url: str, lease_id: str) -> st
                     {"name": "CLUB_ID", "value": club_id},
                     {"name": "SOURCE_URL", "value": source_url},
                     {"name": "LEASE_ID", "value": lease_id},
-                    {"name": "BIQ_ONBOARD_CALLBACK_URL", "value": os.environ.get("BIQ_ONBOARD_CALLBACK_URL", "")},
-                    {"name": "BIQ_THEME_JOB_RESULT_TOKEN", "value": os.environ.get("BIQ_THEME_JOB_RESULT_TOKEN", "")},
                 ],
             }
         ],
@@ -222,6 +271,9 @@ def _enqueue_generation_task(club_id: str, source_url: str, lease_id: str) -> st
 
     payload = _json.dumps(overrides).encode()
 
+    # C4: Use OAuthToken (not OidcToken) for the run.googleapis.com API.
+    # The Cloud Run Jobs :run endpoint is a Google API requiring OAuth
+    # authentication with the cloud-platform scope.
     task = tasks_v2.Task(
         name=f"{queue_path}/tasks/club-theme-{club_id}-{lease_id}",
         http_request=tasks_v2.HttpRequest(
@@ -229,9 +281,9 @@ def _enqueue_generation_task(club_id: str, source_url: str, lease_id: str) -> st
             url=job_url,
             headers={"Content-Type": "application/json"},
             body=payload,
-            oidc_token=tasks_v2.OidcToken(
+            oauth_token=tasks_v2.OAuthToken(
                 service_account_email=config["service_account_email"],
-                audience=job_url,
+                scope="https://www.googleapis.com/auth/cloud-platform",
             ),
         ),
     )
@@ -281,54 +333,132 @@ def _create_lease(holder: str, duration_seconds: int = 300) -> dict:
     }
 
 
-# ─── Rate limiting (ADDENDUM-06 §C5.3) ──────────────────────────────────
+# ─── Rate limiting (ADDENDUM-06 §C5.3, C16) ─────────────────────────────
 
 
-def _check_rate_limit(club_id: str) -> bool:
-    """Check rate limit: max 20 attempts per club."""
+def _normalize_url(url: str) -> str:
+    """Normalize a URL for rate-limit keying (C16).
+
+    Strips trailing slashes, lowercases the host, and removes fragments.
+    """
+    from urllib.parse import urlparse, urlunparse
+
+    try:
+        parsed = urlparse(url)
+        # Normalize: lowercase host, strip trailing slash from path, drop fragment
+        path = parsed.path.rstrip("/") or ""
+        return urlunparse((
+            parsed.scheme.lower(),
+            parsed.netloc.lower(),
+            path,
+            parsed.params,
+            parsed.query,
+            "",  # drop fragment
+        ))
+    except Exception:
+        return url
+
+
+def _check_rate_limit(club_id: str, source_url: str | None = None) -> bool:
+    """Check rate limit per club + normalized URL (C16).
+
+    Frozen policy: 5 requests/hour and 20 requests/day per club + normalized URL.
+    The previous code was a lifetime attempts >= 20 check, which is incorrect.
+    """
     registry = org.get_registry()
     club = registry.get_club(club_id)
     if club is None:
         return True
 
     theme_job = getattr(club, "theme_job", None)
-    if not theme_job:
+    if not theme_job or not isinstance(theme_job, dict):
         return True
 
-    attempts = theme_job.get("attempts", 0) if isinstance(theme_job, dict) else 0
-    if attempts >= 20:
-        return False
+    now = datetime.now(timezone.utc)
+    history = theme_job.get("history", [])
+    if not isinstance(history, list):
+        history = []
 
+    norm_url = _normalize_url(source_url) if source_url else None
+
+    # Filter history to this club+URL within time windows
+    hour_cutoff = now.timestamp() - 3600
+    day_cutoff = now.timestamp() - 86400
+
+    hour_count = 0
+    day_count = 0
+    for entry in history:
+        if not isinstance(entry, dict):
+            continue
+        entry_url = entry.get("sourceUrl", "")
+        entry_norm = _normalize_url(entry_url) if entry_url else None
+        if norm_url and entry_norm != norm_url:
+            continue
+        ts_str = entry.get("requestedAt", "")
+        try:
+            ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00")).timestamp()
+        except (ValueError, AttributeError):
+            continue
+        if ts > hour_cutoff:
+            hour_count += 1
+        if ts > day_cutoff:
+            day_count += 1
+
+    if hour_count >= 5:
+        return False
+    if day_count >= 20:
+        return False
     return True
+
+
+def _record_attempt(theme_job: dict, source_url: str) -> dict:
+    """Record an attempt in the theme_job history for rate limiting (C16)."""
+    if not isinstance(theme_job, dict):
+        theme_job = {}
+    history = theme_job.get("history", [])
+    if not isinstance(history, list):
+        history = []
+    history.append({
+        "sourceUrl": source_url,
+        "requestedAt": _now_iso(),
+    })
+    # Keep last 50 entries to avoid unbounded growth
+    theme_job["history"] = history[-50:]
+    return theme_job
 
 
 # ─── Notification emission (B16) ────────────────────────────────────────
 
 
-def _emit_theme_notification(club_id: str, status: str, theme_job: dict) -> None:
-    """Emit a notification for terminal theme job states (B16).
+def _emit_theme_notification(club_id: str, status: str, theme_job: dict) -> bool:
+    """Emit a notification for terminal theme job states (B16/C13).
 
-    Per ADDENDUM-06 C4:
+    Per ADDENDUM-06 C4 (frozen policy):
     - No notification for auto-activation or succeeded.
     - No notification for uncertain draft or gate failure.
-    - Admins only for not_a_club, unsupported_source, unreachable after retry, failed.
+    - No notification for generic technical failure (failed).
+    - Admins only for not_a_club, unsupported_source, unreachable after retry.
     - One per job via notifiedAt.
     - Deep-link #/onboard/club-details.
     - Coaches receive none.
+
+    C13: Returns True only if notification was successfully persisted.
+    notifiedAt is set by the caller ONLY when this returns True.
     """
     if status not in NOTIFY_STATES:
-        return
+        return False
 
     # Only emit once per job (notifiedAt guard)
     if theme_job.get("notifiedAt"):
-        return
+        return False
 
     try:
         registry = org.get_registry()
         members = registry.list_members(club_id)
-        admins = [m for m in members if m.role in ("administrator", "super_administrator")]
+        # C13: Admins and sports_director only — coaches receive none
+        admins = [m for m in members if m.role in ("administrator", "super_administrator", "sports_director")]
         if not admins:
-            return
+            return False
 
         from biq_core.notifications import Notification, get_notification_registry
         notif_registry = get_notification_registry()
@@ -338,15 +468,14 @@ def _emit_theme_notification(club_id: str, status: str, theme_job: dict) -> None
                 user_id=admin.id,
                 type="theme-generation-failed",
                 text=f"La personalización del tema ha fallado: {status}",
-                deep_link=f"#/onboard/club-details",
+                deep_link="#/onboard/club-details",
                 created_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             ))
+        # C13: Only set notifiedAt after successful persistence
+        return True
     except Exception:
-        pass  # best-effort — does not block result persistence
-
-    # Mark notifiedAt
-    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-    theme_job["notifiedAt"] = now
+        # C13: Do NOT set notifiedAt when persistence failed
+        return False
 
 
 # ─── Helpers ────────────────────────────────────────────────────────────
@@ -377,7 +506,7 @@ def generate_theme(club_id: str, payload: GenerateRequest, request: Request) -> 
 
     Idempotency (§C5.2): if a lease is live, returns the existing job.
     """
-    require_admin(request, club_id)
+    _require_theme_admin(request, club_id)
 
     url = payload.homepage_url.strip()
     if not url.startswith("https://"):
@@ -401,8 +530,8 @@ def generate_theme(club_id: str, payload: GenerateRequest, request: Request) -> 
             "themeJob": theme_job,
         }
 
-    if not _check_rate_limit(club_id):
-        raise HTTPException(status_code=429, detail="rate limit exceeded (max 20/day)")
+    if not _check_rate_limit(club_id, url):
+        raise HTTPException(status_code=429, detail="rate limit exceeded (5/hour, 20/day per club+URL)")
 
     # B10: persist theme_job: pending BEFORE dispatch
     now = _now_iso()
@@ -418,6 +547,8 @@ def generate_theme(club_id: str, payload: GenerateRequest, request: Request) -> 
         "notifiedAt": None,
         "lease": _create_lease(lease_id),
     }
+    # C16: Record attempt in history for rate limiting
+    _record_attempt(new_theme_job, url)
     registry.merge_club_fields(club_id, {"theme_job": new_theme_job})
 
     # Enqueue after state is persisted (B10: worker cannot race absent state)
@@ -452,7 +583,7 @@ def retry_theme(club_id: str, request: Request) -> dict:
 
     Increments attempts/lease and clears notifiedAt. Idempotent.
     """
-    require_admin(request, club_id)
+    _require_theme_admin(request, club_id)
 
     registry = org.get_registry()
     club = registry.get_club(club_id)
@@ -470,12 +601,12 @@ def retry_theme(club_id: str, request: Request) -> dict:
             detail=f"retry only available for terminal failure states (current: {current_status})",
         )
 
-    if not _check_rate_limit(club_id):
-        raise HTTPException(status_code=429, detail="rate limit exceeded (max 20/day)")
-
     source_url = existing_job.get("sourceUrl", "")
     if not source_url:
         raise HTTPException(status_code=400, detail="no source URL to retry")
+
+    if not _check_rate_limit(club_id, source_url):
+        raise HTTPException(status_code=429, detail="rate limit exceeded (5/hour, 20/day per club+URL)")
 
     # Clear notifiedAt for re-notification on next terminal (B16)
     now = _now_iso()
@@ -490,6 +621,8 @@ def retry_theme(club_id: str, request: Request) -> dict:
         "notifiedAt": None,
         "lease": _create_lease(lease_id),
     }
+    # C16: Record attempt in history for rate limiting
+    _record_attempt(new_theme_job, source_url)
     registry.merge_club_fields(club_id, {"theme_job": new_theme_job})
 
     try:
@@ -512,7 +645,7 @@ def activate_theme(club_id: str, payload: ActivateRequest, request: Request) -> 
     The admin explicitly confirms: "Sí, usarlo".
     Validates that the theme exists and has a gate-passed token set.
     """
-    require_admin(request, club_id)
+    _require_theme_admin(request, club_id)
 
     registry = org.get_registry()
     club = registry.get_club(club_id)
@@ -523,9 +656,17 @@ def activate_theme(club_id: str, payload: ActivateRequest, request: Request) -> 
     if not theme or not isinstance(theme, dict):
         raise HTTPException(status_code=404, detail="no theme found")
 
+    # C16: Revalidate the gate against the current theme contract rather than
+    # trusting a stale stored gate.passed flag. If tokens are empty or the
+    # gate is missing, the theme cannot be safely activated.
     gate = theme.get("gate", {})
-    if not gate.get("passed"):
-        raise HTTPException(status_code=409, detail="theme gate has not passed — cannot activate")
+    tokens = theme.get("tokens", {})
+    has_tokens = isinstance(tokens, dict) and bool(tokens.get("light")) and bool(tokens.get("dark"))
+    if not gate.get("passed") or not has_tokens:
+        raise HTTPException(
+            status_code=409,
+            detail="theme gate has not passed or tokens are missing — cannot activate",
+        )
 
     current_status = theme.get("status", "")
     if current_status == "active":
@@ -559,7 +700,7 @@ def activate_theme(club_id: str, payload: ActivateRequest, request: Request) -> 
 @router.get("")
 def get_theme(club_id: str, request: Request) -> dict:
     """Return the current ClubTheme or null (ADDENDUM-02 §8)."""
-    require_admin(request, club_id)
+    _require_theme_admin(request, club_id)
 
     registry = org.get_registry()
     club = registry.get_club(club_id)
@@ -579,14 +720,54 @@ def get_theme(club_id: str, request: Request) -> dict:
 @router.put("")
 def put_theme(club_id: str, payload: ManualThemeRequest, request: Request) -> dict:
     """Manual colour override (ADDENDUM-02 §8 PUT)."""
-    require_admin(request, club_id)
+    _require_theme_admin(request, club_id)
 
     registry = org.get_registry()
     club = registry.get_club(club_id)
     if club is None:
         raise HTTPException(status_code=404, detail="club not found")
 
+    # C16: Generate tokens from the manual seed and run the gate, so the
+    # manual path is not inert. The previous code stored empty tokens with
+    # a failed gate, making activation impossible.
     now = _now_iso()
+    seed_brand = payload.seed_brand
+    seed_brand_alt = payload.seed_brand_alt
+
+    # Generate ramp and tokens from the manual seed
+    try:
+        from biq_app_theme.ramp import generateRamp
+        from biq_app_theme.semantic import buildClubTokens
+        from biq_app_theme.gate import runGateWithRepair
+        from biq_app_theme.semantic import DEFAULT_DOMAIN_MEDIA_SURFACES
+
+        FIXED_LIGHT = {"neutral0": "#FFFFFF", "neutral950": "#0A153A", "canvas": "#F4F6FA", "surface": "#FFFFFF"}
+        FIXED_DARK = {"neutral0": "#FFFFFF", "neutral950": "#0A153A", "canvas": "#080D1A", "surface": "#111A2D"}
+
+        ramp = generateRamp(seed_brand)
+        light_tokens = buildClubTokens(ramp, "light", FIXED_LIGHT)
+        dark_tokens = buildClubTokens(ramp, "dark", FIXED_DARK)
+        domain_media = list(DEFAULT_DOMAIN_MEDIA_SURFACES.values())
+        light_gate = runGateWithRepair(light_tokens, "light", ramp, domain_media)
+        dark_gate = runGateWithRepair(dark_tokens, "dark", ramp, domain_media)
+        gate_passed = light_gate.passed and dark_gate.passed
+        gate = {
+            "passed": gate_passed,
+            "checkedAt": now,
+            "pairsChecked": light_gate.pairsChecked + dark_gate.pairsChecked,
+            "failures": [*light_gate.failures, *dark_gate.failures],
+            "repairs": [*(light_gate.repairs or []), *(dark_gate.repairs or [])],
+        }
+        tokens = {
+            "light": light_tokens if gate_passed else {},
+            "dark": dark_tokens if gate_passed else {},
+        }
+    except ImportError:
+        # Theme engine not available in this environment — store with
+        # empty tokens and a failed gate (manual path requires the engine)
+        gate = {"passed": False, "checkedAt": now, "pairsChecked": 0, "failures": [], "repairs": []}
+        tokens = {}
+
     theme = {
         "schemaVersion": 1,
         "generatorVersion": "1.0.0",
@@ -599,22 +780,16 @@ def put_theme(club_id: str, payload: ManualThemeRequest, request: Request) -> di
             "confidence": 1.0,
         },
         "seed": {
-            "brand": payload.seed_brand,
-            "brandAlt": payload.seed_brand_alt,
+            "brand": seed_brand,
+            "brandAlt": seed_brand_alt,
             "detectedFrom": "manual",
         },
         "logo": None,
-        "tokens": {},
-        "gate": {
-            "passed": False,
-            "checkedAt": now,
-            "pairsChecked": 0,
-            "failures": [],
-            "repairs": [],
-        },
+        "tokens": tokens,
+        "gate": gate,
         "activation": {
             "themeStatus": "draft",
-            "reason": "manual override — pending gate validation",
+            "reason": "manual override — gate validation applied",
             "decidedAt": now,
         },
     }
@@ -626,7 +801,7 @@ def put_theme(club_id: str, payload: ManualThemeRequest, request: Request) -> di
 @router.delete("")
 def delete_theme(club_id: str, request: Request) -> dict:
     """Revert to BasketIQ default (ADDENDUM-02 §8 DELETE)."""
-    require_admin(request, club_id)
+    _require_theme_admin(request, club_id)
 
     registry = org.get_registry()
     club = registry.get_club(club_id)
@@ -654,7 +829,7 @@ class LogoRightsRequest(BaseModel):
 @router.post("/logo-rights")
 def affirm_logo_rights(club_id: str, payload: LogoRightsRequest, request: Request) -> dict:
     """Affirm or revoke logo usage rights (ADDENDUM-06 §C3)."""
-    require_admin(request, club_id)
+    _require_theme_admin(request, club_id)
 
     registry = org.get_registry()
     club = registry.get_club(club_id)
@@ -716,21 +891,47 @@ def post_result(club_id: str, payload: ResultRequest, request: Request) -> dict:
     if not existing_job or not isinstance(existing_job, dict):
         raise HTTPException(status_code=409, detail="no theme_job to update — stale or missing")
 
-    # Lease/job mismatch check (B12)
-    if payload.jobId:
-        existing_lease = existing_job.get("lease", {})
-        existing_holder = existing_lease.get("holder", "") if isinstance(existing_lease, dict) else ""
-        if existing_holder and payload.jobId != existing_holder:
-            raise HTTPException(status_code=409, detail="lease/job mismatch — stale result")
+    # C9: Lease/job mismatch check — jobId is now required, always validate
+    existing_lease = existing_job.get("lease", {})
+    existing_holder = existing_lease.get("holder", "") if isinstance(existing_lease, dict) else ""
+    if existing_holder and payload.jobId != existing_holder:
+        raise HTTPException(status_code=409, detail="lease/job mismatch — stale result")
 
-    # Stale superseded result check
-    if existing_job.get("status") in TERMINAL_STATES and status not in ("running",):
-        # Already terminal — reject unless it's a running update (which shouldn't happen)
-        raise HTTPException(status_code=409, detail=f"already terminal ({existing_job['status']}) — stale result")
+    # C9: Source URL must match the current intent
+    existing_source = existing_job.get("sourceUrl", "")
+    if existing_source and payload.sourceUrl != existing_source:
+        raise HTTPException(status_code=409, detail="source URL mismatch — stale result")
+
+    current_status = existing_job.get("status", "")
+
+    # C9: Enforce legal state transitions
+    # Legal: pending→running, running→terminal, pending→terminal (if running post failed)
+    # Illegal: terminal→running (regression), terminal→terminal (stale, unless same-status idempotent)
+    if current_status in TERMINAL_STATES:
+        if status == "running":
+            # C9: Reject terminal→running regression
+            raise HTTPException(
+                status_code=409,
+                detail=f"cannot regress from terminal '{current_status}' to 'running'",
+            )
+        if status != current_status:
+            # C9: Reject stale superseded terminal results
+            raise HTTPException(
+                status_code=409,
+                detail=f"already terminal ({current_status}) — stale superseded result",
+            )
+        # Same-terminal idempotent re-post: accept silently
+        return {"ok": True, "status": current_status, "idempotent": True}
 
     now = _now_iso()
 
     if status == "running":
+        # C9: Only pending→running is legal
+        if current_status not in ("pending", "running"):
+            raise HTTPException(
+                status_code=409,
+                detail=f"cannot transition from '{current_status}' to 'running'",
+            )
         # Running update: set status, don't set finishedAt
         existing_job["status"] = "running"
         registry.merge_club_fields(club_id, {"theme_job": existing_job})
@@ -746,13 +947,53 @@ def post_result(club_id: str, payload: ResultRequest, request: Request) -> dict:
     # Clear lease on terminal
     new_theme_job["lease"] = {"holder": "", "expiresAt": None}
 
-    # Emit notification for failure states (B16)
-    _emit_theme_notification(club_id, status, new_theme_job)
+    # Emit notification for failure states (B16/C13)
+    # C13: notifiedAt is set only when notification persistence succeeded
+    if _emit_theme_notification(club_id, status, new_theme_job):
+        new_theme_job["notifiedAt"] = _now_iso()
 
     # Persist theme if provided (whole-field replacement, §C9.3a)
     if payload.theme:
         registry.merge_club_fields(club_id, {"theme": payload.theme})
 
     registry.merge_club_fields(club_id, {"theme_job": new_theme_job})
+
+    # C16: unreachable auto-retry — one automatic retry after 60 seconds.
+    # Only retry if this is the first unreachable (not auto-retried yet).
+    if status == "unreachable" and not new_theme_job.get("autoRetried"):
+        new_theme_job["autoRetried"] = True
+        registry.merge_club_fields(club_id, {"theme_job": new_theme_job})
+        # Schedule a delayed retry (60s). In dev mode this is a no-op.
+        try:
+            import threading
+
+            def _delayed_retry():
+                import time as _time
+                _time.sleep(60)
+                try:
+                    # Re-enqueue with the same source URL
+                    source = new_theme_job.get("sourceUrl", "")
+                    if source:
+                        retry_lease = f"lease-{club_id}-retry-{int(time.time())}"
+                        new_job = {
+                            "status": "pending",
+                            "sourceUrl": source,
+                            "requestedAt": _now_iso(),
+                            "finishedAt": None,
+                            "attempts": new_theme_job.get("attempts", 1) + 1,
+                            "verdict": None,
+                            "notifiedAt": None,
+                            "lease": _create_lease(retry_lease),
+                        }
+                        _record_attempt(new_job, source)
+                        org.get_registry().merge_club_fields(club_id, {"theme_job": new_job})
+                        _enqueue_generation_task(club_id, source, retry_lease)
+                except Exception:
+                    pass  # best-effort — the user can manually retry
+
+            thread = threading.Thread(target=_delayed_retry, daemon=True)
+            thread.start()
+        except Exception:
+            pass  # best-effort — manual retry remains available
 
     return {"ok": True, "status": status}

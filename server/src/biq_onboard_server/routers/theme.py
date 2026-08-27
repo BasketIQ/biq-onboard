@@ -213,6 +213,8 @@ def _get_tasks_client():
 def _enqueue_generation_task(
     club_id: str, source_url: str, lease_id: str,
     schedule_delay_seconds: int = 0,
+    manual_seed_brand: str = "",
+    manual_seed_alt: str = "",
 ) -> str:
     """Enqueue a club-theme generation task to Cloud Tasks.
 
@@ -264,14 +266,22 @@ def _enqueue_generation_task(
     # do NOT pass BIQ_THEME_JOB_RESULT_TOKEN as a plain env override.
     import json as _json
 
+    env_vars = [
+        {"name": "CLUB_ID", "value": club_id},
+        {"name": "SOURCE_URL", "value": source_url},
+        {"name": "LEASE_ID", "value": lease_id},
+    ]
+    # V4: Manual seed overrides — when set, the JS worker skips website
+    # extraction and uses these seeds directly for ramp/gate generation.
+    if manual_seed_brand:
+        env_vars.append({"name": "MANUAL_SEED_BRAND", "value": manual_seed_brand})
+    if manual_seed_alt:
+        env_vars.append({"name": "MANUAL_SEED_BRAND_ALT", "value": manual_seed_alt})
+
     overrides = {
         "containerOverrides": [
             {
-                "env": [
-                    {"name": "CLUB_ID", "value": club_id},
-                    {"name": "SOURCE_URL", "value": source_url},
-                    {"name": "LEASE_ID", "value": lease_id},
-                ],
+                "env": env_vars,
             }
         ],
     }
@@ -713,6 +723,22 @@ def activate_theme(club_id: str, payload: ActivateRequest, request: Request) -> 
                 detail=f"theme tokens for '{mode}' mode are missing or empty — cannot activate",
             )
 
+    # V5: Gate-bound activation — verify a deterministic hash of the token
+    # payload matches the hash stored at gate time. If tokens were modified
+    # after gate output, the hash won't match and activation is rejected.
+    import hashlib
+    import json as _json_hash
+    stored_hash = gate.get("payloadHash") if isinstance(gate, dict) else None
+    current_payload = {"light": tokens.get("light"), "dark": tokens.get("dark")}
+    current_hash = hashlib.sha256(
+        _json_hash.dumps(current_payload, sort_keys=True).encode()
+    ).hexdigest()[:16]
+    if stored_hash and current_hash != stored_hash:
+        raise HTTPException(
+            status_code=409,
+            detail="theme token payload hash mismatch — tokens modified after gate validation",
+        )
+
     current_status = theme.get("status", "")
     if current_status == "active":
         return {"ok": True, "status": "already_active", "theme": theme}
@@ -823,7 +849,47 @@ def put_theme(club_id: str, payload: ManualThemeRequest, request: Request) -> di
     }
 
     registry.merge_club_fields(club_id, {"theme": theme})
-    return {"ok": True, "theme": theme}
+
+    # V4: Enqueue the canonical JS generation job with the manual seed.
+    # The worker receives MANUAL_SEED_BRAND env override and skips website
+    # extraction, using the manual seed directly for ramp/gate generation.
+    source_url = getattr(club, "website", None) or ""
+    lease_id = f"lease-{club_id}-manual-{int(time.time())}"
+    manual_job = {
+        "status": "pending",
+        "sourceUrl": source_url,
+        "requestedAt": now,
+        "finishedAt": None,
+        "attempts": 1,
+        "verdict": None,
+        "notifiedAt": None,
+        "lease": _create_lease(lease_id),
+        "history": [],
+        "manualSeed": {  # V4: manual seed contract for the JS worker
+            "brand": seed_brand,
+            "brandAlt": seed_brand_alt,
+        },
+    }
+    _record_attempt(manual_job, source_url)
+    registry.merge_club_fields(club_id, {"theme_job": manual_job})
+
+    # V4: Enqueue with manual seed env overrides
+    try:
+        task_id = _enqueue_generation_task(
+            club_id, source_url, lease_id,
+            manual_seed_brand=seed_brand,
+            manual_seed_alt=seed_brand_alt,
+        )
+    except Exception as exc:
+        failed_job = dict(manual_job)
+        failed_job["status"] = "failed"
+        failed_job["finishedAt"] = _now_iso()
+        failed_job["reason"] = f"manual enqueue failed: {exc}"
+        registry.merge_club_fields(club_id, {"theme_job": failed_job})
+        return {"ok": True, "theme": theme, "themeJob": failed_job,
+                "detail": "manual theme stored but generation could not be enqueued"}
+
+    return {"ok": True, "theme": theme, "themeJob": manual_job, "jobId": task_id}
 
 
 @router.delete("")

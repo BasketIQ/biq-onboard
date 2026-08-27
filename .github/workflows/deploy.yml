@@ -130,18 +130,31 @@ jobs:
           # C5: Create/use a dedicated least-privilege task-invoker SA.
           # This SA is separate from the deployer SA and has only the
           # roles/run.jobs.run permission needed to invoke Cloud Run Jobs.
+          #
+          # If the deployer SA lacks iam.serviceAccounts.create (current
+          # staging state), this step is non-blocking — the SA must be
+          # provisioned out-of-band via the governed IAM path. The
+          # GCP_TASK_INVOKER_SA variable is used as the canonical name.
           TASK_INVOKER_SA="biq-task-invoker@${PROJECT_ID}.iam.gserviceaccount.com"
           echo "TASK_INVOKER_SA=${TASK_INVOKER_SA}" >> "${GITHUB_ENV}"
 
-          # Check if SA exists, create if not
+          # Try to create the SA (best-effort — may fail if deployer lacks permission)
           if ! gcloud iam service-accounts describe "${TASK_INVOKER_SA}" --project "${PROJECT_ID}" >/dev/null 2>&1; then
-            echo "Creating dedicated task-invoker SA: ${TASK_INVOKER_SA}"
-            gcloud iam service-accounts create biq-task-invoker \
+            echo "Attempting to create dedicated task-invoker SA: ${TASK_INVOKER_SA}"
+            if gcloud iam service-accounts create biq-task-invoker \
               --project "${PROJECT_ID}" \
-              --display-name="BIQ Cloud Tasks → Run Jobs invoker (least-privilege)"
+              --display-name="BIQ Cloud Tasks → Run Jobs invoker (least-privilege)" 2>&1; then
+              echo "SA created successfully"
+            else
+              echo "::warning::Could not create task-invoker SA (deployer lacks iam.serviceAccounts.create)."
+              echo "::warning::The SA ${TASK_INVOKER_SA} must be provisioned via the governed IAM path."
+              echo "::warning::Using the SA name in deployment config — enqueue will fail until IAM is provisioned."
+            fi
+          else
+            echo "Task-invoker SA already exists: ${TASK_INVOKER_SA}"
           fi
 
-          # Grant the invoker SA permission to run the club-theme-generation job
+          # Grant the invoker SA permission to run the club-theme-generation job (best-effort)
           JOB_NAME="club-theme-generation"
           JOB_LOCATION="europe-west1"
           gcloud run jobs add-iam-policy-binding "${JOB_NAME}" \
@@ -149,16 +162,9 @@ jobs:
             --region "${JOB_LOCATION}" \
             --member="serviceAccount:${TASK_INVOKER_SA}" \
             --role="roles/run.jobs.run" \
-            --condition=None 2>/dev/null || true
+            --condition=None 2>/dev/null || echo "::warning::Could not bind run.jobs.run — provision via IAM console"
 
-          # Grant the deployer SA permission to create tasks (needed for enqueue)
-          DEPLOYER_SA="${{ vars.GCP_DEPLOYER_SA }}"
-          gcloud iam service-accounts add-iam-policy-binding "${TASK_INVOKER_SA}" \
-            --project "${PROJECT_ID}" \
-            --member="serviceAccount:${DEPLOYER_SA}" \
-            --role="roles/iam.serviceAccountTokenCreator" 2>/dev/null || true
-
-          echo "Dedicated task-invoker SA provisioned: ${TASK_INVOKER_SA}"
+          echo "Dedicated task-invoker SA name: ${TASK_INVOKER_SA}"
 
       - name: Deploy to Cloud Run
         env:

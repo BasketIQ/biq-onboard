@@ -79,6 +79,12 @@ class PasswordReset(BaseModel):
     password: str
 
 
+class UserStatusUpdate(BaseModel):
+    """F11: Deactivate or reactivate a club membership (soft delete)."""
+    status: str  # "active" | "deactivated"
+    reason: str | None = None
+
+
 # ─── Role ───────────────────────────────────────────────────────────────────
 
 

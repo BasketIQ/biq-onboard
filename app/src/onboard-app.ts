@@ -237,6 +237,10 @@ class BiqOnboardApp extends HTMLElement {
   private _pollTimer: ReturnType<typeof setTimeout> | null = null;
   private _pollingClubId: string | null = null;
   private _pollBackoff = 3000; // C11: starts at 3s, backs off
+  // F11: Roles tab member list state
+  private _members: { id: string; display_name?: string; email?: string; role: string; status: string }[] | null = null;
+  private _membersLoading = false;
+  private _membersError: string | null = null;
   private _polling = false; // C11: prevent overlap
   private _visibilityHandler: (() => void) | null = null; // C11: visibility handling
 
@@ -582,8 +586,8 @@ class BiqOnboardApp extends HTMLElement {
     // Route determines which view to show
     const section = this._subRoute || 'club-details';
     let content = '';
-    if (section === 'profile') {
-      content = this.renderProfile();
+    if (section === 'roles') {
+      content = this.renderRoles(club);
     } else {
       content = this.renderClubDetails(club);
     }
@@ -592,7 +596,7 @@ class BiqOnboardApp extends HTMLElement {
       <div class="onboard-app">
         <nav class="onboard-nav">
           <button class="onboard-nav-item ${section === 'club-details' ? 'active' : ''}" data-nav="club-details">Club</button>
-          <button class="onboard-nav-item ${section === 'profile' ? 'active' : ''}" data-nav="profile">Perfil</button>
+          <button class="onboard-nav-item ${section === 'roles' ? 'active' : ''}" data-nav="roles">Roles</button>
         </nav>
         ${content}
       </div>`;
@@ -1119,24 +1123,73 @@ class BiqOnboardApp extends HTMLElement {
     }
   }
 
-  private renderProfile(): string {
-    const user = this._user || 'Usuario';
-    const club = this._org?.club;
-    const role = this._org?.role || 'coach';
+  private renderRoles(club: { id: string; name?: string }): string {
+    // F11: Roles tab — list club members with roles and status.
+    // Members are loaded async on tab activation; show loading state until then.
+    const members = this._members;
+    const loading = this._membersLoading;
+    const error = this._membersError;
     const roleLabels: Record<string, string> = {
       sports_director: 'Director deportivo',
       coach: 'Entrenador',
+      coordinator: 'Coordinador',
+      player: 'Jugador',
       administrator: 'Administrador',
       super_administrator: 'Super administrador',
     };
+    const assignableRoles = ['coach', 'coordinator', 'player', 'sports_director', 'administrator'];
+
+    const memberRows = (members || []).map(m => {
+      const isActive = m.status !== 'deactivated';
+      const roleOptions = assignableRoles.map(r =>
+        `<option value="${r}" ${m.role === r ? 'selected' : ''}>${escapeHtml(roleLabels[r] || r)}</option>`
+      ).join('');
+      return `
+        <tr data-member-row data-user-id="${escapeHtml(m.id)}">
+          <td>${escapeHtml(m.display_name || m.email || m.id)}</td>
+          <td>${escapeHtml(m.email || '')}</td>
+          <td>
+            <select data-role-select data-user-id="${escapeHtml(m.id)}" ${!isActive ? 'disabled' : ''}>
+              ${roleOptions}
+            </select>
+          </td>
+          <td>
+            <span class="onboard-status-badge ${isActive ? 'active' : 'deactivated'}">
+              ${isActive ? 'Activo' : 'Desactivado'}
+            </span>
+          </td>
+          <td>
+            <button class="onboard-btn onboard-btn-secondary onboard-btn-sm"
+              data-toggle-status-btn data-user-id="${escapeHtml(m.id)}" data-current-status="${m.status || 'active'}"
+              ${this._loading ? 'disabled' : ''}>
+              ${isActive ? 'Desactivar' : 'Reactivar'}
+            </button>
+          </td>
+        </tr>`;
+    }).join('');
+
     return `
       <section class="onboard-section">
-        <div class="onboard-profile-card">
-          <div class="onboard-profile-avatar">${escapeHtml(user.charAt(0).toUpperCase())}</div>
-          <h2 class="onboard-profile-name">${escapeHtml(user)}</h2>
-          ${club ? `<p class="onboard-profile-club">${escapeHtml(club.name || club.id)}</p>` : ''}
-          <span class="onboard-profile-role">${escapeHtml(roleLabels[role] || role)}</span>
-        </div>
+        <h2 class="onboard-section-title">Roles — ${escapeHtml(club.name || club.id)}</h2>
+        ${error ? `<div class="onboard-error">${escapeHtml(error)}</div>` : ''}
+        ${loading ? '<div class="onboard-loading">Cargando miembros…</div>' : ''}
+        ${!loading && members && members.length === 0 ? '<p class="onboard-card-desc">No hay miembros en este club.</p>' : ''}
+        ${!loading && members && members.length > 0 ? `
+          <div class="onboard-card">
+            <table class="onboard-roles-table">
+              <thead>
+                <tr>
+                  <th>Nombre</th>
+                  <th>Email</th>
+                  <th>Rol</th>
+                  <th>Estado</th>
+                  <th>Acciones</th>
+                </tr>
+              </thead>
+              <tbody>${memberRows}</tbody>
+            </table>
+          </div>
+        ` : ''}
       </section>`;
   }
 
@@ -1205,6 +1258,106 @@ class BiqOnboardApp extends HTMLElement {
     const retryBtn = this.shadow.querySelector('[data-retry-btn]');
     if (retryBtn) {
       retryBtn.addEventListener('click', () => this.retryTheme(clubId));
+    }
+
+    // F11: Roles tab — load members when tab is activated
+    if (this._subRoute === 'roles' && this._members === null && !this._membersLoading) {
+      this.loadMembers(clubId);
+    }
+
+    // F11: Role change selects
+    this.shadow.querySelectorAll('[data-role-select]').forEach(sel => {
+      sel.addEventListener('change', () => {
+        const userId = (sel as HTMLElement).dataset.userId || '';
+        const newRole = (sel as HTMLSelectElement).value;
+        this.changeMemberRole(clubId, userId, newRole);
+      });
+    });
+
+    // F11: Deactivate/Reactivate buttons
+    this.shadow.querySelectorAll('[data-toggle-status-btn]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const userId = (btn as HTMLElement).dataset.userId || '';
+        const currentStatus = (btn as HTMLElement).dataset.currentStatus || 'active';
+        const newStatus = currentStatus === 'deactivated' ? 'active' : 'deactivated';
+        const action = newStatus === 'deactivated' ? 'desactivar' : 'reactivar';
+        if (confirm(`¿Confirmas ${action} a este miembro?`)) {
+          this.toggleMemberStatus(clubId, userId, newStatus);
+        }
+      });
+    });
+  }
+
+  // F11: Roles tab — member loading and management
+
+  private async loadMembers(clubId: string): Promise<void> {
+    this._membersLoading = true;
+    this._membersError = null;
+    this.render();
+    try {
+      const res = await fetch(`/api/admin/clubs/${clubId}/users`, {
+        credentials: 'include',
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      this._members = data.users || [];
+    } catch (err) {
+      this._membersError = (err as Error).message;
+    } finally {
+      this._membersLoading = false;
+      this.render();
+    }
+  }
+
+  private async changeMemberRole(clubId: string, userId: string, newRole: string): Promise<void> {
+    this._loading = true;
+    this._membersError = null;
+    this.render();
+    try {
+      const res = await fetch(`/api/admin/clubs/${clubId}/roles`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_id: userId, role: newRole }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => null);
+        throw new Error(data?.detail || `HTTP ${res.status}`);
+      }
+      // Reload members to reflect the change
+      this._members = null;
+      await this.loadMembers(clubId);
+    } catch (err) {
+      this._membersError = (err as Error).message;
+    } finally {
+      this._loading = false;
+      this.render();
+    }
+  }
+
+  private async toggleMemberStatus(clubId: string, userId: string, newStatus: string): Promise<void> {
+    this._loading = true;
+    this._membersError = null;
+    this.render();
+    try {
+      const res = await fetch(`/api/admin/clubs/${clubId}/users/${userId}/status`, {
+        method: 'PATCH',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: newStatus }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => null);
+        throw new Error(data?.detail || `HTTP ${res.status}`);
+      }
+      // Reload members to reflect the change
+      this._members = null;
+      await this.loadMembers(clubId);
+    } catch (err) {
+      this._membersError = (err as Error).message;
+    } finally {
+      this._loading = false;
+      this.render();
     }
   }
 }

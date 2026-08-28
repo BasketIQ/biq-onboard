@@ -66,25 +66,38 @@ async function stopServer() {
 /**
  * Scenario responses:
  *   'join-ok'     → /api/auth/register ok (component redirects to /)
+ *   'join-fail'   → /api/auth/register 422 {"detail": "El ID del club no existe"}
+ *   'join-netfail'→ /api/auth/register aborted (network rejection)
  *   'create-ok'   → onboarding/clubs ok with club.id, select-club ok
  *   'create-fail' → onboarding/clubs 422 {"detail": "La web del club debe usar https://"}
- *   'hang'        → onboarding/clubs hangs until `releaseHang` is called
+ *   'create-netfail' → onboarding/clubs aborted (network rejection)
+ *   'hang'        → onboarding/clubs AND /api/auth/register hang until `releaseHang`
+ *   'hang-first'  → the FIRST onboarding/clubs hangs; later ones respond ok
  */
 async function newPage(browser, scenario) {
   const page = await browser.newPage();
   const log = [];
   let releaseHang = null;
   const hangPromise = new Promise((resolve) => { releaseHang = resolve; });
+  let onboardingClubsCount = 0;
 
   await page.route('**/api/**', async (route) => {
     const req = route.request();
     log.push({ url: req.url(), method: req.method(), postData: req.postData() });
+    const u = req.url();
+    if (scenario === 'hang-first' && u.includes('/api/onboarding/clubs')) {
+      onboardingClubsCount += 1;
+      if (onboardingClubsCount === 1) {
+        await hangPromise;
+        await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true, club: { id: 'club-new' } }) });
+        return;
+      }
+    }
     const json = (data, status = 200) => route.fulfill({
       status,
       contentType: 'application/json',
       body: JSON.stringify(data),
     });
-    const u = req.url();
     try {
       if (scenario === 'hang' && (u.includes('/api/onboarding/clubs') || u.includes('/api/auth/register'))) {
         await hangPromise;
@@ -92,12 +105,24 @@ async function newPage(browser, scenario) {
         return;
       }
       if (u.includes('/api/auth/register')) {
+        if (scenario === 'join-fail') {
+          await json({ detail: 'El ID del club no existe' }, 422);
+          return;
+        }
+        if (scenario === 'join-netfail') {
+          await route.abort('failed');
+          return;
+        }
         await json({ ok: true });
         return;
       }
       if (u.includes('/api/onboarding/clubs')) {
         if (scenario === 'create-fail') {
           await json({ detail: 'La web del club debe usar https://' }, 422);
+          return;
+        }
+        if (scenario === 'create-netfail') {
+          await route.abort('failed');
           return;
         }
         await json({ ok: true, club: { id: 'club-new' } });
@@ -113,7 +138,7 @@ async function newPage(browser, scenario) {
       }
       await json({ ok: true });
     } catch {
-      // Route was aborted (disconnect test) — nothing to do.
+      // Route was aborted (disconnect/netfail tests) — nothing to do.
     }
   });
 
@@ -142,6 +167,7 @@ const clickJoin = (page, clubId) =>
     const el = document.getElementById('app');
     const input = el.shadowRoot.querySelector('[data-join-id]');
     input.value = id;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
     el.shadowRoot.querySelector('[data-join-btn]').click();
     const btn = el.shadowRoot.querySelector('[data-join-btn]');
     return { disabled: btn.disabled };
@@ -179,6 +205,7 @@ test('repeated submit still issues exactly one request', async (t) => {
     const el = document.getElementById('app');
     const input = el.shadowRoot.querySelector('[data-join-id]');
     input.value = 'club_x';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
     const btn = el.shadowRoot.querySelector('[data-join-btn]');
     btn.click();
     // Force additional clicks/Enter even though native disabled is applied.
@@ -259,8 +286,18 @@ test('disconnect aborts the in-flight request and rejects stale completion', asy
   const { page, releaseHang } = await newPage(browser, 'hang');
   await page.evaluate(() => {
     const el = document.getElementById('app');
+    // Activate the Create tab (default is join).
+    el.shadowRoot.querySelector('[data-club-tab="create"]').click();
+  });
+  await page.waitForFunction(() => {
+    const el = document.getElementById('app');
+    return !!(el.shadowRoot && !el.shadowRoot.querySelector('#club-panel-create').hidden);
+  });
+  await page.evaluate(() => {
+    const el = document.getElementById('app');
     const name = el.shadowRoot.querySelector('[data-create-name]');
     name.value = 'Club Colgado';
+    name.dispatchEvent(new Event('input', { bubbles: true }));
     el.shadowRoot.querySelector('[data-create-btn]').click();
     window.__controller = el._clubSubmitAbort;
   });
@@ -312,6 +349,7 @@ test('accepted submission sets aria-busy and a real spinner with reduced-motion 
     const el = document.getElementById('app');
     const input = el.shadowRoot.querySelector('[data-join-id]');
     input.value = 'club_x';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
     el.shadowRoot.querySelector('[data-join-btn]').click();
   });
   await waitFor(() => log.length >= 1);
@@ -336,5 +374,244 @@ test('accepted submission sets aria-busy and a real spinner with reduced-motion 
   assert.equal(busy.spinnerVisible, true, 'spinner element rendered');
   assert.equal(busy.animationName, 'none', 'reduced-motion disables spinner animation');
   assert.match(busy.statusText, /Enviando solicitud/, 'action-specific status text shown');
+  await browser.close();
+});
+
+/** Activate the Create tab and type into the create form, then click. */
+const submitCreateForm = (page, name, website) =>
+  page.evaluate(([n, w]) => {
+    const el = document.getElementById('app');
+    el.shadowRoot.querySelector('[data-club-tab="create"]').click();
+    const nameInput = el.shadowRoot.querySelector('[data-create-name]');
+    const webInput = el.shadowRoot.querySelector('[data-create-website]');
+    nameInput.value = n;
+    nameInput.dispatchEvent(new Event('input', { bubbles: true }));
+    webInput.value = w;
+    webInput.dispatchEvent(new Event('input', { bubbles: true }));
+    el.shadowRoot.querySelector('[data-create-btn]').click();
+    return { disabled: el.shadowRoot.querySelector('[data-create-btn]').disabled };
+  }, [name, website]);
+
+test('create form: one accepted click issues exactly one request and locks', async (t) => {
+  const browser = await chromium.launch();
+  const { page, log } = await newPage(browser, 'create-ok');
+  const state = await submitCreateForm(page, 'Club Nuevo', '');
+  assert.equal(state.disabled, true, 'create button disabled immediately');
+  await waitFor(() => log.some((e) => e.url.includes('/api/onboarding/clubs')));
+  const creates = log.filter((e) => e.url.includes('/api/onboarding/clubs'));
+  assert.equal(creates.length, 1, 'exactly one create request');
+  assert.equal(JSON.parse(creates[0].postData).name, 'Club Nuevo');
+  // The select-club chain must follow to re-point the session.
+  await waitFor(() => log.some((e) => e.url.includes('/api/auth/select-club')));
+  assert.equal(log.filter((e) => e.url.includes('/api/auth/select-club')).length, 1);
+  await browser.close();
+});
+
+test('create form: duplicate clicks and Enter still produce one request', async (t) => {
+  const browser = await chromium.launch();
+  const { page, log } = await newPage(browser, 'create-ok');
+  await page.evaluate(() => {
+    const el = document.getElementById('app');
+    el.shadowRoot.querySelector('[data-club-tab="create"]').click();
+  });
+  await page.waitForFunction(() => {
+    const el = document.getElementById('app');
+    return !!(el.shadowRoot && !el.shadowRoot.querySelector('#club-panel-create').hidden);
+  });
+  await page.evaluate(() => {
+    const el = document.getElementById('app');
+    const nameInput = el.shadowRoot.querySelector('[data-create-name]');
+    nameInput.value = 'Club Duplicado';
+    nameInput.dispatchEvent(new Event('input', { bubbles: true }));
+    const btn = el.shadowRoot.querySelector('[data-create-btn]');
+    btn.click();
+    btn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    btn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    nameInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  });
+  await waitFor(() => log.some((e) => e.url.includes('/api/onboarding/clubs')));
+  await page.waitForTimeout(250);
+  const creates = log.filter((e) => e.url.includes('/api/onboarding/clubs'));
+  assert.equal(creates.length, 1, 'repeated submit still one create request');
+  await browser.close();
+});
+
+test('create form: success locks through session selection and navigates', async (t) => {
+  const browser = await chromium.launch();
+  const { page, log } = await newPage(browser, 'create-ok');
+  const state = await submitCreateForm(page, 'Club Navega', '');
+  assert.equal(state.disabled, true, 'create button disabled at submission');
+  await waitFor(() => log.some((e) => e.url.includes('/api/auth/select-club')));
+  await page.waitForTimeout(250);
+  const creates = log.filter((e) => e.url.includes('/api/onboarding/clubs'));
+  assert.equal(creates.length, 1, 'exactly one create request through navigation');
+  assert.equal(new URL(page.url()).pathname, '/', 'navigates home after select-club');
+  await browser.close();
+});
+
+test('join form: HTTP failure restores controls, preserves values, and shows an error', async (t) => {
+  const browser = await chromium.launch();
+  const { page } = await newPage(browser, 'join-fail');
+  await page.evaluate(() => {
+    const el = document.getElementById('app');
+    const input = el.shadowRoot.querySelector('[data-join-id]');
+    input.value = 'club_ghost';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    el.shadowRoot.querySelector('[data-join-btn]').click();
+  });
+  await page.waitForFunction(() => {
+    const el = document.getElementById('app');
+    return !!(el.shadowRoot && el.shadowRoot.querySelector('#club-panel-join [role="alert"]'));
+  }, { timeout: 10000 });
+  const result = await page.evaluate(() => {
+    const el = document.getElementById('app');
+    const input = el.shadowRoot.querySelector('[data-join-id]');
+    const btn = el.shadowRoot.querySelector('[data-join-btn]');
+    const alert = el.shadowRoot.querySelector('#club-panel-join [role="alert"]');
+    return {
+      value: input.value,
+      btnDisabled: btn.disabled,
+      alertText: alert.textContent,
+      alertFocused: el.shadowRoot.activeElement === alert,
+    };
+  });
+  assert.equal(result.value, 'club_ghost', 'typed join id preserved after failure');
+  assert.equal(result.btnDisabled, false, 'join button re-enabled after failure');
+  assert.match(result.alertText, /no existe/);
+  assert.equal(result.alertFocused, true, 'error element receives focus');
+  await browser.close();
+});
+
+test('join form: network rejection restores controls and focuses error', async (t) => {
+  const browser = await chromium.launch();
+  const { page } = await newPage(browser, 'join-netfail');
+  await page.evaluate(() => {
+    const el = document.getElementById('app');
+    const input = el.shadowRoot.querySelector('[data-join-id]');
+    input.value = 'club_net';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    el.shadowRoot.querySelector('[data-join-btn]').click();
+  });
+  await page.waitForFunction(() => {
+    const el = document.getElementById('app');
+    return !!(el.shadowRoot && el.shadowRoot.querySelector('#club-panel-join [role="alert"]'));
+  }, { timeout: 10000 });
+  const result = await page.evaluate(() => {
+    const el = document.getElementById('app');
+    const input = el.shadowRoot.querySelector('[data-join-id]');
+    const btn = el.shadowRoot.querySelector('[data-join-btn]');
+    const panel = el.shadowRoot.querySelector('#club-panel-join');
+    const alert = el.shadowRoot.querySelector('#club-panel-join [role="alert"]');
+    return {
+      value: input.value,
+      btnDisabled: btn.disabled,
+      ariaBusy: panel.getAttribute('aria-busy'),
+      alertFocused: el.shadowRoot.activeElement === alert,
+    };
+  });
+  assert.equal(result.value, 'club_net', 'value preserved after network rejection');
+  assert.equal(result.btnDisabled, false, 'controls restored after network rejection');
+  assert.equal(result.ariaBusy, 'false', 'aria-busy cleared');
+  assert.equal(result.alertFocused, true, 'error focused after network rejection');
+  await browser.close();
+});
+
+test('create form: network rejection restores controls and focuses error', async (t) => {
+  const browser = await chromium.launch();
+  const { page } = await newPage(browser, 'create-netfail');
+  await submitCreateForm(page, 'Club Red', '');
+  await page.waitForFunction(() => {
+    const el = document.getElementById('app');
+    return !!(el.shadowRoot && el.shadowRoot.querySelector('#club-panel-create [role="alert"]'));
+  }, { timeout: 10000 });
+  const result = await page.evaluate(() => {
+    const el = document.getElementById('app');
+    const name = el.shadowRoot.querySelector('[data-create-name]');
+    const btn = el.shadowRoot.querySelector('[data-create-btn]');
+    const panel = el.shadowRoot.querySelector('#club-panel-create');
+    const alert = el.shadowRoot.querySelector('#club-panel-create [role="alert"]');
+    return {
+      nameValue: name.value,
+      btnDisabled: btn.disabled,
+      ariaBusy: panel.getAttribute('aria-busy'),
+      alertFocused: el.shadowRoot.activeElement === alert,
+    };
+  });
+  assert.equal(result.nameValue, 'Club Red', 'name preserved after network rejection');
+  assert.equal(result.btnDisabled, false, 'controls restored');
+  assert.equal(result.ariaBusy, 'false', 'aria-busy cleared');
+  assert.equal(result.alertFocused, true, 'error focused');
+  await browser.close();
+});
+
+test('stale completion cannot mutate a newer mounted instance', async (t) => {
+  const browser = await chromium.launch();
+  const { page, log, releaseHang } = await newPage(browser, 'hang-first');
+  // Instance 1 starts a create submission that hangs.
+  await page.evaluate(() => {
+    const el = document.getElementById('app');
+    el.shadowRoot.querySelector('[data-club-tab="create"]').click();
+  });
+  await page.waitForFunction(() => {
+    const el = document.getElementById('app');
+    return !!(el.shadowRoot && !el.shadowRoot.querySelector('#club-panel-create').hidden);
+  });
+  await page.evaluate(() => {
+    const el = document.getElementById('app');
+    const name = el.shadowRoot.querySelector('[data-create-name]');
+    name.value = 'Club Uno';
+    name.dispatchEvent(new Event('input', { bubbles: true }));
+    el.shadowRoot.querySelector('[data-create-btn]').click();
+    window.__controllerOne = el._clubSubmitAbort;
+  });
+  await waitFor(() => log.some((e) => e.url.includes('/api/onboarding/clubs')));
+  // Remove instance 1; the in-flight controller must abort immediately.
+  await page.evaluate(() => {
+    document.getElementById('app').remove();
+  });
+  const abortedOne = await page.evaluate(() => window.__controllerOne.signal.aborted);
+  assert.equal(abortedOne, true, 'stale request aborted on disconnect');
+  // Mount a fresh instance and start a NEW submission.
+  await page.evaluate(() => {
+    const fresh = document.createElement('biq-onboard-app');
+    fresh.id = 'app';
+    document.body.appendChild(fresh);
+  });
+  await page.waitForFunction(() => {
+    const el = document.getElementById('app');
+    return !!(el.shadowRoot);
+  });
+  await page.evaluate(() => {
+    const el = document.getElementById('app');
+    el.org = { club: null, email: 'fresh@basketiq.io', display_name: 'Fresh', memberships: [] };
+    el.user = 'fresh';
+  });
+  await page.waitForFunction(() => {
+    const el = document.getElementById('app');
+    return !!(el.shadowRoot && el.shadowRoot.querySelector('[data-club-tab="create"]'));
+  });
+  await page.evaluate(() => {
+    const el = document.getElementById('app');
+    el.shadowRoot.querySelector('[data-club-tab="create"]').click();
+  });
+  await page.waitForFunction(() => {
+    const el = document.getElementById('app');
+    return !!(el.shadowRoot && !el.shadowRoot.querySelector('#club-panel-create').hidden);
+  });
+  await page.evaluate(() => {
+    const el = document.getElementById('app');
+    const name = el.shadowRoot.querySelector('[data-create-name]');
+    name.value = 'Club Dos';
+    name.dispatchEvent(new Event('input', { bubbles: true }));
+    el.shadowRoot.querySelector('[data-create-btn]').click();
+  });
+  // Second submission responds ok (hang-first only hangs the first request).
+  await waitFor(() => log.filter((e) => e.url.includes('/api/onboarding/clubs')).length >= 2);
+  await page.waitForTimeout(250);
+  const before = new URL(page.url()).pathname;
+  // Release the STALE first response; it must not navigate or throw.
+  releaseHang();
+  await page.waitForTimeout(400);
+  assert.equal(new URL(page.url()).pathname, before, 'stale completion did not navigate');
   await browser.close();
 });

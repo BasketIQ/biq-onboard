@@ -202,6 +202,12 @@ class BiqOnboardApp extends HTMLElement {
   private _stepMessage = '';
   private _activeClubTab = '';
   private _clubSubmitLocked = false;
+  private _clubSubmitSeq = 0;
+  private _clubSubmitAbort: AbortController | null = null;
+  // D20: typed field values survive re-renders (validation/error/loading).
+  private _clubForm: { joinId: string; createName: string; createWebsite: string } = {
+    joinId: '', createName: '', createWebsite: '',
+  };
   private _pollTimer: ReturnType<typeof setTimeout> | null = null;
   private _pollingClubId: string | null = null;
   private _pollBackoff = 3000; // C11: starts at 3s, backs off
@@ -302,6 +308,12 @@ class BiqOnboardApp extends HTMLElement {
   disconnectedCallback(): void {
     super.disconnectedCallback?.();
     this._stopPolling();
+    // D20: invalidate in-flight submissions and abort stale responses.
+    this._clubSubmitSeq += 1;
+    if (this._clubSubmitAbort) {
+      this._clubSubmitAbort.abort();
+      this._clubSubmitAbort = null;
+    }
     // Remove visibility handler
     if (this._visibilityHandler) {
       document.removeEventListener('visibilitychange', this._visibilityHandler);
@@ -728,6 +740,11 @@ class BiqOnboardApp extends HTMLElement {
   // ─── Club step (ADDENDUM-07 §6) ───────────────────────────────────────
 
   private async selectMembership(clubId: string): Promise<void> {
+    if (this._clubSubmitLocked) return;
+    this._clubSubmitLocked = true;
+    this._loading = true;
+    this._stepError = null;
+    this.render();
     try {
       const res = await fetch('/api/auth/select-club', {
         method: 'POST',
@@ -749,32 +766,47 @@ class BiqOnboardApp extends HTMLElement {
       // Full navigation so the shell re-boots with the resolved club.
       window.location.replace('/');
     } catch (err) {
+      this._loading = false;
+      this._clubSubmitLocked = false;
       this._error = (err as Error).message;
       this.render();
     }
   }
 
-  private async joinByClubId(clubId: string): Promise<void> {
+  private async joinByClubId(clubId: string, seq: number): Promise<void> {
     if (this._clubSubmitLocked) return;
     this._clubSubmitLocked = true;
-    const res = await fetch('/api/auth/register', {
-      method: 'POST',
-      credentials: 'include',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ club_id: clubId }),
-    });
-    return this.handleStepResponse(res, 'join');
+    try {
+      const res = await fetch('/api/auth/register', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ club_id: clubId }),
+        signal: this._clubSubmitAbort?.signal,
+      });
+      return this.handleStepResponse(res, 'join', seq);
+    } catch (err) {
+      this._recoverSubmission('join', (err as Error).message || 'No se pudo enviar la solicitud', seq);
+    }
   }
 
-  private async createClub(name: string, website: string): Promise<void> {
+  private async createClub(name: string, website: string, seq: number): Promise<void> {
     if (this._clubSubmitLocked) return;
     this._clubSubmitLocked = true;
-    const res = await fetch('/api/onboarding/clubs', {
-      method: 'POST',
-      credentials: 'include',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, website }),
-    });
+    let res: Response;
+    try {
+      res = await fetch('/api/onboarding/clubs', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, website }),
+        signal: this._clubSubmitAbort?.signal,
+      });
+    } catch (err) {
+      this._recoverSubmission('create', (err as Error).message || 'No se pudo crear el club', seq);
+      return;
+    }
+    if (this._clubSubmitSeq !== seq) return; // D20: stale response
     if (res.ok) {
       // ADDENDUM-07 §6: chain select-club to re-point the shell session to
       // the new administrator row, then navigate to home. Only navigate when
@@ -827,13 +859,31 @@ class BiqOnboardApp extends HTMLElement {
       window.location.replace('/');
       return;
     }
-    await this.handleStepResponse(res, 'create');
+    await this.handleStepResponse(res, 'create', seq);
+  }
+
+  // D20: restore controls, preserve typed values, and surface a focused error.
+  private _recoverSubmission(scope: 'join' | 'create', message: string, seq: number): void {
+    if (this._clubSubmitSeq !== seq) return;
+    this._loading = false;
+    this._clubSubmitLocked = false;
+    this._stepError = { scope, message };
+    this.render();
+    const panel = this.shadow.querySelector(`#club-panel-${scope}`);
+    const alert = panel?.querySelector('[role="alert"]') as HTMLElement | null;
+    if (alert) {
+      alert.focus();
+    } else {
+      (this.shadow.querySelector(`[data-${scope === 'join' ? 'join-id' : 'create-name'}]`) as HTMLElement | null)?.focus();
+    }
   }
 
   private async handleStepResponse(
     res: Response,
     scope: 'join' | 'create',
+    seq: number,
   ): Promise<void> {
+    if (this._clubSubmitSeq !== seq) return; // D20: stale response guard
     if (res.ok) {
       if (scope === 'join') {
         // Join: a pending JoinRequest was created — redirect to home so the
@@ -850,10 +900,7 @@ class BiqOnboardApp extends HTMLElement {
     const data = await res.json().catch(() => null);
     const message =
       (data && (data as { detail?: string }).detail) || `Error ${res.status}`;
-    this._loading = false;
-    this._clubSubmitLocked = false;
-    this._stepError = { scope, message };
-    this.render();
+    this._recoverSubmission(scope, message, seq);
   }
 
   private renderClubStep(): string {
@@ -893,8 +940,8 @@ class BiqOnboardApp extends HTMLElement {
         return `<section id="club-panel-join" role="tabpanel" aria-labelledby="club-tab-join" aria-busy="${selected && this._loading ? 'true' : 'false'}" ${selected ? '' : 'hidden'}>
           <p class="onboard-card-desc">Si tu club ya usa BasketIQ, pide a un administrador el ID del club.</p>
           <div class="onboard-form-row">
-            <input type="text" class="onboard-input" data-join-id placeholder="ID del club" aria-label="ID del club" ${locked ? 'disabled' : ''} />
-            <button class="onboard-btn onboard-btn-primary" data-join-btn ${locked ? 'disabled' : ''}>${this._loading && selected ? 'Enviando solicitud…' : 'Solicitar acceso'}</button>
+            <input type="text" class="onboard-input" data-join-id placeholder="ID del club" aria-label="ID del club" value="${escapeHtml(this._clubForm.joinId)}" ${locked ? 'disabled' : ''} />
+            <button class="onboard-btn onboard-btn-primary" data-join-btn ${locked ? 'disabled' : ''}>${this._loading && selected ? '<span class="onboard-spinner" aria-hidden="true"></span> Enviando solicitud…' : 'Solicitar acceso'}</button>
           </div>
           ${err?.scope === 'join' ? `<div class="onboard-error" role="alert" tabindex="-1">${escapeHtml(err.message)}</div>` : ''}
           ${this._stepMessage ? `<div class="onboard-success" aria-live="polite">${escapeHtml(this._stepMessage)}</div>` : ''}
@@ -903,10 +950,10 @@ class BiqOnboardApp extends HTMLElement {
       return `<section id="club-panel-create" role="tabpanel" aria-labelledby="club-tab-create" aria-busy="${selected && this._loading ? 'true' : 'false'}" ${selected ? '' : 'hidden'}>
         <p class="onboard-card-desc">Crea la organización de tu club. Serás su administrador; podremos tomar el escudo y los colores de su web para personalizar la app.</p>
         <label class="onboard-field-label" for="create-name">Nombre del club</label>
-        <input type="text" id="create-name" class="onboard-input onboard-input-block" data-create-name placeholder="Club Baloncesto…" ${locked ? 'disabled' : ''} />
+        <input type="text" id="create-name" class="onboard-input onboard-input-block" data-create-name placeholder="Club Baloncesto…" value="${escapeHtml(this._clubForm.createName)}" ${locked ? 'disabled' : ''} />
         <label class="onboard-field-label" for="create-web">Web del club (opcional)</label>
-        <input type="url" id="create-web" class="onboard-input onboard-input-block" data-create-website placeholder="mi-club.es" ${locked ? 'disabled' : ''} />
-        <button class="onboard-btn onboard-btn-primary" data-create-btn ${locked ? 'disabled' : ''}>${this._loading && selected ? 'Creando el club…' : 'Crear club'}</button>
+        <input type="url" id="create-web" class="onboard-input onboard-input-block" data-create-website placeholder="mi-club.es" value="${escapeHtml(this._clubForm.createWebsite)}" ${locked ? 'disabled' : ''} />
+        <button class="onboard-btn onboard-btn-primary" data-create-btn ${locked ? 'disabled' : ''}>${this._loading && selected ? '<span class="onboard-spinner" aria-hidden="true"></span> Creando el club…' : 'Crear club'}</button>
         ${err?.scope === 'create' ? `<div class="onboard-error" role="alert" tabindex="-1">${escapeHtml(err.message)}</div>` : ''}
       </section>`;
     }).join('');
@@ -916,7 +963,7 @@ class BiqOnboardApp extends HTMLElement {
       <p class="onboard-card-desc">Elige una opción para empezar a usar BasketIQ.</p>
       ${this._error ? `<div class="onboard-error" role="alert">${escapeHtml(this._error)}</div>` : ''}
     </header>
-    ${this._loading ? '<div class="onboard-loading" role="status" aria-live="polite">Procesando…</div>' : ''}
+    ${this._loading ? '<div class="onboard-loading" role="status" aria-live="polite"><span class="onboard-spinner" aria-hidden="true"></span> Procesando…</div>' : ''}
     <div class="onboard-tabs" role="tablist" aria-label="Opciones de club">${tabButtons}</div>
     <div class="onboard-tab-panels">${panels}</div>`;
   }
@@ -949,15 +996,22 @@ class BiqOnboardApp extends HTMLElement {
     const joinBtn = this.shadow.querySelector('[data-join-btn]');
     const joinInput = this.shadow.querySelector('[data-join-id]') as HTMLInputElement | null;
     if (joinBtn && joinInput) {
+      joinInput.addEventListener('input', () => {
+        this._clubForm.joinId = joinInput.value;
+      });
       joinBtn.addEventListener('click', () => {
         if (this._clubSubmitLocked) return;
         const clubId = joinInput.value.trim();
         if (!clubId) return;
+        // D20: lock BEFORE rendering so the fresh controls are disabled.
+        this._clubSubmitSeq += 1;
+        this._clubSubmitAbort = new AbortController();
+        this._clubSubmitLocked = true;
         this._loading = true;
         this._stepError = null;
         this._stepMessage = '';
         this.render();
-        this.joinByClubId(clubId);
+        this.joinByClubId(clubId, this._clubSubmitSeq);
       });
     }
 
@@ -965,6 +1019,14 @@ class BiqOnboardApp extends HTMLElement {
     const nameInput = this.shadow.querySelector('[data-create-name]') as HTMLInputElement | null;
     const webInput = this.shadow.querySelector('[data-create-website]') as HTMLInputElement | null;
     if (createBtn && nameInput) {
+      nameInput.addEventListener('input', () => {
+        this._clubForm.createName = nameInput.value;
+      });
+      if (webInput) {
+        webInput.addEventListener('input', () => {
+          this._clubForm.createWebsite = webInput.value;
+        });
+      }
       createBtn.addEventListener('click', () => {
         if (this._clubSubmitLocked) return;
         const name = nameInput.value.trim();
@@ -983,11 +1045,15 @@ class BiqOnboardApp extends HTMLElement {
           }
           website = normalised;
         }
+        // D20: lock BEFORE rendering so the fresh controls are disabled.
+        this._clubSubmitSeq += 1;
+        this._clubSubmitAbort = new AbortController();
+        this._clubSubmitLocked = true;
         this._loading = true;
         this._stepError = null;
         this._stepMessage = '';
         this.render();
-        this.createClub(name, website);
+        this.createClub(name, website, this._clubSubmitSeq);
       });
     }
   }

@@ -773,9 +773,10 @@ class BiqOnboardApp extends HTMLElement {
     }
   }
 
+  // D21: lock ownership lives in the click handlers. These methods must NOT
+  // re-check the lock — the handler acquires it, renders the disabled state,
+  // then calls the method exactly once for the accepted submission.
   private async joinByClubId(clubId: string, seq: number): Promise<void> {
-    if (this._clubSubmitLocked) return;
-    this._clubSubmitLocked = true;
     try {
       const res = await fetch('/api/auth/register', {
         method: 'POST',
@@ -791,8 +792,6 @@ class BiqOnboardApp extends HTMLElement {
   }
 
   private async createClub(name: string, website: string, seq: number): Promise<void> {
-    if (this._clubSubmitLocked) return;
-    this._clubSubmitLocked = true;
     let res: Response;
     try {
       res = await fetch('/api/onboarding/clubs', {
@@ -808,6 +807,9 @@ class BiqOnboardApp extends HTMLElement {
     }
     if (this._clubSubmitSeq !== seq) return; // D20: stale response
     if (res.ok) {
+      if (this._clubSubmitAbort) {
+        this._clubSubmitAbort = null; // D21: request completed — clear the controller
+      }
       // ADDENDUM-07 §6: chain select-club to re-point the shell session to
       // the new administrator row, then navigate to home. Only navigate when
       // both succeeded; surface the select failure as a step error (the
@@ -865,6 +867,9 @@ class BiqOnboardApp extends HTMLElement {
   // D20: restore controls, preserve typed values, and surface a focused error.
   private _recoverSubmission(scope: 'join' | 'create', message: string, seq: number): void {
     if (this._clubSubmitSeq !== seq) return;
+    if (this._clubSubmitAbort) {
+      this._clubSubmitAbort = null; // D21: clear only the matching controller
+    }
     this._loading = false;
     this._clubSubmitLocked = false;
     this._stepError = { scope, message };
@@ -884,6 +889,9 @@ class BiqOnboardApp extends HTMLElement {
     seq: number,
   ): Promise<void> {
     if (this._clubSubmitSeq !== seq) return; // D20: stale response guard
+    if (this._clubSubmitAbort) {
+      this._clubSubmitAbort = null; // D21: request completed — clear the controller
+    }
     if (res.ok) {
       if (scope === 'join') {
         // Join: a pending JoinRequest was created — redirect to home so the

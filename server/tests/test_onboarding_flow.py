@@ -129,6 +129,7 @@ def test_creator_also_gets_sports_director_role(client, monkeypatch):
         "biq_core.roles.get_role_registry",
         lambda client=None: shared_roles_reg,
     )
+    monkeypatch.setattr(flow_mod.org, "get_roles", lambda: shared_roles_reg)
 
     reg = org.get_registry()
     _seed_user(reg, "u_new", "founder@basketiq.io")

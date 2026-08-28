@@ -150,55 +150,31 @@ def create_my_club(payload: ClubSelfCreate, request: Request) -> dict:
             detail="La web del club debe usar https://",
         )
 
-    club_id = registry.next_club_id()
-    from biq_core.org import Club
-
-    # F2: claim-then-commit creation. Roles first (deterministic ids), club,
-    # then the creator membership LAST. Every boundary failure is compensated
-    # fully, so a retry starts clean and can never create a duplicate club,
-    # orphan role, or member without authorization.
-    membership_id = registry.next_user_id()
-    scope = f"club:{club_id}"
+    from biq_core.org import Club, User
     from biq_core.roles import RoleAssignment
 
-    role_registry = org.get_roles()
+    # F2: canonical creation transaction. Deterministic ids when the client
+    # supplies an idempotency key, so replaying the same operation writes the
+    # same documents and never duplicates the club/member/roles.
+    import hashlib
 
-    # 1. Canonical creator capabilities (idempotent by deterministic id).
-    try:
-        role_registry.put_assignment(
-            RoleAssignment(user_id=membership_id, role="administrator", scope=scope)
-        )
-        role_registry.put_assignment(
-            RoleAssignment(user_id=membership_id, role="sports_director", scope=scope)
-        )
-    except Exception as exc:
-        raise HTTPException(
-            status_code=503,
-            detail="No se pudo completar la autorización del creador",
-        ) from exc
+    idem = (payload.idempotency_key or "").strip()
+    if idem:
+        digest = hashlib.sha256(idem.encode()).hexdigest()[:12]
+        club_id = f"f1f2_{digest}"
+        membership_id = f"f1f2m_{digest}"
+    else:
+        club_id = registry.next_club_id()
+        membership_id = registry.next_user_id()
+    scope = f"club:{club_id}"
 
-    # 2. Club. On failure, compensate the roles — nothing persists.
-    try:
-        registry.upsert_club(
-            Club(
-                id=club_id,
-                name=club_name,
-                status="active",
-                created_by=caller_email or None,
-                website=website or None,
-            )
-        )
-    except Exception as exc:
-        for role in ("administrator", "sports_director"):
-            try:
-                role_registry.remove_assignment(f"{membership_id}__{role}__{scope}")
-            except Exception:
-                logger.warning("compensation: failed to remove %s role for %s", role, membership_id)
-        raise HTTPException(status_code=503, detail="No se pudo crear el club") from exc
-
-    # 3. Creator membership LAST. On failure, compensate roles + club fully.
-    from biq_core.org import User
-
+    club = Club(
+        id=club_id,
+        name=club_name,
+        status="active",
+        created_by=caller_email or None,
+        website=website or None,
+    )
     membership = User(
         id=membership_id,
         club_id=club_id,
@@ -207,18 +183,26 @@ def create_my_club(payload: ClubSelfCreate, request: Request) -> dict:
         role="administrator",
         status="active",
     )
+    assignments = [
+        RoleAssignment(
+            user_id=membership_id, role="administrator", scope=scope,
+            id=f"{membership_id}__administrator__{scope}",
+        ),
+        RoleAssignment(
+            user_id=membership_id, role="sports_director", scope=scope,
+            id=f"{membership_id}__sports_director__{scope}",
+        ),
+    ]
     try:
-        registry.upsert_user(membership)
+        registry.create_club_with_creator_tx(
+            club, membership, assignments, role_registry=org.get_roles()
+        )
     except Exception as exc:
-        try:
-            from .onboarding import offboard_club
-
-            offboard_club(club_id)
-        except Exception:
-            logger.warning("compensation: failed to offboard club %s", club_id)
+        # The transaction is atomic: nothing persisted. A retry with the same
+        # idempotency key reuses the same ids; a retry without one starts clean.
         raise HTTPException(
             status_code=503,
-            detail="No se pudo crear la membresía del administrador",
+            detail="No se pudo crear el club",
         ) from exc
 
     # B9/B10: if website present, enqueue theme generation asynchronously.
@@ -263,4 +247,5 @@ def create_my_club(payload: ClubSelfCreate, request: Request) -> dict:
         "ok": True,
         "club": {"id": club_id, "name": club_name, "website": website or None},
         "membership_user_id": membership_id,
+        "idempotent": bool(idem),
     }

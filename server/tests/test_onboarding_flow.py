@@ -371,6 +371,13 @@ def test_s2s_standalone_mode_still_works_without_secret(client, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+class _RaisingDict(dict):
+    """A dict whose writes raise — injects storage-boundary failures."""
+
+    def __setitem__(self, key, value):
+        raise RuntimeError("store write denied")
+
+
 # F2 — failure injection at each creation write boundary
 # ---------------------------------------------------------------------------
 
@@ -398,81 +405,97 @@ def test_create_role_failure_leaves_nothing(client, monkeypatch):
     assert role_reg.list_assignments_for_scope("club:any") == [] or True  # nothing to check beyond no throw
 
 
-def test_create_club_failure_compensates_roles(client, monkeypatch):
-    """F2: club write fails → 503, roles compensated, no member."""
+def test_create_club_failure_rolls_back_atomically(client, monkeypatch):
+    """F2: club write fails → 503, whole transaction rolls back (roles, member)."""
     reg = org.get_registry()
+    # Baseline club + admin so we can prove unrelated state is untouched.
+    _seed_user(reg, "u_admin", "admin@basketiq.io", role="administrator", club_id="club_a")
     _seed_user(reg, "u_new", "boundary2@basketiq.io")
     _as_session(monkeypatch, "u_new")
     role_reg = org.get_roles()
     baseline = len(role_reg.list_assignments_for_scope("club:club_a"))
 
-    def boom(club_obj):
-        raise RuntimeError("club store down")
-    monkeypatch.setattr(reg, "upsert_club", boom)
-
-    resp = client.post("/api/onboarding/clubs", json={"name": "CB B2"})
-    assert resp.status_code == 503
+    orig = reg._clubs
+    reg._clubs = _RaisingDict(dict(orig))
+    try:
+        resp = client.post("/api/onboarding/clubs", json={"name": "CB B2"})
+        assert resp.status_code == 503
+    finally:
+        reg._clubs = orig
     assert _member_count(reg, "boundary2@basketiq.io") == []
-    # No new role assignments beyond the pre-existing baseline.
-    all_assignments = []
-    for scope in ("club:club_a",):
-        all_assignments += role_reg.list_assignments_for_scope(scope)
-    assert len(all_assignments) == baseline, "creator roles compensated away"
+    assert len(role_reg.list_assignments_for_scope("club:club_a")) == baseline, \
+        "no orphan roles after rollback"
+    assert {c.id for c in _clubs(reg)} == {"club_a"}, "no club persisted"
 
 
-def test_create_member_failure_fully_offboards(client, monkeypatch):
-    """F2: membership write fails → 503, club and roles fully removed."""
+def test_create_member_failure_rolls_back_atomically(client, monkeypatch):
+    """F2: membership write fails → 503, whole transaction rolls back."""
     reg = org.get_registry()
-    # Seed a baseline club with an administrator so we can prove the
-    # compensation only removes the NEW club, never unrelated state.
     _seed_user(reg, "u_admin", "admin@basketiq.io", role="administrator", club_id="club_a")
     _seed_user(reg, "u_new", "boundary3@basketiq.io")
     _as_session(monkeypatch, "u_new")
     role_reg = org.get_roles()
     baseline = len(role_reg.list_assignments_for_scope("club:club_a"))
 
-    def boom(user_obj):
-        raise RuntimeError("user store down")
-    monkeypatch.setattr(reg, "upsert_user", boom)
-
-    resp = client.post("/api/onboarding/clubs", json={"name": "CB B3"})
-    assert resp.status_code == 503
-    # Only the baseline club survived compensation.
-    assert {c.id for c in _clubs(reg)} == {"club_a"}, "new club compensated away"
-    # Baseline role assignments untouched; no new-scope roles exist.
+    orig = reg._users
+    reg._users = _RaisingDict(dict(orig))
+    try:
+        resp = client.post("/api/onboarding/clubs", json={"name": "CB B3"})
+        assert resp.status_code == 503
+    finally:
+        reg._users = orig
+    assert {c.id for c in _clubs(reg)} == {"club_a"}, "no new club after rollback"
     assert len(role_reg.list_assignments_for_scope("club:club_a")) == baseline
     assert _member_count(reg, "boundary3@basketiq.io") == []
 
 
 def test_create_retry_after_full_failure_succeeds_once(client, monkeypatch):
-    """F2: after a fully-compensated failure, a retry creates exactly one club."""
+    """F2: after a fully rolled-back failure, a retry creates exactly one club."""
     reg = org.get_registry()
     _seed_user(reg, "u_new", "retry@basketiq.io")
     _as_session(monkeypatch, "u_new")
     role_reg = org.get_roles()
 
-    fail = True
-    original = reg.upsert_user
+    # First attempt fails at the membership boundary → whole tx rolls back.
+    orig_users = reg._users
+    reg._users = _RaisingDict(dict(orig_users))
+    try:
+        first = client.post("/api/onboarding/clubs", json={"name": "CB Retry"})
+        assert first.status_code == 503
+    finally:
+        reg._users = orig_users
+    assert len(_clubs(reg)) == 0, "first attempt persisted nothing"
 
-    def flaky(user_obj):
-        nonlocal fail
-        if fail:
-            fail = False
-            raise RuntimeError("user store down")
-        return original(user_obj)
-    monkeypatch.setattr(reg, "upsert_user", flaky)
-
-    first = client.post("/api/onboarding/clubs", json={"name": "CB Retry"})
-    assert first.status_code == 503
     second = client.post("/api/onboarding/clubs", json={"name": "CB Retry"})
     assert second.status_code == 200
     members = _member_count(reg, "retry@basketiq.io")
     assert len(members) == 1, "exactly one membership after retry"
-    # The first attempt was fully compensated; the retry created exactly one club.
     assert len(_clubs(reg)) == 1, "exactly one club created"
-    # Creator has both canonical roles.
     caps_scope = f"club:{second.json()['club']['id']}"
     from biq_core.roles import effective_capabilities
     caps = effective_capabilities(members[0].id, caps_scope, role_reg)
     assert "club.admin" in caps
     assert "methodology.create" in caps
+
+
+def test_create_idempotency_key_replay_never_duplicates(client, monkeypatch):
+    """F2: replaying the same idempotency key writes the same documents."""
+    reg = org.get_registry()
+    _seed_user(reg, "u_new", "idem@basketiq.io")
+    _as_session(monkeypatch, "u_new")
+    role_reg = org.get_roles()
+
+    body = {"name": "CB Idem", "idempotency_key": "key-abc-123"}
+    first = client.post("/api/onboarding/clubs", json=body)
+    assert first.status_code == 200
+    club_id = first.json()["club"]["id"]
+    assert club_id.startswith("f1f2_"), "deterministic id from key"
+
+    second = client.post("/api/onboarding/clubs", json=body)
+    assert second.status_code == 200
+    assert second.json()["club"]["id"] == club_id
+    assert second.json()["idempotent"] is True
+    assert len(_clubs(reg)) == 1, "no duplicate club on replay"
+    members = _member_count(reg, "idem@basketiq.io")
+    assert len(members) == 1, "no duplicate member on replay"
+    assert len(role_reg.list_assignments_for_scope(f"club:{club_id}")) == 2

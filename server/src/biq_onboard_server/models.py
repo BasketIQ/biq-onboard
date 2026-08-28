@@ -17,10 +17,16 @@ class ClubCreate(BaseModel):
 class ClubSelfCreate(BaseModel):
     """Self-service club creation (ADDENDUM-07 §6): the id is assigned by the
     registry and the caller becomes administrator; only name (+ optional
-    website) is client-supplied."""
+    website) is client-supplied.
+
+    ``idempotency_key`` (optional) makes retries deterministic: when present,
+    the club and creator membership ids are derived from it, so replaying the
+    same operation writes the same documents and never duplicates the club.
+    """
 
     name: str
     website: str | None = None
+    idempotency_key: str | None = None
 
 
 class ClubUpdate(BaseModel):

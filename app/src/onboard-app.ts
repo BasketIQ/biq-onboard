@@ -208,6 +208,9 @@ class BiqOnboardApp extends HTMLElement {
   private _clubForm: { joinId: string; createName: string; createWebsite: string } = {
     joinId: '', createName: '', createWebsite: '',
   };
+  // F2: stable per-submission idempotency key so a retry after a network
+  // failure never creates a duplicate club. Regenerated per accepted attempt.
+  private _createIdempotencyKey = '';
   private _pollTimer: ReturnType<typeof setTimeout> | null = null;
   private _pollingClubId: string | null = null;
   private _pollBackoff = 3000; // C11: starts at 3s, backs off
@@ -773,10 +776,30 @@ class BiqOnboardApp extends HTMLElement {
     }
   }
 
-  // D21: lock ownership lives in the click handlers. These methods must NOT
-  // re-check the lock — the handler acquires it, renders the disabled state,
-  // then calls the method exactly once for the accepted submission.
-  private async joinByClubId(clubId: string, seq: number): Promise<void> {
+  // ─── F1: single-owner submission lifecycle ─────────────────────────────
+  // One method per form owns the ENTIRE lifecycle: lock acquisition, value
+  // persistence, request generation, AbortController, disabled render, the
+  // single fetch, and recovery. Event handlers only call these methods, so
+  // lock ownership cannot diverge again.
+
+  private async submitJoin(): Promise<void> {
+    if (this._clubSubmitLocked) return;
+    const clubId = this._clubForm.joinId.trim();
+    // Synchronous validation BEFORE locking — invalid fields stay editable.
+    if (!clubId) {
+      this._stepError = { scope: 'join', message: 'Introduce el ID del club.' };
+      this.render();
+      return;
+    }
+    // Acquire the lock, persist values, and render the disabled/busy state.
+    this._clubSubmitSeq += 1;
+    const seq = this._clubSubmitSeq;
+    this._clubSubmitAbort = new AbortController();
+    this._clubSubmitLocked = true;
+    this._loading = true;
+    this._stepError = null;
+    this._stepMessage = '';
+    this.render();
     try {
       const res = await fetch('/api/auth/register', {
         method: 'POST',
@@ -785,30 +808,64 @@ class BiqOnboardApp extends HTMLElement {
         body: JSON.stringify({ club_id: clubId }),
         signal: this._clubSubmitAbort?.signal,
       });
-      return this.handleStepResponse(res, 'join', seq);
+      await this.handleStepResponse(res, 'join', seq);
     } catch (err) {
       this._recoverSubmission('join', (err as Error).message || 'No se pudo enviar la solicitud', seq);
     }
   }
 
-  private async createClub(name: string, website: string, seq: number): Promise<void> {
+  private async submitCreate(): Promise<void> {
+    if (this._clubSubmitLocked) return;
+    const name = this._clubForm.createName.trim();
+    // Synchronous validation BEFORE locking — invalid fields stay editable.
+    if (name.length < 2) {
+      this._stepError = { scope: 'create', message: 'El nombre del club es obligatorio (mínimo 2 caracteres).' };
+      this.render();
+      return;
+    }
+    let website = '';
+    if (this._clubForm.createWebsite.trim()) {
+      const normalised = normaliseWebsiteUrl(this._clubForm.createWebsite);
+      if (normalised === null) {
+        this._stepError = { scope: 'create', message: 'La web del club debe usar https://' };
+        this.render();
+        return;
+      }
+      website = normalised;
+    }
+    // Acquire the lock, persist values, and render the disabled/busy state.
+    this._clubSubmitSeq += 1;
+    const seq = this._clubSubmitSeq;
+    this._clubSubmitAbort = new AbortController();
+    this._clubSubmitLocked = true;
+    this._loading = true;
+    this._stepError = null;
+    this._stepMessage = '';
+    // F2: one idempotency key per accepted submission; reused on retry.
+    if (!this._createIdempotencyKey) {
+      this._createIdempotencyKey =
+        (globalThis.crypto && globalThis.crypto.randomUUID
+          ? globalThis.crypto.randomUUID()
+          : String(Date.now()) + Math.random().toString(16).slice(2));
+    }
+    this.render();
     let res: Response;
     try {
       res = await fetch('/api/onboarding/clubs', {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, website }),
+        body: JSON.stringify({ name, website, idempotency_key: this._createIdempotencyKey }),
         signal: this._clubSubmitAbort?.signal,
       });
     } catch (err) {
       this._recoverSubmission('create', (err as Error).message || 'No se pudo crear el club', seq);
       return;
     }
-    if (this._clubSubmitSeq !== seq) return; // D20: stale response
+    if (this._clubSubmitSeq !== seq) return; // stale response guard
     if (res.ok) {
       if (this._clubSubmitAbort) {
-        this._clubSubmitAbort = null; // D21: request completed — clear the controller
+        this._clubSubmitAbort = null; // request completed — clear the controller
       }
       // ADDENDUM-07 §6: chain select-club to re-point the shell session to
       // the new administrator row, then navigate to home. Only navigate when
@@ -1007,19 +1064,15 @@ class BiqOnboardApp extends HTMLElement {
       joinInput.addEventListener('input', () => {
         this._clubForm.joinId = joinInput.value;
       });
+      // F1: thin callers — the submit method owns the entire lifecycle.
       joinBtn.addEventListener('click', () => {
-        if (this._clubSubmitLocked) return;
-        const clubId = joinInput.value.trim();
-        if (!clubId) return;
-        // D20: lock BEFORE rendering so the fresh controls are disabled.
-        this._clubSubmitSeq += 1;
-        this._clubSubmitAbort = new AbortController();
-        this._clubSubmitLocked = true;
-        this._loading = true;
-        this._stepError = null;
-        this._stepMessage = '';
-        this.render();
-        this.joinByClubId(clubId, this._clubSubmitSeq);
+        this.submitJoin();
+      });
+      joinInput.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          this.submitJoin();
+        }
       });
     }
 
@@ -1035,33 +1088,15 @@ class BiqOnboardApp extends HTMLElement {
           this._clubForm.createWebsite = webInput.value;
         });
       }
+      // F1: thin callers — the submit method owns the entire lifecycle.
       createBtn.addEventListener('click', () => {
-        if (this._clubSubmitLocked) return;
-        const name = nameInput.value.trim();
-        if (name.length < 2) {
-          this._stepError = { scope: 'create', message: 'El nombre del club es obligatorio (mínimo 2 caracteres).' };
-          this.render();
-          return;
+        this.submitCreate();
+      });
+      nameInput.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          this.submitCreate();
         }
-        let website = '';
-        if (webInput && webInput.value.trim()) {
-          const normalised = normaliseWebsiteUrl(webInput.value);
-          if (normalised === null) {
-            this._stepError = { scope: 'create', message: 'La web del club debe usar https://' };
-            this.render();
-            return;
-          }
-          website = normalised;
-        }
-        // D20: lock BEFORE rendering so the fresh controls are disabled.
-        this._clubSubmitSeq += 1;
-        this._clubSubmitAbort = new AbortController();
-        this._clubSubmitLocked = true;
-        this._loading = true;
-        this._stepError = null;
-        this._stepMessage = '';
-        this.render();
-        this.createClub(name, website, this._clubSubmitSeq);
       });
     }
   }

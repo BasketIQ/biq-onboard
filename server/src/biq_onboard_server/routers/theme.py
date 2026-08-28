@@ -56,8 +56,23 @@ def _s2s_secret() -> str | None:
     return os.environ.get("BIQ_ONBOARD_S2S_SECRET") or None
 
 
+def _require_theme_member(request: Request, club_id: str) -> str:
+    """Authorize a read for any active member of the requested club."""
+    secret = _s2s_secret()
+    if secret:
+        user_id, _email = _resolve_acting_identity(request)
+    else:
+        user_id = session_user(request)
+    if _is_break_glass_admin(user_id):
+        return user_id
+    user = org.get_registry().get_user(user_id)
+    if user is None or user.club_id != club_id or getattr(user, "status", "active") != "active":
+        raise HTTPException(status_code=403, detail=f"club membership required for club {club_id}")
+    return user_id
+
+
 def _require_theme_admin(request: Request, club_id: str) -> str:
-    """Authorize a theme operation, resolving identity from S2S or session.
+    """Authorize a theme mutation, resolving identity from S2S or session.
 
     C2: When a valid S2S bearer token is present, identity comes from the
     asserted headers (X-BIQ-Acting-User-Id / X-BIQ-Acting-Email). The
@@ -524,7 +539,7 @@ def _validate_canonical_status(status: str) -> str:
 # ─── Endpoints ──────────────────────────────────────────────────────────
 
 
-@router.post("/generate")
+@router.post("/generate", status_code=202)
 def generate_theme(club_id: str, payload: GenerateRequest, request: Request) -> dict:
     """Enqueue the club-theme generation job (ADDENDUM-06 §C13.3, B10).
 
@@ -589,13 +604,10 @@ def generate_theme(club_id: str, payload: GenerateRequest, request: Request) -> 
         failed_job["finishedAt"] = _now_iso()
         failed_job["reason"] = f"enqueue failed: {exc}"
         registry.merge_club_fields(club_id, {"theme_job": failed_job})
-        return {
-            "ok": True,
-            "status": "failed",
-            "jobId": lease_id,
-            "themeJob": failed_job,
-            "detail": "club created but theme generation could not be enqueued — retry available",
-        }
+        raise HTTPException(
+            status_code=503,
+            detail="theme generation could not be enqueued; retry available",
+        )
 
     return {
         "ok": True,
@@ -663,7 +675,7 @@ def retry_theme(club_id: str, request: Request) -> dict:
         failed_job["finishedAt"] = _now_iso()
         failed_job["reason"] = f"retry enqueue failed: {exc}"
         registry.merge_club_fields(club_id, {"theme_job": failed_job})
-        return {"ok": True, "status": "failed", "jobId": lease_id, "themeJob": failed_job}
+        raise HTTPException(status_code=503, detail="theme retry could not be enqueued")
 
     return {"ok": True, "status": "pending", "jobId": task_id, "themeJob": new_theme_job}
 
@@ -770,8 +782,11 @@ def activate_theme(club_id: str, payload: ActivateRequest, request: Request) -> 
 
 @router.get("")
 def get_theme(club_id: str, request: Request) -> dict:
-    """Return the current ClubTheme or null (ADDENDUM-02 §8)."""
-    _require_theme_admin(request, club_id)
+    """Return the current ClubTheme or null (ADDENDUM-02 §8).
+
+    V18: member-readable; mutations remain admin/capability gated.
+    """
+    _require_theme_member(request, club_id)
 
     registry = org.get_registry()
     club = registry.get_club(club_id)
@@ -886,8 +901,7 @@ def put_theme(club_id: str, payload: ManualThemeRequest, request: Request) -> di
         failed_job["finishedAt"] = _now_iso()
         failed_job["reason"] = f"manual enqueue failed: {exc}"
         registry.merge_club_fields(club_id, {"theme_job": failed_job})
-        return {"ok": True, "theme": theme, "themeJob": failed_job,
-                "detail": "manual theme stored but generation could not be enqueued"}
+        raise HTTPException(status_code=503, detail="manual theme generation could not be enqueued")
 
     return {"ok": True, "theme": theme, "themeJob": manual_job, "jobId": task_id}
 

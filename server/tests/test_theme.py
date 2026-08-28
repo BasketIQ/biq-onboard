@@ -64,7 +64,7 @@ def test_generate_theme_enqueues_job(admin_client, club_id):
         f"/api/admin/clubs/{club_id}/theme/generate",
         json={"homepage_url": "https://example.com"},
     )
-    assert r.status_code == 200
+    assert r.status_code == 202
     data = r.json()
     assert data["ok"] is True
     assert data["status"] == "pending"
@@ -80,7 +80,7 @@ def test_generate_theme_normalises_url(admin_client, club_id):
         f"/api/admin/clubs/{club_id}/theme/generate",
         json={"homepage_url": "example.com"},
     )
-    assert r.status_code == 200
+    assert r.status_code == 202
     assert r.json()["themeJob"]["sourceUrl"] == "https://example.com"
 
 
@@ -381,7 +381,7 @@ def test_s2s_theme_get_with_missing_bearer_returns_401(client, monkeypatch):
 
 
 def test_s2s_theme_get_with_non_admin_returns_403(client, monkeypatch):
-    """C2: Theme GET with valid S2S bearer but non-admin user returns 403."""
+    """V18: Theme GET is readable by any active club member."""
     monkeypatch.setenv("BIQ_ONBOARD_S2S_SECRET", "test-s2s-secret")
     from biq_onboard_server import org
     from biq_core.org import Club, User
@@ -399,7 +399,7 @@ def test_s2s_theme_get_with_non_admin_returns_403(client, monkeypatch):
             "X-BIQ-Acting-Email": "coach@test.io",
         },
     )
-    assert resp.status_code == 403
+    assert resp.status_code == 200
 
 
 def test_s2s_theme_get_missing_user_id_returns_403(client, monkeypatch):
@@ -531,7 +531,7 @@ def test_r7_history_preserved_across_replacement(monkeypatch):
 
     resp = c.post("/api/admin/clubs/r7club/theme/generate",
                   json={"homepage_url": "https://example.com"})
-    assert resp.status_code == 200, resp.text
+    assert resp.status_code == 202, resp.text
 
     # Verify history was preserved (3 prior + 1 new = 4)
     club = reg.get_club("r7club")

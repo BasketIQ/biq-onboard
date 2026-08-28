@@ -499,3 +499,62 @@ def test_create_idempotency_key_replay_never_duplicates(client, monkeypatch):
     members = _member_count(reg, "idem@basketiq.io")
     assert len(members) == 1, "no duplicate member on replay"
     assert len(role_reg.list_assignments_for_scope(f"club:{club_id}")) == 2
+
+
+# ---------------------------------------------------------------------------
+# F12 — Default team catalog seeding on self-service club creation
+# ---------------------------------------------------------------------------
+
+
+def test_f12_create_club_seeds_full_team_catalog(client, monkeypatch):
+    """F12: creating a club via create_my_club() seeds the full default
+    team catalog (every category × gender) for the new club."""
+    reg = org.get_registry()
+    _seed_user(reg, "u_f12", "f12@basketiq.io")
+    _as_session(monkeypatch, "u_f12")
+
+    resp = client.post("/api/onboarding/clubs", json={"name": "CB F12"})
+    assert resp.status_code == 200
+    data = resp.json()
+    club_id = data["club"]["id"]
+    assert data["teams_seeded"] > 0, "teams_seeded count in response"
+
+    teams = reg.list_teams(club_id)
+    # build_team_catalog generates 28 teams for a season (8 categories ×
+    # genders, with birth-year cohorts for some categories).
+    assert len(teams) == 28, f"expected 28 teams, got {len(teams)}"
+
+    # Verify representative category × gender entries exist.
+    categories = {t.category for t in teams}
+    genders = {t.gender for t in teams}
+    assert "babybasket" in categories
+    assert "senior" in categories
+    assert "M" in genders
+    assert "F" in genders
+
+    # Verify team IDs are scoped by club_id (the slug parameter).
+    assert all(t.club_id == club_id for t in teams)
+    assert any(t.id.startswith(f"team_{club_id}_") for t in teams)
+
+
+def test_f12_idempotent_replay_reseeds_without_duplicates(client, monkeypatch):
+    """F12: replaying the same idempotency key re-seeds teams via upsert
+    (merge semantics) — no duplicates, same count."""
+    reg = org.get_registry()
+    _seed_user(reg, "u_f12_idem", "f12-idem@basketiq.io")
+    _as_session(monkeypatch, "u_f12_idem")
+
+    body = {"name": "CB F12 Idem", "idempotency_key": "f12-key-001"}
+    first = client.post("/api/onboarding/clubs", json=body)
+    assert first.status_code == 200
+    club_id = first.json()["club"]["id"]
+
+    teams_after_first = reg.list_teams(club_id)
+    assert len(teams_after_first) == 28
+
+    second = client.post("/api/onboarding/clubs", json=body)
+    assert second.status_code == 200
+    assert second.json()["club"]["id"] == club_id
+
+    teams_after_second = reg.list_teams(club_id)
+    assert len(teams_after_second) == 28, "no duplicate teams on replay"

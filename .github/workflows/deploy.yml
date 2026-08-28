@@ -177,6 +177,44 @@ jobs:
             exit 1
           fi
 
+      - name: Verify runtime SA can enqueue tasks and impersonate invoker (F5)
+        env:
+          PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+        run: |
+          # F5: The Cloud Run revision's runtime SA (default compute SA) needs
+          # two permissions to enqueue Cloud Tasks that target a Cloud Run Job
+          # via OAuthToken impersonation:
+          #   1. cloudtasks.tasks.create on the queue (roles/cloudtasks.enqueuer)
+          #   2. iam.serviceAccounts.actAs on the task-invoker SA (roles/iam.serviceAccountUser)
+          # Without these, _enqueue_generation_task() raises 403 and theme
+          # generation fails with "enqueue failed: 403 ...".
+          PROJECT_NUMBER=$(gcloud projects describe "${PROJECT_ID}" --format='value(projectNumber)' 2>/dev/null || echo "")
+          RUNTIME_SA="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
+          TASK_INVOKER_SA="${TASK_INVOKER_SA}"
+          QUEUE="projects/${PROJECT_ID}/locations/europe-west1/queues/club-theme-generation"
+
+          # 1. Verify runtime SA has cloudtasks.enqueuer on the project
+          PROJECT_POLICY=$(gcloud projects get-iam-policy "${PROJECT_ID}" --format="json(bindings)" 2>/dev/null || echo '{"bindings":[]}')
+          if echo "${PROJECT_POLICY}" | jq -e --arg sa "serviceAccount:${RUNTIME_SA}" \
+            '.bindings[]? | select(.role=="roles/cloudtasks.enqueuer") | .members[]? | select(.==$sa)' >/dev/null 2>&1; then
+            echo "Verified: ${RUNTIME_SA} has roles/cloudtasks.enqueuer on ${PROJECT_ID}"
+          else
+            echo "::error::Runtime SA (${RUNTIME_SA}) is missing roles/cloudtasks.enqueuer on ${PROJECT_ID}"
+            echo "::error::Grant via: gcloud projects add-iam-policy-binding ${PROJECT_ID} --member serviceAccount:${RUNTIME_SA} --role roles/cloudtasks.enqueuer"
+            exit 1
+          fi
+
+          # 2. Verify runtime SA has iam.serviceAccountUser on the task-invoker SA
+          SA_POLICY=$(gcloud iam service-accounts get-iam-policy "${TASK_INVOKER_SA}" --project "${PROJECT_ID}" --format="json(bindings)" 2>/dev/null || echo '{"bindings":[]}')
+          if echo "${SA_POLICY}" | jq -e --arg sa "serviceAccount:${RUNTIME_SA}" \
+            '.bindings[]? | select(.role=="roles/iam.serviceAccountUser") | .members[]? | select(.==$sa)' >/dev/null 2>&1; then
+            echo "Verified: ${RUNTIME_SA} has roles/iam.serviceAccountUser on ${TASK_INVOKER_SA}"
+          else
+            echo "::error::Runtime SA (${RUNTIME_SA}) is missing roles/iam.serviceAccountUser on ${TASK_INVOKER_SA}"
+            echo "::error::Grant via: gcloud iam service-accounts add-iam-policy-binding ${TASK_INVOKER_SA} --project ${PROJECT_ID} --member serviceAccount:${RUNTIME_SA} --role roles/iam.serviceAccountUser"
+            exit 1
+          fi
+
       - name: Deploy to Cloud Run
         env:
           PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}

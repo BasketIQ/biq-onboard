@@ -699,7 +699,7 @@ class BiqOnboardApp extends HTMLElement {
         ${theme ? this.renderBrandingState(theme, verdictCopy, statusCopy) : ''}
         ${theme?.logo ? this.renderLogoSection(theme) : ''}
         ${theme ? this.renderPreview(theme) : ''}
-        ${theme ? this.renderManualPicker(club.id, theme) : ''}
+        ${theme ? this.renderManualPicker(club.id, theme) : this.renderManualPicker(club.id)}
         ${theme ? this.renderRevertButton(club.id) : ''}
       </section>`;
   }
@@ -783,9 +783,11 @@ class BiqOnboardApp extends HTMLElement {
       </div>`;
   }
 
-  private renderManualPicker(clubId: string, theme: ClubTheme): string {
-    const brand = theme.seed?.brand || '#FF5A00';
-    const brandAlt = theme.seed?.brandAlt || '';
+  private renderManualPicker(clubId: string, theme?: ClubTheme): string {
+    // F6: Manual picker must be reachable even when no theme object exists yet.
+    // This is the intended fallback when automatic extraction doesn't work.
+    const brand = theme?.seed?.brand || '#FF5A00';
+    const brandAlt = theme?.seed?.brandAlt || '';
     return `
       <div class="onboard-card">
         <h3 class="onboard-card-title">Selector manual de colores</h3>

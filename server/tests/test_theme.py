@@ -319,6 +319,91 @@ def test_enqueue_production_calls_cloud_tasks(monkeypatch):
     monkeypatch.delenv("BIQ_CLOUD_TASKS_QUEUE", raising=False)
 
 
+def test_enqueue_run_job_request_body_has_overrides_wrapper(monkeypatch):
+    """F5 regression test: the Cloud Run Admin API v2 RunJob method
+    (POST .../jobs/{job}:run) requires the HTTP body to be a RunJobRequest,
+    which wraps containerOverrides inside an "overrides" field:
+
+        {"overrides": {"containerOverrides": [...]}}
+
+    Sending containerOverrides at the top level (missing the "overrides"
+    wrapper) is rejected by Cloud Run's schema validation with
+    INVALID_ARGUMENT before the job is ever triggered. Cloud Tasks then
+    exhausts retries and silently drops the task — no job execution, no
+    audit trail (confirmed live on staging: task_operations_log showed
+    status=INVALID_ARGUMENT with ~15-25ms response times, i.e. Cloud Run's
+    API rejecting the request at validation, not attempting to run it).
+
+    This test captures the actual JSON body passed to HttpRequest and
+    asserts it matches the RunJobRequest schema.
+    """
+    import json
+
+    monkeypatch.setenv("BIQ_CLOUD_TASKS_QUEUE", "club-theme-generation")
+    monkeypatch.setenv("GCP_PROJECT_ID", "test-project")
+    monkeypatch.setenv("GCP_TASKS_LOCATION", "europe-west1")
+    monkeypatch.setenv("GCP_TASK_INVOKER_SA", "biq-task-invoker@test-project.iam.gserviceaccount.com")
+
+    from biq_onboard_server.routers import theme as theme_mod
+
+    captured_http_request_kwargs = {}
+
+    class MockCreatedTask:
+        name = "projects/test-project/locations/europe-west1/queues/club-theme-generation/tasks/fake-task-456"
+
+    class MockCloudTasksClient:
+        def queue_path(self, project, location, queue):
+            return f"projects/{project}/locations/{location}/queues/{queue}"
+
+        def create_task(self, request):
+            return MockCreatedTask()
+
+    class MockTasksV2:
+        class Task:
+            def __init__(self, **kwargs):
+                pass
+
+        class HttpRequest:
+            def __init__(self, **kwargs):
+                # Capture the real kwargs (including body) instead of discarding them.
+                captured_http_request_kwargs.update(kwargs)
+
+        class HttpMethod:
+            POST = "POST"
+
+        class OAuthToken:
+            def __init__(self, **kwargs):
+                pass
+
+    mock_client = MockCloudTasksClient()
+    monkeypatch.setattr(theme_mod, "_get_tasks_client", lambda: mock_client)
+    import sys
+    monkeypatch.setitem(sys.modules, "google.cloud.tasks_v2", MockTasksV2())
+
+    theme_mod._enqueue_generation_task("club_test2", "https://example.com", "lease-test-2")
+
+    assert "body" in captured_http_request_kwargs
+    body = json.loads(captured_http_request_kwargs["body"])
+
+    # The body MUST be a RunJobRequest: {"overrides": {"containerOverrides": [...]}}
+    assert "overrides" in body, (
+        f"RunJob request body is missing the required 'overrides' wrapper "
+        f"field (schema: RunJobRequest). Got top-level keys: {list(body.keys())}"
+    )
+    assert "containerOverrides" in body["overrides"]
+    assert isinstance(body["overrides"]["containerOverrides"], list)
+    env_names = {e["name"] for e in body["overrides"]["containerOverrides"][0]["env"]}
+    assert "CLUB_ID" in env_names
+    assert "SOURCE_URL" in env_names
+    assert "LEASE_ID" in env_names
+
+    # Regression guard: containerOverrides must NOT be a top-level key —
+    # that was the exact bug (missing overrides wrapper).
+    assert "containerOverrides" not in body
+
+    monkeypatch.delenv("BIQ_CLOUD_TASKS_QUEUE", raising=False)
+
+
 # ─── Logo rights affirmation (ADDENDUM-06 section C3) ───────────────────────
 
 

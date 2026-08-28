@@ -293,13 +293,16 @@ def _enqueue_generation_task(
     if manual_seed_alt:
         env_vars.append({"name": "MANUAL_SEED_BRAND_ALT", "value": manual_seed_alt})
 
-    # The Cloud Run Admin API v2 RunJobRequest only recognizes
-    # {validateOnly, etag, overrides} at the top level — containerOverrides
-    # must be nested under "overrides" (see RunJobRequest.Overrides in
-    # google/cloud/run/v2/job.proto). A top-level "containerOverrides" key
-    # is an unrecognized field and the API rejects it with INVALID_ARGUMENT,
-    # which Cloud Tasks then retries and exhausts silently (root cause of
-    # the 2026-09-02 stuck-at-"pending" regression — see handoff).
+    # F5: The Cloud Run Admin API v2 RunJob method requires the body to be a
+    # RunJobRequest, which wraps containerOverrides inside an "overrides"
+    # field. Sending containerOverrides at the top level (missing the
+    # "overrides" wrapper) is rejected by Cloud Run's schema validation with
+    # INVALID_ARGUMENT before the job is ever triggered — Cloud Tasks then
+    # exhausts its retries and drops the task with no job execution and no
+    # visible audit trail (the request never reaches Cloud Run's
+    # audit-logged activity layer). This was independently confirmed and
+    # fixed on main (PR #25, 2026-09-02 stuck-at-"pending" regression) with
+    # the same wrapping; kept here as the superset F5 hardening fix.
     run_job_request = {
         "overrides": {
             "containerOverrides": [

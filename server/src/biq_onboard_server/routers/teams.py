@@ -4,16 +4,39 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Request
 
+from biq_core.roles import effective_capabilities
+
 from .. import org
-from ..auth import require_admin
+from ..auth import _is_break_glass_admin, require_admin, session_user
 from ..models import TeamCreate, TeamUpdate
 
 router = APIRouter(prefix="/clubs/{club_id}/teams")
 
 
+def _require_teams_manage(request: Request, club_id: str) -> str:
+    """Authorize team-catalog management.
+
+    F12: Accepts ``club.admin`` (administrator) OR ``club.teams.manage``
+    (administrator + Sports Director). This is deliberately separate from
+    ``require_admin`` so the broader ``roles.manage`` gate is not loosened
+    for non-team endpoints.
+    """
+    user = session_user(request)
+    if _is_break_glass_admin(user):
+        return user
+    scope = f"club:{club_id}"
+    caps = effective_capabilities(user, scope, org.get_roles())
+    if "club.admin" not in caps and "club.teams.manage" not in caps:
+        raise HTTPException(
+            status_code=403,
+            detail=f"team-catalog management requires club.admin or club.teams.manage for club {club_id}",
+        )
+    return user
+
+
 @router.post("")
 def create_team(club_id: str, payload: TeamCreate, request: Request) -> dict:
-    require_admin(request, club_id)
+    _require_teams_manage(request, club_id)
     from biq_core.org import Team
 
     registry = org.get_registry()
@@ -31,7 +54,7 @@ def create_team(club_id: str, payload: TeamCreate, request: Request) -> dict:
 
 @router.get("")
 def list_teams(club_id: str, request: Request) -> dict:
-    require_admin(request, club_id)
+    _require_teams_manage(request, club_id)
     registry = org.get_registry()
     teams = registry.list_teams(club_id)
     return {
@@ -45,6 +68,7 @@ def list_teams(club_id: str, request: Request) -> dict:
                 "label": t.label,
                 "timezone": t.timezone,
                 "staff_user_ids": t.staff_user_ids,
+                "archived": t.archived,
             }
             for t in teams
         ],
@@ -54,7 +78,7 @@ def list_teams(club_id: str, request: Request) -> dict:
 
 @router.put("/{team_id}")
 def update_team(club_id: str, team_id: str, payload: TeamUpdate, request: Request) -> dict:
-    require_admin(request, club_id)
+    _require_teams_manage(request, club_id)
     from biq_core.org import Team
 
     registry = org.get_registry()
@@ -91,7 +115,7 @@ def update_team(club_id: str, team_id: str, payload: TeamUpdate, request: Reques
 
 @router.delete("/{team_id}")
 def delete_team(club_id: str, team_id: str, request: Request) -> dict:
-    require_admin(request, club_id)
+    _require_teams_manage(request, club_id)
     from ..onboarding import _delete_team_safe
 
     registry = org.get_registry()
@@ -106,7 +130,7 @@ def archive_team(club_id: str, team_id: str, request: Request) -> dict:
     Sets archived=true on the team. Archived teams have their future
     operational occurrences and actions cancelled by the OEE engine.
     """
-    require_admin(request, club_id)
+    _require_teams_manage(request, club_id)
     from biq_core.org import Team
 
     registry = org.get_registry()
@@ -132,7 +156,7 @@ def archive_team(club_id: str, team_id: str, request: Request) -> dict:
 @router.put("/{team_id}/unarchive")
 def unarchive_team(club_id: str, team_id: str, request: Request) -> dict:
     """Unarchive a team — resume normal operational reconciliation."""
-    require_admin(request, club_id)
+    _require_teams_manage(request, club_id)
     from biq_core.org import Team
 
     registry = org.get_registry()

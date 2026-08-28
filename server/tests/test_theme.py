@@ -336,6 +336,15 @@ def test_enqueue_run_job_request_body_has_overrides_wrapper(monkeypatch):
 
     This test captures the actual JSON body passed to HttpRequest and
     asserts it matches the RunJobRequest schema.
+
+    Note on mocking strategy: we import the REAL google.cloud.tasks_v2
+    module and monkeypatch its classes in place (setattr on the module
+    object). This works regardless of whether the package was already
+    imported and cached as an attribute on google.cloud — which is the
+    exact failure mode that broke the earlier version of this test in CI
+    (where google-cloud-tasks IS installed). Replacing sys.modules alone
+    does not update the cached attribute, so _enqueue_generation_task's
+    `from google.cloud import tasks_v2` still resolved to the real module.
     """
     import json
 
@@ -346,7 +355,21 @@ def test_enqueue_run_job_request_body_has_overrides_wrapper(monkeypatch):
 
     from biq_onboard_server.routers import theme as theme_mod
 
+    # Import the real module and patch its classes in place. This works
+    # whether or not the package is installed (CI) or absent (local dev
+    # without google-cloud-tasks). If the package is absent, we skip —
+    # the test is only meaningful in an environment where the production
+    # code path can actually execute.
+    try:
+        from google.cloud import tasks_v2 as real_tasks_v2
+    except ImportError:
+        pytest.skip("google-cloud-tasks not installed; cannot test real module patching")
+
     captured_http_request_kwargs = {}
+
+    class CapturingHttpRequest:
+        def __init__(self, **kwargs):
+            captured_http_request_kwargs.update(kwargs)
 
     class MockCreatedTask:
         name = "projects/test-project/locations/europe-west1/queues/club-theme-generation/tasks/fake-task-456"
@@ -358,31 +381,25 @@ def test_enqueue_run_job_request_body_has_overrides_wrapper(monkeypatch):
         def create_task(self, request):
             return MockCreatedTask()
 
-    class MockTasksV2:
-        class Task:
-            def __init__(self, **kwargs):
-                pass
-
-        class HttpRequest:
-            def __init__(self, **kwargs):
-                # Capture the real kwargs (including body) instead of discarding them.
-                captured_http_request_kwargs.update(kwargs)
-
-        class HttpMethod:
-            POST = "POST"
-
-        class OAuthToken:
-            def __init__(self, **kwargs):
-                pass
-
     mock_client = MockCloudTasksClient()
     monkeypatch.setattr(theme_mod, "_get_tasks_client", lambda: mock_client)
-    import sys
-    monkeypatch.setitem(sys.modules, "google.cloud.tasks_v2", MockTasksV2())
+
+    # Patch the real module's classes in place — this updates the actual
+    # object that `from google.cloud import tasks_v2` resolves to, whether
+    # it was imported fresh or retrieved from a cached attribute.
+    monkeypatch.setattr(real_tasks_v2, "HttpRequest", CapturingHttpRequest)
+    monkeypatch.setattr(real_tasks_v2, "OAuthToken", type("OAuthToken", (), {"__init__": lambda self, **kw: None}))
+    # Task and HttpMethod are also used by _enqueue_generation_task
+    monkeypatch.setattr(real_tasks_v2, "Task", type("Task", (), {"__init__": lambda self, **kw: None}))
+    monkeypatch.setattr(real_tasks_v2, "HttpMethod", type("HttpMethod", (), {"POST": "POST"}))
 
     theme_mod._enqueue_generation_task("club_test2", "https://example.com", "lease-test-2")
 
-    assert "body" in captured_http_request_kwargs
+    assert "body" in captured_http_request_kwargs, (
+        "HttpRequest was never called with a body — the real tasks_v2.HttpRequest "
+        "was used instead of the mock. This means the in-place patch did not take "
+        "effect, which would indicate the module was cached differently than expected."
+    )
     body = json.loads(captured_http_request_kwargs["body"])
 
     # The body MUST be a RunJobRequest: {"overrides": {"containerOverrides": [...]}}

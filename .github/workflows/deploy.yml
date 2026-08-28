@@ -191,16 +191,39 @@ jobs:
           PROJECT_NUMBER=$(gcloud projects describe "${PROJECT_ID}" --format='value(projectNumber)' 2>/dev/null || echo "")
           RUNTIME_SA="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
           TASK_INVOKER_SA="${TASK_INVOKER_SA}"
-          QUEUE="projects/${PROJECT_ID}/locations/europe-west1/queues/club-theme-generation"
+          QUEUE_LOCATION="europe-west1"
+          QUEUE_NAME="club-theme-generation"
 
-          # 1. Verify runtime SA has cloudtasks.enqueuer on the project
+          # 1. Verify runtime SA has cloudtasks.enqueuer — check BOTH project
+          #    level and queue level. The binding can be granted at either scope;
+          #    checking only project-level produces a false negative when the
+          #    binding was granted via `gcloud tasks queues add-iam-policy-binding`
+          #    (queue-level), which is the more precise and recommended scope.
+          SA_MEMBER="serviceAccount:${RUNTIME_SA}"
+          ENQUEUER_OK=false
+
+          # 1a. Check project-level binding
           PROJECT_POLICY=$(gcloud projects get-iam-policy "${PROJECT_ID}" --format="json(bindings)" 2>/dev/null || echo '{"bindings":[]}')
-          if echo "${PROJECT_POLICY}" | jq -e --arg sa "serviceAccount:${RUNTIME_SA}" \
+          if echo "${PROJECT_POLICY}" | jq -e --arg sa "${SA_MEMBER}" \
             '.bindings[]? | select(.role=="roles/cloudtasks.enqueuer") | .members[]? | select(.==$sa)' >/dev/null 2>&1; then
-            echo "Verified: ${RUNTIME_SA} has roles/cloudtasks.enqueuer on ${PROJECT_ID}"
-          else
+            echo "Verified: ${RUNTIME_SA} has roles/cloudtasks.enqueuer on ${PROJECT_ID} (project-level)"
+            ENQUEUER_OK=true
+          fi
+
+          # 1b. Check queue-level binding (only if project-level check failed)
+          if [ "${ENQUEUER_OK}" = "false" ]; then
+            QUEUE_POLICY=$(gcloud tasks queues get-iam-policy "${QUEUE_NAME}" --location="${QUEUE_LOCATION}" --project="${PROJECT_ID}" --format="json(bindings)" 2>/dev/null || echo '{"bindings":[]}')
+            if echo "${QUEUE_POLICY}" | jq -e --arg sa "${SA_MEMBER}" \
+              '.bindings[]? | select(.role=="roles/cloudtasks.enqueuer") | .members[]? | select(.==$sa)' >/dev/null 2>&1; then
+              echo "Verified: ${RUNTIME_SA} has roles/cloudtasks.enqueuer on ${QUEUE_NAME} (queue-level)"
+              ENQUEUER_OK=true
+            fi
+          fi
+
+          if [ "${ENQUEUER_OK}" = "false" ]; then
             echo "::error::Runtime SA (${RUNTIME_SA}) is missing roles/cloudtasks.enqueuer on ${PROJECT_ID}"
-            echo "::error::Grant via: gcloud projects add-iam-policy-binding ${PROJECT_ID} --member serviceAccount:${RUNTIME_SA} --role roles/cloudtasks.enqueuer"
+            echo "::error::Grant at project level:  gcloud projects add-iam-policy-binding ${PROJECT_ID} --member ${SA_MEMBER} --role roles/cloudtasks.enqueuer"
+            echo "::error::Or grant at queue level:  gcloud tasks queues add-iam-policy-binding ${QUEUE_NAME} --location ${QUEUE_LOCATION} --project ${PROJECT_ID} --member ${SA_MEMBER} --role roles/cloudtasks.enqueuer"
             exit 1
           fi
 

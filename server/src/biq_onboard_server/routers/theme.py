@@ -647,10 +647,16 @@ def retry_theme(club_id: str, request: Request) -> dict:
         existing_job = {}
 
     current_status = existing_job.get("status", "")
-    if current_status not in ("failed", "unreachable", "rejected_not_a_club", "unsupported_source"):
+    # F5 Issue 2: Allow retry for terminal failure states AND for stuck
+    # pending/running jobs. When Cloud Tasks retries asynchronously with
+    # unbounded maxAttempts, the job may never reach a terminal state from
+    # the caller's side. The client-side staleness timeout fires after 3
+    # minutes and the user clicks "Reintentar" — the retry endpoint must
+    # accept this, otherwise the only recovery is a full page reload.
+    if current_status not in ("failed", "unreachable", "rejected_not_a_club", "unsupported_source", "pending", "running"):
         raise HTTPException(
             status_code=409,
-            detail=f"retry only available for terminal failure states (current: {current_status})",
+            detail=f"retry only available for failure or stuck states (current: {current_status})",
         )
 
     source_url = existing_job.get("sourceUrl", "")

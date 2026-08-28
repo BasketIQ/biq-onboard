@@ -256,6 +256,15 @@ class BiqOnboardApp extends HTMLElement {
   private _pollingClubId: string | null = null;
   private _pollBackoff = 3000; // C11: starts at 3s, backs off
   private _polling = false; // C11: prevent overlap
+  // F5: Staleness timeout — if a theme_job has been pending/running for
+  // longer than this threshold without a terminal callback, treat it as
+  // stale and show the retry button. Cloud Tasks retries asynchronously
+  // and may never reach a terminal state from the caller's perspective
+  // (maxAttempts: 0 = unbounded retries). Without this, the UI hangs on
+  // "Procesando…" indefinitely with no escape except a full page reload.
+  private _pollStartedAt = 0; // timestamp (ms) when polling began
+  private _staleThresholdMs = 180_000; // 3 minutes
+  private _isStale = false;
   private _visibilityHandler: (() => void) | null = null; // C11: visibility handling
   // F12: Team catalog management
   private _teams: Array<{ id: string; name: string; category: string | null; gender: string | null; label: string | null; archived: boolean }> = [];
@@ -352,6 +361,16 @@ class BiqOnboardApp extends HTMLElement {
       this._stopPolling();
       return;
     }
+    // F5: Staleness check — if we've been polling for longer than the
+    // threshold without a terminal callback, mark as stale and stop.
+    // Cloud Tasks retries asynchronously (maxAttempts: 0 = unbounded) and
+    // the job may never reach a terminal state from the caller's side.
+    if (this._pollStartedAt > 0 && (Date.now() - this._pollStartedAt) > this._staleThresholdMs) {
+      this._isStale = true;
+      this._stopPolling();
+      this.render();
+      return;
+    }
     // C11: Clear timer before checking to avoid the "truthy timer" deadlock
     if (this._pollTimer) {
       clearTimeout(this._pollTimer);
@@ -359,10 +378,16 @@ class BiqOnboardApp extends HTMLElement {
     }
     // Prevent overlap — don't schedule if a poll is in-flight
     if (this._polling) return;
-    // Club changed — reset backoff
+    // Club changed — reset backoff and staleness
     if (this._pollingClubId !== clubId) {
       this._pollingClubId = clubId;
       this._pollBackoff = 3000;
+      this._pollStartedAt = Date.now();
+      this._isStale = false;
+    }
+    // Record start time if not yet set
+    if (this._pollStartedAt === 0) {
+      this._pollStartedAt = Date.now();
     }
     this._pollTimer = setTimeout(() => this._pollTheme(clubId), this._pollBackoff);
   }
@@ -375,6 +400,11 @@ class BiqOnboardApp extends HTMLElement {
     this._pollingClubId = null;
     this._polling = false;
     this._pollBackoff = 3000;
+    // F5: Don't reset _isStale here — it's reset when a new poll starts
+    // or when a new generation is triggered. _stopPolling is called on
+    // terminal states too, and we want to preserve the stale flag for
+    // rendering until the user explicitly retries.
+    this._pollStartedAt = 0;
   }
 
   // C11: Lifecycle — stop polling on disconnect, resume on reconnect
@@ -480,6 +510,9 @@ class BiqOnboardApp extends HTMLElement {
   private async generateTheme(clubId: string, url: string): Promise<void> {
     this._loading = true;
     this._error = null;
+    // F5: Reset staleness flag when a new generation is triggered
+    this._isStale = false;
+    this._pollStartedAt = 0;
     this.render();
     try {
       const res = await fetch(`/api/clubs/${clubId}/theme/generate`, {
@@ -594,6 +627,9 @@ class BiqOnboardApp extends HTMLElement {
   private async retryTheme(clubId: string): Promise<void> {
     this._loading = true;
     this._error = null;
+    // F5: Reset staleness flag when retrying
+    this._isStale = false;
+    this._pollStartedAt = 0;
     this.render();
     try {
       const res = await fetch(`/api/clubs/${clubId}/theme/retry`, {
@@ -665,7 +701,10 @@ class BiqOnboardApp extends HTMLElement {
     const jobCopy = jobStatus ? THEME_JOB_COPY[jobStatus] : null;
     const isPolling = jobStatus === 'pending' || jobStatus === 'running';
     const canActivate = theme && (theme.status === 'draft' || theme.status === 'uncertain' || (jobStatus === 'succeeded' && theme.status !== 'active'));
-    const canRetry = jobStatus === 'failed' || jobStatus === 'unreachable' || jobStatus === 'rejected_not_a_club' || jobStatus === 'unsupported_source';
+    // F5: Allow retry when the job is in a terminal failed state OR when
+    // the staleness timeout has fired (job stuck pending/running without
+    // a terminal callback for > _staleThresholdMs).
+    const canRetry = jobStatus === 'failed' || jobStatus === 'unreachable' || jobStatus === 'rejected_not_a_club' || jobStatus === 'unsupported_source' || this._isStale;
 
     return `
       <section class="onboard-section">
@@ -678,8 +717,8 @@ class BiqOnboardApp extends HTMLElement {
           <p class="onboard-card-desc">Introduce la URL de la web del club. Extraeremos los colores del tema automáticamente.</p>
           <div class="onboard-form-row">
             <input type="url" class="onboard-input" data-website-input value="${escapeHtml(website)}" placeholder="https://www.miclub.com" />
-            <button class="onboard-btn onboard-btn-primary" data-generate-btn ${this._loading || isPolling ? 'disabled' : ''}>
-              ${isPolling ? 'Procesando…' : this._loading ? 'Generando…' : 'Generar tema'}
+            <button class="onboard-btn onboard-btn-primary" data-generate-btn ${this._loading || (isPolling && !this._isStale) ? 'disabled' : ''}>
+              ${isPolling && !this._isStale ? 'Procesando…' : this._loading ? 'Generando…' : 'Generar tema'}
             </button>
           </div>
         </div>
@@ -688,7 +727,8 @@ class BiqOnboardApp extends HTMLElement {
           <div class="onboard-card onboard-theme-job-state" data-job-state="${jobStatus}">
             <h3 class="onboard-card-title">${escapeHtml(jobCopy.title)}</h3>
             <p class="onboard-card-desc">${escapeHtml(jobCopy.description)}</p>
-            ${isPolling ? '<div class="onboard-loading">Procesando…</div>' : ''}
+            ${isPolling && !this._isStale ? '<div class="onboard-loading">Procesando…</div>' : ''}
+            ${isPolling && this._isStale ? '<div class="onboard-error">El proceso está tardando demasiado. Puedes reintentar.</div>' : ''}
             ${canActivate ? `<button class="onboard-btn onboard-btn-primary" data-activate-btn ${this._loading ? 'disabled' : ''}>Sí, usarlo</button>` : ''}
             ${canRetry ? `<button class="onboard-btn onboard-btn-primary" data-retry-btn ${this._loading ? 'disabled' : ''}>Reintentar</button>` : ''}
           </div>

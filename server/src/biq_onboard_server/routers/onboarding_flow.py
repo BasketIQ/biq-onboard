@@ -175,18 +175,13 @@ def create_my_club(payload: ClubSelfCreate, request: Request) -> dict:
     )
     registry.upsert_user(membership)
 
-    # Assign the administrator role in the roles registry (best-effort, same
-    # as the rest of the codebase; the user record is the source of truth).
-    # The creator also gets ``sports_director`` so they can create and manage
-    # methodology from day one — the club owner is its first director.
-    #
-    # C3: Keep distinct org_registry and role_registry variables. The previous
-    # code reassigned `registry` to the role registry, shadowing the Org
-    # Registry and causing theme_job persistence to fail silently.
-    try:
-        from biq_core.roles import RoleAssignment, get_role_registry
+    # Persist canonical creator capabilities through the same scoped registry
+    # used by authorization. Creation must fail closed if role persistence
+    # cannot complete; a User.role alone is not an authorization grant.
+    from biq_core.roles import RoleAssignment
 
-        role_registry = get_role_registry()
+    role_registry = org.get_roles()
+    try:
         role_registry.put_assignment(
             RoleAssignment(
                 user_id=membership_id, role="administrator", scope=f"club:{club_id}"
@@ -197,8 +192,11 @@ def create_my_club(payload: ClubSelfCreate, request: Request) -> dict:
                 user_id=membership_id, role="sports_director", scope=f"club:{club_id}"
             )
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"No se pudo completar la autorización del creador: {exc}",
+        ) from exc
 
     # B9/B10: if website present, enqueue theme generation asynchronously.
     # Club creation never fails or rolls back because optional generation

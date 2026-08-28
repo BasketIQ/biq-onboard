@@ -200,6 +200,8 @@ class BiqOnboardApp extends HTMLElement {
   // Club step (ADDENDUM-07 §6) per-card feedback
   private _stepError: { scope: 'join' | 'create'; message: string } | null = null;
   private _stepMessage = '';
+  private _activeClubTab = '';
+  private _clubSubmitLocked = false;
   private _pollTimer: ReturnType<typeof setTimeout> | null = null;
   private _pollingClubId: string | null = null;
   private _pollBackoff = 3000; // C11: starts at 3s, backs off
@@ -753,6 +755,8 @@ class BiqOnboardApp extends HTMLElement {
   }
 
   private async joinByClubId(clubId: string): Promise<void> {
+    if (this._clubSubmitLocked) return;
+    this._clubSubmitLocked = true;
     const res = await fetch('/api/auth/register', {
       method: 'POST',
       credentials: 'include',
@@ -763,6 +767,8 @@ class BiqOnboardApp extends HTMLElement {
   }
 
   private async createClub(name: string, website: string): Promise<void> {
+    if (this._clubSubmitLocked) return;
+    this._clubSubmitLocked = true;
     const res = await fetch('/api/onboarding/clubs', {
       method: 'POST',
       credentials: 'include',
@@ -803,6 +809,7 @@ class BiqOnboardApp extends HTMLElement {
             message: 'El club se ha creado, pero no se pudo iniciar sesión automáticamente. Recarga para entrar.',
           };
           this._loading = false;
+          this._clubSubmitLocked = false;
           this.render();
           return;
         } catch {
@@ -811,6 +818,7 @@ class BiqOnboardApp extends HTMLElement {
             message: 'El club se ha creado, pero no se pudo iniciar sesión automáticamente. Recarga para entrar.',
           };
           this._loading = false;
+          this._clubSubmitLocked = false;
           this.render();
           return;
         }
@@ -826,7 +834,6 @@ class BiqOnboardApp extends HTMLElement {
     res: Response,
     scope: 'join' | 'create',
   ): Promise<void> {
-    this._loading = false;
     if (res.ok) {
       if (scope === 'join') {
         // Join: a pending JoinRequest was created — redirect to home so the
@@ -843,6 +850,8 @@ class BiqOnboardApp extends HTMLElement {
     const data = await res.json().catch(() => null);
     const message =
       (data && (data as { detail?: string }).detail) || `Error ${res.status}`;
+    this._loading = false;
+    this._clubSubmitLocked = false;
     this._stepError = { scope, message };
     this.render();
   }
@@ -852,70 +861,85 @@ class BiqOnboardApp extends HTMLElement {
     const memberships = orgCtx?.memberships || [];
     const showCreate = canCreateClub(memberships);
     const err = this._stepError;
-
-    const pickerHtml = memberships.length
-      ? `
-      <section class="onboard-card">
-        <h3 class="onboard-card-title">Tus clubs</h3>
-        <p class="onboard-card-desc">Perteneces a varios clubs. Elige con cuál quieres entrar.</p>
-        <div class="onboard-picker" role="listbox" aria-label="Elige tu club">
-          ${memberships
-            .map(
-              (m) => `
-            <button class="onboard-club-row" data-pick-club="${escapeHtml(m.club_id)}" role="option">
+    const tabs = [
+      ...(memberships.length ? [{ id: 'memberships', label: 'Mis clubes' }] : []),
+      { id: 'join', label: 'Unirme a un club' },
+      ...(showCreate ? [{ id: 'create', label: 'Crear un club' }] : []),
+    ];
+    const activeTab = tabs.some((tab) => tab.id === this._activeClubTab)
+      ? this._activeClubTab
+      : memberships.length ? 'memberships' : 'join';
+    this._activeClubTab = activeTab;
+    const locked = this._clubSubmitLocked;
+    const tabButtons = tabs.map((tab) => `
+      <button type="button" role="tab" data-club-tab="${tab.id}"
+        id="club-tab-${tab.id}" aria-controls="club-panel-${tab.id}"
+        aria-selected="${tab.id === activeTab}" tabindex="${tab.id === activeTab ? 0 : -1}"
+        ${locked ? 'disabled' : ''}>${tab.label}</button>`).join('');
+    const panels = tabs.map((tab) => {
+      const selected = tab.id === activeTab;
+      if (tab.id === 'memberships') {
+        return `<section id="club-panel-memberships" role="tabpanel" aria-labelledby="club-tab-memberships" ${selected ? '' : 'hidden'}>
+          <p class="onboard-card-desc">Perteneces a varios clubs. Elige con cuál quieres entrar.</p>
+          <div class="onboard-picker" role="listbox" aria-label="Elige tu club">
+            ${memberships.map((m) => `<button class="onboard-club-row" data-pick-club="${escapeHtml(m.club_id)}" role="option" ${locked ? 'disabled' : ''}>
               <span class="onboard-club-name">${escapeHtml(m.club_name || m.club_id)}</span>
               <span class="onboard-club-role">${escapeHtml(m.role === 'administrator' ? 'Administrador' : m.role)}</span>
-            </button>`,
-            )
-            .join('')}
-        </div>
-      </section>`
-      : '';
-
-    return `
-      <header class="onboard-step-head">
-        <h2 class="onboard-section-title">Tu club</h2>
-        <p class="onboard-card-desc">Únete a un club o crea uno nuevo para empezar a usar BasketIQ.</p>
-        ${this._error ? `<div class="onboard-error">${escapeHtml(this._error)}</div>` : ''}
-      </header>
-      ${this._loading && !err ? '<div class="onboard-loading">Cargando…</div>' : ''}
-      ${pickerHtml}
-      <section class="onboard-card">
-        <h3 class="onboard-card-title">Unirse a un club</h3>
-        <p class="onboard-card-desc">Si tu club ya usa BasketIQ, pide a un administrador el ID del club.</p>
-        <div class="onboard-form-row">
-          <input type="text" class="onboard-input" data-join-id placeholder="ID del club" aria-label="ID del club" />
-          <button class="onboard-btn onboard-btn-primary" data-join-btn>Solicitar acceso</button>
-        </div>
-        ${
-          err?.scope === 'join'
-            ? `<div class="onboard-error">${escapeHtml(err.message)}</div>`
-            : ''
-        }
-        ${this._stepMessage ? `<div class="onboard-success">${escapeHtml(this._stepMessage)}</div>` : ''}
-      </section>
-      ${
-        showCreate
-          ? `
-      <section class="onboard-card">
-        <h3 class="onboard-card-title">Crear un club nuevo</h3>
+            </button>`).join('')}
+          </div>
+        </section>`;
+      }
+      if (tab.id === 'join') {
+        return `<section id="club-panel-join" role="tabpanel" aria-labelledby="club-tab-join" aria-busy="${selected && this._loading ? 'true' : 'false'}" ${selected ? '' : 'hidden'}>
+          <p class="onboard-card-desc">Si tu club ya usa BasketIQ, pide a un administrador el ID del club.</p>
+          <div class="onboard-form-row">
+            <input type="text" class="onboard-input" data-join-id placeholder="ID del club" aria-label="ID del club" ${locked ? 'disabled' : ''} />
+            <button class="onboard-btn onboard-btn-primary" data-join-btn ${locked ? 'disabled' : ''}>${this._loading && selected ? 'Enviando solicitud…' : 'Solicitar acceso'}</button>
+          </div>
+          ${err?.scope === 'join' ? `<div class="onboard-error" role="alert" tabindex="-1">${escapeHtml(err.message)}</div>` : ''}
+          ${this._stepMessage ? `<div class="onboard-success" aria-live="polite">${escapeHtml(this._stepMessage)}</div>` : ''}
+        </section>`;
+      }
+      return `<section id="club-panel-create" role="tabpanel" aria-labelledby="club-tab-create" aria-busy="${selected && this._loading ? 'true' : 'false'}" ${selected ? '' : 'hidden'}>
         <p class="onboard-card-desc">Crea la organización de tu club. Serás su administrador; podremos tomar el escudo y los colores de su web para personalizar la app.</p>
         <label class="onboard-field-label" for="create-name">Nombre del club</label>
-        <input type="text" id="create-name" class="onboard-input onboard-input-block" data-create-name placeholder="Club Baloncesto…" />
+        <input type="text" id="create-name" class="onboard-input onboard-input-block" data-create-name placeholder="Club Baloncesto…" ${locked ? 'disabled' : ''} />
         <label class="onboard-field-label" for="create-web">Web del club (opcional)</label>
-        <input type="url" id="create-web" class="onboard-input onboard-input-block" data-create-website placeholder="mi-club.es" />
-        <button class="onboard-btn onboard-btn-primary" data-create-btn>Crear club</button>
-        ${
-          err?.scope === 'create'
-            ? `<div class="onboard-error">${escapeHtml(err.message)}</div>`
-            : ''
-        }
-      </section>`
-          : ''
-      }`;
+        <input type="url" id="create-web" class="onboard-input onboard-input-block" data-create-website placeholder="mi-club.es" ${locked ? 'disabled' : ''} />
+        <button class="onboard-btn onboard-btn-primary" data-create-btn ${locked ? 'disabled' : ''}>${this._loading && selected ? 'Creando el club…' : 'Crear club'}</button>
+        ${err?.scope === 'create' ? `<div class="onboard-error" role="alert" tabindex="-1">${escapeHtml(err.message)}</div>` : ''}
+      </section>`;
+    }).join('');
+
+    return `<header class="onboard-step-head">
+      <h2 class="onboard-section-title">Tu club</h2>
+      <p class="onboard-card-desc">Elige una opción para empezar a usar BasketIQ.</p>
+      ${this._error ? `<div class="onboard-error" role="alert">${escapeHtml(this._error)}</div>` : ''}
+    </header>
+    ${this._loading ? '<div class="onboard-loading" role="status" aria-live="polite">Procesando…</div>' : ''}
+    <div class="onboard-tabs" role="tablist" aria-label="Opciones de club">${tabButtons}</div>
+    <div class="onboard-tab-panels">${panels}</div>`;
   }
 
   private wireClubStepEvents(): void {
+    const tabElements = Array.from(this.shadow.querySelectorAll<HTMLButtonElement>('[data-club-tab]'));
+    const activateTab = (id: string, focus = false) => {
+      if (this._clubSubmitLocked) return;
+      this._activeClubTab = id;
+      this.render();
+      if (focus) this.shadow.querySelector<HTMLButtonElement>(`[data-club-tab="${id}"]`)?.focus();
+    };
+    tabElements.forEach((tab, index) => {
+      tab.addEventListener('click', () => activateTab(tab.dataset.clubTab || ''));
+      tab.addEventListener('keydown', (event) => {
+        if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+        event.preventDefault();
+        const next = event.key === 'Home' ? 0 : event.key === 'End' ? tabElements.length - 1
+          : (index + (event.key === 'ArrowRight' ? 1 : -1) + tabElements.length) % tabElements.length;
+        activateTab(tabElements[next].dataset.clubTab || '', true);
+      });
+    });
+
     this.shadow.querySelectorAll('[data-pick-club]').forEach((btn) => {
       btn.addEventListener('click', () => {
         this.selectMembership((btn as HTMLElement).dataset.pickClub || '');
@@ -926,6 +950,7 @@ class BiqOnboardApp extends HTMLElement {
     const joinInput = this.shadow.querySelector('[data-join-id]') as HTMLInputElement | null;
     if (joinBtn && joinInput) {
       joinBtn.addEventListener('click', () => {
+        if (this._clubSubmitLocked) return;
         const clubId = joinInput.value.trim();
         if (!clubId) return;
         this._loading = true;
@@ -941,6 +966,7 @@ class BiqOnboardApp extends HTMLElement {
     const webInput = this.shadow.querySelector('[data-create-website]') as HTMLInputElement | null;
     if (createBtn && nameInput) {
       createBtn.addEventListener('click', () => {
+        if (this._clubSubmitLocked) return;
         const name = nameInput.value.trim();
         if (name.length < 2) {
           this._stepError = { scope: 'create', message: 'El nombre del club es obligatorio (mínimo 2 caracteres).' };

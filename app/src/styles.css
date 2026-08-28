@@ -384,6 +384,70 @@
   padding: 8px 0 0;
 }
 
+.onboard-tabs {
+  display: flex;
+  gap: 4px;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--biq-line);
+}
+
+.onboard-tabs [role="tab"] {
+  min-height: 44px;
+  padding: 10px 14px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--biq-muted);
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.onboard-tabs [role="tab"][aria-selected="true"] {
+  border-bottom-color: var(--biq-orange);
+  color: var(--biq-text);
+}
+
+.onboard-tabs [role="tab"]:focus-visible {
+  outline: 2px solid var(--biq-orange);
+  outline-offset: -2px;
+}
+
+.onboard-tabs [role="tab"]:disabled,
+.onboard-club-row:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+.onboard-tab-panels {
+  min-height: 180px;
+}
+
+/* D20: real spinner with reduced-motion fallback */
+.onboard-spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  margin-right: 8px;
+  vertical-align: -2px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: onboard-spin 0.8s linear infinite;
+}
+
+@keyframes onboard-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .onboard-spinner {
+    animation: none;
+    border-right-color: currentColor;
+  }
+}
+
 .onboard-picker {
   display: flex;
   flex-direction: column;

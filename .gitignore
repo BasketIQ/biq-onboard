@@ -5,3 +5,4 @@ __pycache__/
 wheelhouse/
 dist/
 *.DS_Store
+node_modules/

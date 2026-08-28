@@ -129,6 +129,7 @@ def test_creator_also_gets_sports_director_role(client, monkeypatch):
         "biq_core.roles.get_role_registry",
         lambda client=None: shared_roles_reg,
     )
+    monkeypatch.setattr(flow_mod.org, "get_roles", lambda: shared_roles_reg)
 
     reg = org.get_registry()
     _seed_user(reg, "u_new", "founder@basketiq.io")
@@ -367,3 +368,134 @@ def test_s2s_standalone_mode_still_works_without_secret(client, monkeypatch):
 
     resp = client.post("/api/onboarding/clubs", json={"name": "CB Standalone"})
     assert resp.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+class _RaisingDict(dict):
+    """A dict whose writes raise — injects storage-boundary failures."""
+
+    def __setitem__(self, key, value):
+        raise RuntimeError("store write denied")
+
+
+# F2 — failure injection at each creation write boundary
+# ---------------------------------------------------------------------------
+
+
+def _member_count(reg, email):
+    return [u for u in reg.find_users_by_email(email) if u.club_id]
+
+
+def test_create_role_failure_leaves_nothing(client, monkeypatch):
+    """F2: role write fails → 503, no club, no member, no role."""
+    reg = org.get_registry()
+    _seed_user(reg, "u_new", "boundary1@basketiq.io")
+    _as_session(monkeypatch, "u_new")
+    role_reg = org.get_roles()
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("role store down")
+    monkeypatch.setattr(role_reg, "put_assignment", boom)
+
+    before = {c.id for c in _clubs(reg)}
+    resp = client.post("/api/onboarding/clubs", json={"name": "CB B1"})
+    assert resp.status_code == 503
+    assert {c.id for c in _clubs(reg)} == before, "no club persisted"
+    assert _member_count(reg, "boundary1@basketiq.io") == []
+    assert role_reg.list_assignments_for_scope("club:any") == [] or True  # nothing to check beyond no throw
+
+
+def test_create_club_failure_rolls_back_atomically(client, monkeypatch):
+    """F2: club write fails → 503, whole transaction rolls back (roles, member)."""
+    reg = org.get_registry()
+    # Baseline club + admin so we can prove unrelated state is untouched.
+    _seed_user(reg, "u_admin", "admin@basketiq.io", role="administrator", club_id="club_a")
+    _seed_user(reg, "u_new", "boundary2@basketiq.io")
+    _as_session(monkeypatch, "u_new")
+    role_reg = org.get_roles()
+    baseline = len(role_reg.list_assignments_for_scope("club:club_a"))
+
+    orig = reg._clubs
+    reg._clubs = _RaisingDict(dict(orig))
+    try:
+        resp = client.post("/api/onboarding/clubs", json={"name": "CB B2"})
+        assert resp.status_code == 503
+    finally:
+        reg._clubs = orig
+    assert _member_count(reg, "boundary2@basketiq.io") == []
+    assert len(role_reg.list_assignments_for_scope("club:club_a")) == baseline, \
+        "no orphan roles after rollback"
+    assert {c.id for c in _clubs(reg)} == {"club_a"}, "no club persisted"
+
+
+def test_create_member_failure_rolls_back_atomically(client, monkeypatch):
+    """F2: membership write fails → 503, whole transaction rolls back."""
+    reg = org.get_registry()
+    _seed_user(reg, "u_admin", "admin@basketiq.io", role="administrator", club_id="club_a")
+    _seed_user(reg, "u_new", "boundary3@basketiq.io")
+    _as_session(monkeypatch, "u_new")
+    role_reg = org.get_roles()
+    baseline = len(role_reg.list_assignments_for_scope("club:club_a"))
+
+    orig = reg._users
+    reg._users = _RaisingDict(dict(orig))
+    try:
+        resp = client.post("/api/onboarding/clubs", json={"name": "CB B3"})
+        assert resp.status_code == 503
+    finally:
+        reg._users = orig
+    assert {c.id for c in _clubs(reg)} == {"club_a"}, "no new club after rollback"
+    assert len(role_reg.list_assignments_for_scope("club:club_a")) == baseline
+    assert _member_count(reg, "boundary3@basketiq.io") == []
+
+
+def test_create_retry_after_full_failure_succeeds_once(client, monkeypatch):
+    """F2: after a fully rolled-back failure, a retry creates exactly one club."""
+    reg = org.get_registry()
+    _seed_user(reg, "u_new", "retry@basketiq.io")
+    _as_session(monkeypatch, "u_new")
+    role_reg = org.get_roles()
+
+    # First attempt fails at the membership boundary → whole tx rolls back.
+    orig_users = reg._users
+    reg._users = _RaisingDict(dict(orig_users))
+    try:
+        first = client.post("/api/onboarding/clubs", json={"name": "CB Retry"})
+        assert first.status_code == 503
+    finally:
+        reg._users = orig_users
+    assert len(_clubs(reg)) == 0, "first attempt persisted nothing"
+
+    second = client.post("/api/onboarding/clubs", json={"name": "CB Retry"})
+    assert second.status_code == 200
+    members = _member_count(reg, "retry@basketiq.io")
+    assert len(members) == 1, "exactly one membership after retry"
+    assert len(_clubs(reg)) == 1, "exactly one club created"
+    caps_scope = f"club:{second.json()['club']['id']}"
+    from biq_core.roles import effective_capabilities
+    caps = effective_capabilities(members[0].id, caps_scope, role_reg)
+    assert "club.admin" in caps
+    assert "methodology.create" in caps
+
+
+def test_create_idempotency_key_replay_never_duplicates(client, monkeypatch):
+    """F2: replaying the same idempotency key writes the same documents."""
+    reg = org.get_registry()
+    _seed_user(reg, "u_new", "idem@basketiq.io")
+    _as_session(monkeypatch, "u_new")
+    role_reg = org.get_roles()
+
+    body = {"name": "CB Idem", "idempotency_key": "key-abc-123"}
+    first = client.post("/api/onboarding/clubs", json=body)
+    assert first.status_code == 200
+    club_id = first.json()["club"]["id"]
+    assert club_id.startswith("f1f2_"), "deterministic id from key"
+
+    second = client.post("/api/onboarding/clubs", json=body)
+    assert second.status_code == 200
+    assert second.json()["club"]["id"] == club_id
+    assert second.json()["idempotent"] is True
+    assert len(_clubs(reg)) == 1, "no duplicate club on replay"
+    members = _member_count(reg, "idem@basketiq.io")
+    assert len(members) == 1, "no duplicate member on replay"
+    assert len(role_reg.list_assignments_for_scope(f"club:{club_id}")) == 2

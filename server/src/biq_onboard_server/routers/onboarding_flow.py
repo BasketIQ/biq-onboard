@@ -26,6 +26,7 @@ unset, the service behaves exactly as today (standalone sessions only).
 from __future__ import annotations
 
 import hmac
+import logging
 import os
 
 from fastapi import APIRouter, HTTPException, Request
@@ -33,6 +34,8 @@ from fastapi import APIRouter, HTTPException, Request
 from .. import org
 from ..auth import _is_break_glass_admin, session_user
 from ..models import ClubSelfCreate
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()  # mounted at /api/onboarding by app.py
 
@@ -147,24 +150,31 @@ def create_my_club(payload: ClubSelfCreate, request: Request) -> dict:
             detail="La web del club debe usar https://",
         )
 
-    club_id = registry.next_club_id()
-    from biq_core.org import Club
+    from biq_core.org import Club, User
+    from biq_core.roles import RoleAssignment
 
-    registry.upsert_club(
-        Club(
-            id=club_id,
-            name=club_name,
-            status="active",
-            created_by=caller_email or None,
-            website=website or None,
-        )
+    # F2: canonical creation transaction. Deterministic ids when the client
+    # supplies an idempotency key, so replaying the same operation writes the
+    # same documents and never duplicates the club/member/roles.
+    import hashlib
+
+    idem = (payload.idempotency_key or "").strip()
+    if idem:
+        digest = hashlib.sha256(idem.encode()).hexdigest()[:12]
+        club_id = f"f1f2_{digest}"
+        membership_id = f"f1f2m_{digest}"
+    else:
+        club_id = registry.next_club_id()
+        membership_id = registry.next_user_id()
+    scope = f"club:{club_id}"
+
+    club = Club(
+        id=club_id,
+        name=club_name,
+        status="active",
+        created_by=caller_email or None,
+        website=website or None,
     )
-
-    # Memberships are one User row per club (same model as join approval):
-    # the creator becomes the first administrator of the new club.
-    membership_id = registry.next_user_id()
-    from biq_core.org import User
-
     membership = User(
         id=membership_id,
         club_id=club_id,
@@ -173,31 +183,69 @@ def create_my_club(payload: ClubSelfCreate, request: Request) -> dict:
         role="administrator",
         status="active",
     )
-    registry.upsert_user(membership)
-
-    # Assign the administrator role in the roles registry (best-effort, same
-    # as the rest of the codebase; the user record is the source of truth).
-    # The creator also gets ``sports_director`` so they can create and manage
-    # methodology from day one — the club owner is its first director.
+    assignments = [
+        RoleAssignment(
+            user_id=membership_id, role="administrator", scope=scope,
+            id=f"{membership_id}__administrator__{scope}",
+        ),
+        RoleAssignment(
+            user_id=membership_id, role="sports_director", scope=scope,
+            id=f"{membership_id}__sports_director__{scope}",
+        ),
+    ]
     try:
-        from biq_core.roles import RoleAssignment, get_role_registry
+        registry.create_club_with_creator_tx(
+            club, membership, assignments, role_registry=org.get_roles()
+        )
+    except Exception as exc:
+        # The transaction is atomic: nothing persisted. A retry with the same
+        # idempotency key reuses the same ids; a retry without one starts clean.
+        raise HTTPException(
+            status_code=503,
+            detail="No se pudo crear el club",
+        ) from exc
 
-        registry = get_role_registry()
-        registry.put_assignment(
-            RoleAssignment(
-                user_id=membership_id, role="administrator", scope=f"club:{club_id}"
-            )
-        )
-        registry.put_assignment(
-            RoleAssignment(
-                user_id=membership_id, role="sports_director", scope=f"club:{club_id}"
-            )
-        )
-    except Exception:
-        pass
+    # B9/B10: if website present, enqueue theme generation asynchronously.
+    # Club creation never fails or rolls back because optional generation
+    # cannot enqueue/complete.
+    #
+    # C3: Use the org_registry (not the role_registry) for merge_club_fields.
+    # Do not swallow orchestration defects with a broad except:pass —
+    # persist a visible failed job when enqueue fails.
+    if website:
+        from .theme import _enqueue_generation_task, _create_lease
+        import time as _time
+        from datetime import datetime, timezone
+
+        lease_id = f"lease-{club_id}-{int(_time.time())}"
+        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        theme_job = {
+            "status": "pending",
+            "sourceUrl": website,
+            "requestedAt": now,
+            "finishedAt": None,
+            "attempts": 1,
+            "verdict": None,
+            "notifiedAt": None,
+            "lease": _create_lease(lease_id),
+        }
+        # Persist pending state BEFORE dispatch (B10: worker cannot race absent state)
+        registry.merge_club_fields(club_id, {"theme_job": theme_job})
+
+        # Enqueue after state is persisted. Enqueue failure → club succeeds,
+        # persisted recoverable job failure (B9). Do NOT swallow this with a
+        # broad except:pass (C3).
+        try:
+            _enqueue_generation_task(club_id, website, lease_id)
+        except Exception as exc:
+            theme_job["status"] = "failed"
+            theme_job["finishedAt"] = now
+            theme_job["reason"] = f"enqueue failed after club creation: {exc}"
+            registry.merge_club_fields(club_id, {"theme_job": theme_job})
 
     return {
         "ok": True,
         "club": {"id": club_id, "name": club_name, "website": website or None},
         "membership_user_id": membership_id,
+        "idempotent": bool(idem),
     }

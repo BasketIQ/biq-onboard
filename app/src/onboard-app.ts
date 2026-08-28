@@ -114,6 +114,53 @@ const THEME_STATUS_COPY: Record<string, { label: string; color: string }> = {
   pending: { label: 'Pendiente', color: 'var(--biq-blue)' },
 };
 
+// B14: themeJob state matrix — presentation + action per canonical state
+const THEME_JOB_COPY: Record<string, { title: string; description: string; action?: string }> = {
+  pending: {
+    title: 'Personalización en cola',
+    description: 'Tu tema se generará automáticamente en unos segundos.',
+  },
+  running: {
+    title: 'Analizando la web del club',
+    description: 'Extrayendo colores y generando el tema.',
+  },
+  succeeded: {
+    title: 'Tema disponible y activo',
+    description: 'El tema del club está activo. Puedes ajustarlo, regenerarlo o revertirlo.',
+    action: 'adjust/regenerate/revert',
+  },
+  uncertain: {
+    title: 'Revisión necesaria',
+    description: 'La web parece legítima pero no tenemos suficiente confianza para aplicar los colores automáticamente.',
+    action: 'Sí, usarlo / cambiar URL',
+  },
+  rejected_not_a_club: {
+    title: 'No parece un club',
+    description: 'La URL indicada no corresponde a un club de baloncesto.',
+    action: 'Corregir URL / tema manual',
+  },
+  unsupported_source: {
+    title: 'Fuente no soportada',
+    description: 'No podemos extraer colores de este tipo de página.',
+    action: 'Añadir web / tema manual',
+  },
+  unreachable: {
+    title: 'No se pudo acceder',
+    description: 'La web del club no respondió después de varios intentos.',
+    action: 'Reintentar / cambiar URL',
+  },
+  failed: {
+    title: 'Error técnico',
+    description: 'Se produjo un error al generar el tema.',
+    action: 'Reintentar / tema manual',
+  },
+  reverted: {
+    title: 'Tema BasketIQ por defecto',
+    description: 'El tema se ha revertido al BasketIQ por defecto.',
+    action: 'Generar de nuevo',
+  },
+};
+
 // ─── Helpers ────────────────────────────────────────────────────────────
 
 const escapeHtml = (s: string): string =>
@@ -153,6 +200,22 @@ class BiqOnboardApp extends HTMLElement {
   // Club step (ADDENDUM-07 §6) per-card feedback
   private _stepError: { scope: 'join' | 'create'; message: string } | null = null;
   private _stepMessage = '';
+  private _activeClubTab = '';
+  private _clubSubmitLocked = false;
+  private _clubSubmitSeq = 0;
+  private _clubSubmitAbort: AbortController | null = null;
+  // D20: typed field values survive re-renders (validation/error/loading).
+  private _clubForm: { joinId: string; createName: string; createWebsite: string } = {
+    joinId: '', createName: '', createWebsite: '',
+  };
+  // F2: stable per-submission idempotency key so a retry after a network
+  // failure never creates a duplicate club. Regenerated per accepted attempt.
+  private _createIdempotencyKey = '';
+  private _pollTimer: ReturnType<typeof setTimeout> | null = null;
+  private _pollingClubId: string | null = null;
+  private _pollBackoff = 3000; // C11: starts at 3s, backs off
+  private _polling = false; // C11: prevent overlap
+  private _visibilityHandler: (() => void) | null = null; // C11: visibility handling
 
   constructor() {
     super();
@@ -189,7 +252,7 @@ class BiqOnboardApp extends HTMLElement {
     this._error = null;
     this.render();
     try {
-      const res = await fetch(`/api/admin/clubs/${clubId}/theme`, {
+      const res = await fetch(`/api/clubs/${clubId}/theme`, {
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
       });
@@ -197,12 +260,149 @@ class BiqOnboardApp extends HTMLElement {
       const data = await res.json();
       this._theme = data.theme || null;
       this._themeJob = data.themeJob || null;
+      // B14: start polling if pending/running
+      this._maybeStartPolling(clubId);
+      // B15: emit state event to shell
+      this._emitThemeStateEvent(clubId);
     } catch (err) {
       this._error = (err as Error).message;
     } finally {
       this._loading = false;
       this.render();
     }
+  }
+
+  // B14/C11: Poll only pending/running with bounded backoff.
+  // C11 fixes: clear timer before rescheduling, prevent overlap, handle
+  // disconnect/visibility/route change, guard stale responses.
+  private _maybeStartPolling(clubId: string): void {
+    const status = this._themeJob?.status;
+    // Stop on terminal states
+    if (status !== 'pending' && status !== 'running') {
+      this._stopPolling();
+      return;
+    }
+    // C11: Clear timer before checking to avoid the "truthy timer" deadlock
+    if (this._pollTimer) {
+      clearTimeout(this._pollTimer);
+      this._pollTimer = null;
+    }
+    // Prevent overlap — don't schedule if a poll is in-flight
+    if (this._polling) return;
+    // Club changed — reset backoff
+    if (this._pollingClubId !== clubId) {
+      this._pollingClubId = clubId;
+      this._pollBackoff = 3000;
+    }
+    this._pollTimer = setTimeout(() => this._pollTheme(clubId), this._pollBackoff);
+  }
+
+  private _stopPolling(): void {
+    if (this._pollTimer) {
+      clearTimeout(this._pollTimer);
+      this._pollTimer = null;
+    }
+    this._pollingClubId = null;
+    this._polling = false;
+    this._pollBackoff = 3000;
+  }
+
+  // C11: Lifecycle — stop polling on disconnect, resume on reconnect
+  disconnectedCallback(): void {
+    super.disconnectedCallback?.();
+    this._stopPolling();
+    // D20: invalidate in-flight submissions and abort stale responses.
+    this._clubSubmitSeq += 1;
+    if (this._clubSubmitAbort) {
+      this._clubSubmitAbort.abort();
+      this._clubSubmitAbort = null;
+    }
+    // Remove visibility handler
+    if (this._visibilityHandler) {
+      document.removeEventListener('visibilitychange', this._visibilityHandler);
+      this._visibilityHandler = null;
+    }
+  }
+
+  connectedCallback(): void {
+    super.connectedCallback?.();
+    // C11: Resume polling on visibility/entry if theme job is pending/running
+    this._visibilityHandler = () => {
+      if (document.visibilityState === 'visible' && this._pollingClubId) {
+        const clubId = this._pollingClubId;
+        this._pollingClubId = null; // force reschedule
+        this._maybeStartPolling(clubId);
+      } else if (document.visibilityState === 'hidden') {
+        // C11: Stop polling when page is hidden
+        if (this._pollTimer) {
+          clearTimeout(this._pollTimer);
+          this._pollTimer = null;
+        }
+      }
+    };
+    document.addEventListener('visibilitychange', this._visibilityHandler);
+  }
+
+  private async _pollTheme(clubId: string): Promise<void> {
+    // C11: Stop if component disconnected or club changed
+    if (!this.isConnected || this._pollingClubId !== clubId) {
+      this._pollTimer = null;
+      return;
+    }
+    // C11: Clear timer before polling to allow rescheduling
+    this._pollTimer = null;
+    this._polling = true;
+    try {
+      const res = await fetch(`/api/clubs/${clubId}/theme`, {
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      // C11: On non-OK, retry with backoff (don't just return)
+      if (!res.ok) {
+        this._polling = false;
+        // C11: Bounded backoff — max 30s
+        this._pollBackoff = Math.min(this._pollBackoff * 1.5, 30000);
+        this._maybeStartPolling(clubId);
+        return;
+      }
+      const data = await res.json();
+      // C11: Guard stale responses — check club ID matches
+      const responseClubId = data.themeJob?.clubId || data.theme?.clubId;
+      if (responseClubId && responseClubId !== clubId) {
+        this._polling = false;
+        return; // stale response for a different club
+      }
+      const prevStatus = this._themeJob?.status;
+      this._theme = data.theme || null;
+      this._themeJob = data.themeJob || null;
+      const newStatus = this._themeJob?.status;
+      // B15: emit event on status change
+      if (prevStatus !== newStatus) {
+        this._emitThemeStateEvent(clubId);
+      }
+      this._polling = false;
+      // Reset backoff on successful poll
+      this._pollBackoff = 3000;
+      // Continue polling if still pending/running
+      this._maybeStartPolling(clubId);
+      this.render();
+    } catch {
+      // C11: On network error, retry with backoff instead of stopping
+      this._polling = false;
+      this._pollBackoff = Math.min(this._pollBackoff * 1.5, 30000);
+      this._maybeStartPolling(clubId);
+    }
+  }
+
+  // B15: Emit composed/bubbling state event for shell refresh
+  private _emitThemeStateEvent(clubId: string): void {
+    const status = this._themeJob?.status || 'none';
+    const themeStatus = this._theme?.status || null;
+    this.dispatchEvent(new CustomEvent('biq-theme-state', {
+      bubbles: true,
+      composed: true,
+      detail: { clubId, state: status, themeStatus },
+    }));
   }
 
   // ─── Actions ──────────────────────────────────────────────────────────
@@ -212,7 +412,7 @@ class BiqOnboardApp extends HTMLElement {
     this._error = null;
     this.render();
     try {
-      const res = await fetch(`/api/admin/clubs/${clubId}/theme/generate`, {
+      const res = await fetch(`/api/clubs/${clubId}/theme/generate`, {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
@@ -235,7 +435,7 @@ class BiqOnboardApp extends HTMLElement {
     this._error = null;
     this.render();
     try {
-      const res = await fetch(`/api/admin/clubs/${clubId}/theme`, {
+      const res = await fetch(`/api/clubs/${clubId}/theme`, {
         method: 'PUT',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
@@ -258,7 +458,7 @@ class BiqOnboardApp extends HTMLElement {
     this._error = null;
     this.render();
     try {
-      const res = await fetch(`/api/admin/clubs/${clubId}/theme`, {
+      const res = await fetch(`/api/clubs/${clubId}/theme`, {
         method: 'DELETE',
         credentials: 'include',
       });
@@ -278,7 +478,7 @@ class BiqOnboardApp extends HTMLElement {
     this._loading = true;
     this.render();
     try {
-      const res = await fetch(`/api/admin/clubs/${clubId}/theme/logo-rights`, {
+      const res = await fetch(`/api/clubs/${clubId}/theme/logo-rights`, {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
@@ -287,6 +487,53 @@ class BiqOnboardApp extends HTMLElement {
       if (!res.ok && res.status !== 404) {
         // 404 = endpoint not implemented yet; that's OK for now
         throw new Error(`HTTP ${res.status}`);
+      }
+      await this.loadThemeData(clubId);
+    } catch (err) {
+      this._error = (err as Error).message;
+      this._loading = false;
+      this.render();
+    }
+  }
+
+  // B14: Activate a draft/uncertain theme
+  private async activateTheme(clubId: string): Promise<void> {
+    this._loading = true;
+    this._error = null;
+    this.render();
+    try {
+      const res = await fetch(`/api/clubs/${clubId}/theme/activate`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ confirmed: true }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => null);
+        throw new Error(data?.detail || `HTTP ${res.status}`);
+      }
+      await this.loadThemeData(clubId);
+    } catch (err) {
+      this._error = (err as Error).message;
+      this._loading = false;
+      this.render();
+    }
+  }
+
+  // B14: Retry a failed theme generation
+  private async retryTheme(clubId: string): Promise<void> {
+    this._loading = true;
+    this._error = null;
+    this.render();
+    try {
+      const res = await fetch(`/api/clubs/${clubId}/theme/retry`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => null);
+        throw new Error(data?.detail || `HTTP ${res.status}`);
       }
       await this.loadThemeData(clubId);
     } catch (err) {
@@ -336,6 +583,12 @@ class BiqOnboardApp extends HTMLElement {
     const verdict = job?.verdict?.verdict || (theme?.activation?.themeStatus === 'active' ? 'club_confirmed' : 'uncertain');
     const verdictCopy = VERDICT_COPY[verdict] || VERDICT_COPY.uncertain;
     const statusCopy = theme ? THEME_STATUS_COPY[theme.status] || THEME_STATUS_COPY.pending : null;
+    // B14: themeJob state matrix
+    const jobStatus = job?.status || '';
+    const jobCopy = jobStatus ? THEME_JOB_COPY[jobStatus] : null;
+    const isPolling = jobStatus === 'pending' || jobStatus === 'running';
+    const canActivate = theme && (theme.status === 'draft' || theme.status === 'uncertain' || (jobStatus === 'succeeded' && theme.status !== 'active'));
+    const canRetry = jobStatus === 'failed' || jobStatus === 'unreachable' || jobStatus === 'rejected_not_a_club' || jobStatus === 'unsupported_source';
 
     return `
       <section class="onboard-section">
@@ -348,13 +601,23 @@ class BiqOnboardApp extends HTMLElement {
           <p class="onboard-card-desc">Introduce la URL de la web del club. Extraeremos los colores del tema automáticamente.</p>
           <div class="onboard-form-row">
             <input type="url" class="onboard-input" data-website-input value="${escapeHtml(website)}" placeholder="https://www.miclub.com" />
-            <button class="onboard-btn onboard-btn-primary" data-generate-btn ${this._loading ? 'disabled' : ''}>
-              ${this._loading ? 'Generando…' : 'Generar tema'}
+            <button class="onboard-btn onboard-btn-primary" data-generate-btn ${this._loading || isPolling ? 'disabled' : ''}>
+              ${isPolling ? 'Procesando…' : this._loading ? 'Generando…' : 'Generar tema'}
             </button>
           </div>
         </div>
 
-        ${this._loading && !theme ? '<div class="onboard-loading">Cargando…</div>' : ''}
+        ${jobCopy ? `
+          <div class="onboard-card onboard-theme-job-state" data-job-state="${jobStatus}">
+            <h3 class="onboard-card-title">${escapeHtml(jobCopy.title)}</h3>
+            <p class="onboard-card-desc">${escapeHtml(jobCopy.description)}</p>
+            ${isPolling ? '<div class="onboard-loading">Procesando…</div>' : ''}
+            ${canActivate ? `<button class="onboard-btn onboard-btn-primary" data-activate-btn ${this._loading ? 'disabled' : ''}>Sí, usarlo</button>` : ''}
+            ${canRetry ? `<button class="onboard-btn onboard-btn-primary" data-retry-btn ${this._loading ? 'disabled' : ''}>Reintentar</button>` : ''}
+          </div>
+        ` : ''}
+
+        ${this._loading && !theme && !jobCopy ? '<div class="onboard-loading">Cargando…</div>' : ''}
 
         ${theme ? this.renderBrandingState(theme, verdictCopy, statusCopy) : ''}
         ${theme?.logo ? this.renderLogoSection(theme) : ''}
@@ -480,13 +743,17 @@ class BiqOnboardApp extends HTMLElement {
   // ─── Club step (ADDENDUM-07 §6) ───────────────────────────────────────
 
   private async selectMembership(clubId: string): Promise<void> {
-    const email = this._org?.email || '';
+    if (this._clubSubmitLocked) return;
+    this._clubSubmitLocked = true;
+    this._loading = true;
+    this._stepError = null;
+    this.render();
     try {
       const res = await fetch('/api/auth/select-club', {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, club_id: clubId }),
+        body: JSON.stringify({ club_id: clubId }),
       });
       if (!res.ok) throw new Error('No se pudo seleccionar el club');
       // ADDENDUM-07 §6 C2 — persist last-entered club for multi-membership
@@ -502,34 +769,104 @@ class BiqOnboardApp extends HTMLElement {
       // Full navigation so the shell re-boots with the resolved club.
       window.location.replace('/');
     } catch (err) {
+      this._loading = false;
+      this._clubSubmitLocked = false;
       this._error = (err as Error).message;
       this.render();
     }
   }
 
-  private async joinByClubId(clubId: string): Promise<void> {
-    const org_ = this._org;
-    const res = await fetch('/api/auth/register', {
-      method: 'POST',
-      credentials: 'include',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        email: org_?.email || '',
-        display_name: org_?.display_name || '',
-        club_id: clubId,
-      }),
-    });
-    return this.handleStepResponse(res, 'join');
+  // ─── F1: single-owner submission lifecycle ─────────────────────────────
+  // One method per form owns the ENTIRE lifecycle: lock acquisition, value
+  // persistence, request generation, AbortController, disabled render, the
+  // single fetch, and recovery. Event handlers only call these methods, so
+  // lock ownership cannot diverge again.
+
+  private async submitJoin(): Promise<void> {
+    if (this._clubSubmitLocked) return;
+    const clubId = this._clubForm.joinId.trim();
+    // Synchronous validation BEFORE locking — invalid fields stay editable.
+    if (!clubId) {
+      this._stepError = { scope: 'join', message: 'Introduce el ID del club.' };
+      this.render();
+      return;
+    }
+    // Acquire the lock, persist values, and render the disabled/busy state.
+    this._clubSubmitSeq += 1;
+    const seq = this._clubSubmitSeq;
+    this._clubSubmitAbort = new AbortController();
+    this._clubSubmitLocked = true;
+    this._loading = true;
+    this._stepError = null;
+    this._stepMessage = '';
+    this.render();
+    try {
+      const res = await fetch('/api/auth/register', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ club_id: clubId }),
+        signal: this._clubSubmitAbort?.signal,
+      });
+      await this.handleStepResponse(res, 'join', seq);
+    } catch (err) {
+      this._recoverSubmission('join', (err as Error).message || 'No se pudo enviar la solicitud', seq);
+    }
   }
 
-  private async createClub(name: string, website: string): Promise<void> {
-    const res = await fetch('/api/onboarding/clubs', {
-      method: 'POST',
-      credentials: 'include',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, website }),
-    });
+  private async submitCreate(): Promise<void> {
+    if (this._clubSubmitLocked) return;
+    const name = this._clubForm.createName.trim();
+    // Synchronous validation BEFORE locking — invalid fields stay editable.
+    if (name.length < 2) {
+      this._stepError = { scope: 'create', message: 'El nombre del club es obligatorio (mínimo 2 caracteres).' };
+      this.render();
+      return;
+    }
+    let website = '';
+    if (this._clubForm.createWebsite.trim()) {
+      const normalised = normaliseWebsiteUrl(this._clubForm.createWebsite);
+      if (normalised === null) {
+        this._stepError = { scope: 'create', message: 'La web del club debe usar https://' };
+        this.render();
+        return;
+      }
+      website = normalised;
+    }
+    // Acquire the lock, persist values, and render the disabled/busy state.
+    this._clubSubmitSeq += 1;
+    const seq = this._clubSubmitSeq;
+    this._clubSubmitAbort = new AbortController();
+    this._clubSubmitLocked = true;
+    this._loading = true;
+    this._stepError = null;
+    this._stepMessage = '';
+    // F2: one idempotency key per accepted submission; reused on retry.
+    if (!this._createIdempotencyKey) {
+      this._createIdempotencyKey =
+        (globalThis.crypto && globalThis.crypto.randomUUID
+          ? globalThis.crypto.randomUUID()
+          : String(Date.now()) + Math.random().toString(16).slice(2));
+    }
+    this.render();
+    let res: Response;
+    try {
+      res = await fetch('/api/onboarding/clubs', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, website, idempotency_key: this._createIdempotencyKey }),
+        signal: this._clubSubmitAbort?.signal,
+      });
+    } catch (err) {
+      this._recoverSubmission('create', (err as Error).message || 'No se pudo crear el club', seq);
+      return;
+    }
+    if (this._clubSubmitSeq !== seq) return; // stale response guard
     if (res.ok) {
+      if (this._clubSubmitAbort) {
+        this._clubSubmitAbort = null; // request completed — clear the controller
+      }
       // ADDENDUM-07 §6: chain select-club to re-point the shell session to
       // the new administrator row, then navigate to home. Only navigate when
       // both succeeded; surface the select failure as a step error (the
@@ -537,14 +874,13 @@ class BiqOnboardApp extends HTMLElement {
       // degraded, not stuck).
       const data = await res.json().catch(() => null);
       const clubId = data?.club?.id;
-      const email = this._org?.email || '';
-      if (clubId && email) {
+      if (clubId) {
         try {
           const selectRes = await fetch('/api/auth/select-club', {
             method: 'POST',
             credentials: 'include',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ email, club_id: clubId }),
+            body: JSON.stringify({ club_id: clubId }),
           });
           if (selectRes.ok) {
             // ADDENDUM-07 §6 C2 — persist last-entered club. Best-effort.
@@ -564,6 +900,7 @@ class BiqOnboardApp extends HTMLElement {
             message: 'El club se ha creado, pero no se pudo iniciar sesión automáticamente. Recarga para entrar.',
           };
           this._loading = false;
+          this._clubSubmitLocked = false;
           this.render();
           return;
         } catch {
@@ -572,25 +909,54 @@ class BiqOnboardApp extends HTMLElement {
             message: 'El club se ha creado, pero no se pudo iniciar sesión automáticamente. Recarga para entrar.',
           };
           this._loading = false;
+          this._clubSubmitLocked = false;
           this.render();
           return;
         }
       }
-      // Fallback: no club id or email in the response — reload.
+      // Fallback: no club id in the response — reload.
       window.location.replace('/');
       return;
     }
-    await this.handleStepResponse(res, 'create');
+    await this.handleStepResponse(res, 'create', seq);
+  }
+
+  // D20: restore controls, preserve typed values, and surface a focused error.
+  private _recoverSubmission(scope: 'join' | 'create', message: string, seq: number): void {
+    if (this._clubSubmitSeq !== seq) return;
+    if (this._clubSubmitAbort) {
+      this._clubSubmitAbort = null; // D21: clear only the matching controller
+    }
+    this._loading = false;
+    this._clubSubmitLocked = false;
+    this._stepError = { scope, message };
+    this.render();
+    const panel = this.shadow.querySelector(`#club-panel-${scope}`);
+    const alert = panel?.querySelector('[role="alert"]') as HTMLElement | null;
+    if (alert) {
+      alert.focus();
+    } else {
+      (this.shadow.querySelector(`[data-${scope === 'join' ? 'join-id' : 'create-name'}]`) as HTMLElement | null)?.focus();
+    }
   }
 
   private async handleStepResponse(
     res: Response,
     scope: 'join' | 'create',
+    seq: number,
   ): Promise<void> {
-    this._loading = false;
+    if (this._clubSubmitSeq !== seq) return; // D20: stale response guard
+    if (this._clubSubmitAbort) {
+      this._clubSubmitAbort = null; // D21: request completed — clear the controller
+    }
     if (res.ok) {
-      // Join: a pending JoinRequest was created — confirm and stay on the
-      // step (membership is granted after admin approval).
+      if (scope === 'join') {
+        // Join: a pending JoinRequest was created — redirect to home so the
+        // user lands on the authenticated shell and can resume from there
+        // once the admin approves the request.
+        window.location.replace('/');
+        return;
+      }
       this._stepMessage = 'Solicitud enviada. Un administrador del club revisará tu acceso.';
       this._stepError = null;
       this.render();
@@ -599,8 +965,7 @@ class BiqOnboardApp extends HTMLElement {
     const data = await res.json().catch(() => null);
     const message =
       (data && (data as { detail?: string }).detail) || `Error ${res.status}`;
-    this._stepError = { scope, message };
-    this.render();
+    this._recoverSubmission(scope, message, seq);
   }
 
   private renderClubStep(): string {
@@ -608,70 +973,85 @@ class BiqOnboardApp extends HTMLElement {
     const memberships = orgCtx?.memberships || [];
     const showCreate = canCreateClub(memberships);
     const err = this._stepError;
-
-    const pickerHtml = memberships.length
-      ? `
-      <section class="onboard-card">
-        <h3 class="onboard-card-title">Tus clubs</h3>
-        <p class="onboard-card-desc">Perteneces a varios clubs. Elige con cuál quieres entrar.</p>
-        <div class="onboard-picker" role="listbox" aria-label="Elige tu club">
-          ${memberships
-            .map(
-              (m) => `
-            <button class="onboard-club-row" data-pick-club="${escapeHtml(m.club_id)}" role="option">
+    const tabs = [
+      ...(memberships.length ? [{ id: 'memberships', label: 'Mis clubes' }] : []),
+      { id: 'join', label: 'Unirme a un club' },
+      ...(showCreate ? [{ id: 'create', label: 'Crear un club' }] : []),
+    ];
+    const activeTab = tabs.some((tab) => tab.id === this._activeClubTab)
+      ? this._activeClubTab
+      : memberships.length ? 'memberships' : 'join';
+    this._activeClubTab = activeTab;
+    const locked = this._clubSubmitLocked;
+    const tabButtons = tabs.map((tab) => `
+      <button type="button" role="tab" data-club-tab="${tab.id}"
+        id="club-tab-${tab.id}" aria-controls="club-panel-${tab.id}"
+        aria-selected="${tab.id === activeTab}" tabindex="${tab.id === activeTab ? 0 : -1}"
+        ${locked ? 'disabled' : ''}>${tab.label}</button>`).join('');
+    const panels = tabs.map((tab) => {
+      const selected = tab.id === activeTab;
+      if (tab.id === 'memberships') {
+        return `<section id="club-panel-memberships" role="tabpanel" aria-labelledby="club-tab-memberships" ${selected ? '' : 'hidden'}>
+          <p class="onboard-card-desc">Perteneces a varios clubs. Elige con cuál quieres entrar.</p>
+          <div class="onboard-picker" role="listbox" aria-label="Elige tu club">
+            ${memberships.map((m) => `<button class="onboard-club-row" data-pick-club="${escapeHtml(m.club_id)}" role="option" ${locked ? 'disabled' : ''}>
               <span class="onboard-club-name">${escapeHtml(m.club_name || m.club_id)}</span>
               <span class="onboard-club-role">${escapeHtml(m.role === 'administrator' ? 'Administrador' : m.role)}</span>
-            </button>`,
-            )
-            .join('')}
-        </div>
-      </section>`
-      : '';
-
-    return `
-      <header class="onboard-step-head">
-        <h2 class="onboard-section-title">Tu club</h2>
-        <p class="onboard-card-desc">Únete a un club o crea uno nuevo para empezar a usar BasketIQ.</p>
-        ${this._error ? `<div class="onboard-error">${escapeHtml(this._error)}</div>` : ''}
-      </header>
-      ${this._loading && !err ? '<div class="onboard-loading">Cargando…</div>' : ''}
-      ${pickerHtml}
-      <section class="onboard-card">
-        <h3 class="onboard-card-title">Unirse a un club</h3>
-        <p class="onboard-card-desc">Si tu club ya usa BasketIQ, pide a un administrador el ID del club.</p>
-        <div class="onboard-form-row">
-          <input type="text" class="onboard-input" data-join-id placeholder="ID del club" aria-label="ID del club" />
-          <button class="onboard-btn onboard-btn-primary" data-join-btn>Solicitar acceso</button>
-        </div>
-        ${
-          err?.scope === 'join'
-            ? `<div class="onboard-error">${escapeHtml(err.message)}</div>`
-            : ''
-        }
-        ${this._stepMessage ? `<div class="onboard-success">${escapeHtml(this._stepMessage)}</div>` : ''}
-      </section>
-      ${
-        showCreate
-          ? `
-      <section class="onboard-card">
-        <h3 class="onboard-card-title">Crear un club nuevo</h3>
+            </button>`).join('')}
+          </div>
+        </section>`;
+      }
+      if (tab.id === 'join') {
+        return `<section id="club-panel-join" role="tabpanel" aria-labelledby="club-tab-join" aria-busy="${selected && this._loading ? 'true' : 'false'}" ${selected ? '' : 'hidden'}>
+          <p class="onboard-card-desc">Si tu club ya usa BasketIQ, pide a un administrador el ID del club.</p>
+          <div class="onboard-form-row">
+            <input type="text" class="onboard-input" data-join-id placeholder="ID del club" aria-label="ID del club" value="${escapeHtml(this._clubForm.joinId)}" ${locked ? 'disabled' : ''} />
+            <button class="onboard-btn onboard-btn-primary" data-join-btn ${locked ? 'disabled' : ''}>${this._loading && selected ? '<span class="onboard-spinner" aria-hidden="true"></span> Enviando solicitud…' : 'Solicitar acceso'}</button>
+          </div>
+          ${err?.scope === 'join' ? `<div class="onboard-error" role="alert" tabindex="-1">${escapeHtml(err.message)}</div>` : ''}
+          ${this._stepMessage ? `<div class="onboard-success" aria-live="polite">${escapeHtml(this._stepMessage)}</div>` : ''}
+        </section>`;
+      }
+      return `<section id="club-panel-create" role="tabpanel" aria-labelledby="club-tab-create" aria-busy="${selected && this._loading ? 'true' : 'false'}" ${selected ? '' : 'hidden'}>
         <p class="onboard-card-desc">Crea la organización de tu club. Serás su administrador; podremos tomar el escudo y los colores de su web para personalizar la app.</p>
         <label class="onboard-field-label" for="create-name">Nombre del club</label>
-        <input type="text" id="create-name" class="onboard-input onboard-input-block" data-create-name placeholder="Club Baloncesto…" />
+        <input type="text" id="create-name" class="onboard-input onboard-input-block" data-create-name placeholder="Club Baloncesto…" value="${escapeHtml(this._clubForm.createName)}" ${locked ? 'disabled' : ''} />
         <label class="onboard-field-label" for="create-web">Web del club (opcional)</label>
-        <input type="url" id="create-web" class="onboard-input onboard-input-block" data-create-website placeholder="mi-club.es" />
-        <button class="onboard-btn onboard-btn-primary" data-create-btn>Crear club</button>
-        ${
-          err?.scope === 'create'
-            ? `<div class="onboard-error">${escapeHtml(err.message)}</div>`
-            : ''
-        }
-      </section>`
-          : ''
-      }`;
+        <input type="url" id="create-web" class="onboard-input onboard-input-block" data-create-website placeholder="mi-club.es" value="${escapeHtml(this._clubForm.createWebsite)}" ${locked ? 'disabled' : ''} />
+        <button class="onboard-btn onboard-btn-primary" data-create-btn ${locked ? 'disabled' : ''}>${this._loading && selected ? '<span class="onboard-spinner" aria-hidden="true"></span> Creando el club…' : 'Crear club'}</button>
+        ${err?.scope === 'create' ? `<div class="onboard-error" role="alert" tabindex="-1">${escapeHtml(err.message)}</div>` : ''}
+      </section>`;
+    }).join('');
+
+    return `<header class="onboard-step-head">
+      <h2 class="onboard-section-title">Tu club</h2>
+      <p class="onboard-card-desc">Elige una opción para empezar a usar BasketIQ.</p>
+      ${this._error ? `<div class="onboard-error" role="alert">${escapeHtml(this._error)}</div>` : ''}
+    </header>
+    ${this._loading ? '<div class="onboard-loading" role="status" aria-live="polite"><span class="onboard-spinner" aria-hidden="true"></span> Procesando…</div>' : ''}
+    <div class="onboard-tabs" role="tablist" aria-label="Opciones de club">${tabButtons}</div>
+    <div class="onboard-tab-panels">${panels}</div>`;
   }
 
   private wireClubStepEvents(): void {
+    const tabElements = Array.from(this.shadow.querySelectorAll<HTMLButtonElement>('[data-club-tab]'));
+    const activateTab = (id: string, focus = false) => {
+      if (this._clubSubmitLocked) return;
+      this._activeClubTab = id;
+      this.render();
+      if (focus) this.shadow.querySelector<HTMLButtonElement>(`[data-club-tab="${id}"]`)?.focus();
+    };
+    tabElements.forEach((tab, index) => {
+      tab.addEventListener('click', () => activateTab(tab.dataset.clubTab || ''));
+      tab.addEventListener('keydown', (event) => {
+        if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+        event.preventDefault();
+        const next = event.key === 'Home' ? 0 : event.key === 'End' ? tabElements.length - 1
+          : (index + (event.key === 'ArrowRight' ? 1 : -1) + tabElements.length) % tabElements.length;
+        activateTab(tabElements[next].dataset.clubTab || '', true);
+      });
+    });
+
     this.shadow.querySelectorAll('[data-pick-club]').forEach((btn) => {
       btn.addEventListener('click', () => {
         this.selectMembership((btn as HTMLElement).dataset.pickClub || '');
@@ -681,14 +1061,18 @@ class BiqOnboardApp extends HTMLElement {
     const joinBtn = this.shadow.querySelector('[data-join-btn]');
     const joinInput = this.shadow.querySelector('[data-join-id]') as HTMLInputElement | null;
     if (joinBtn && joinInput) {
+      joinInput.addEventListener('input', () => {
+        this._clubForm.joinId = joinInput.value;
+      });
+      // F1: thin callers — the submit method owns the entire lifecycle.
       joinBtn.addEventListener('click', () => {
-        const clubId = joinInput.value.trim();
-        if (!clubId) return;
-        this._loading = true;
-        this._stepError = null;
-        this._stepMessage = '';
-        this.render();
-        this.joinByClubId(clubId);
+        this.submitJoin();
+      });
+      joinInput.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          this.submitJoin();
+        }
       });
     }
 
@@ -696,28 +1080,23 @@ class BiqOnboardApp extends HTMLElement {
     const nameInput = this.shadow.querySelector('[data-create-name]') as HTMLInputElement | null;
     const webInput = this.shadow.querySelector('[data-create-website]') as HTMLInputElement | null;
     if (createBtn && nameInput) {
+      nameInput.addEventListener('input', () => {
+        this._clubForm.createName = nameInput.value;
+      });
+      if (webInput) {
+        webInput.addEventListener('input', () => {
+          this._clubForm.createWebsite = webInput.value;
+        });
+      }
+      // F1: thin callers — the submit method owns the entire lifecycle.
       createBtn.addEventListener('click', () => {
-        const name = nameInput.value.trim();
-        if (name.length < 2) {
-          this._stepError = { scope: 'create', message: 'El nombre del club es obligatorio (mínimo 2 caracteres).' };
-          this.render();
-          return;
+        this.submitCreate();
+      });
+      nameInput.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          this.submitCreate();
         }
-        let website = '';
-        if (webInput && webInput.value.trim()) {
-          const normalised = normaliseWebsiteUrl(webInput.value);
-          if (normalised === null) {
-            this._stepError = { scope: 'create', message: 'La web del club debe usar https://' };
-            this.render();
-            return;
-          }
-          website = normalised;
-        }
-        this._loading = true;
-        this._stepError = null;
-        this._stepMessage = '';
-        this.render();
-        this.createClub(name, website);
       });
     }
   }
@@ -796,6 +1175,18 @@ class BiqOnboardApp extends HTMLElement {
       affirmBtn.addEventListener('click', () => {
         if (!affirmBtn.disabled) this.affirmLogoRights(clubId);
       });
+    }
+
+    // B14: Activate theme button
+    const activateBtn = this.shadow.querySelector('[data-activate-btn]');
+    if (activateBtn) {
+      activateBtn.addEventListener('click', () => this.activateTheme(clubId));
+    }
+
+    // B14: Retry theme button
+    const retryBtn = this.shadow.querySelector('[data-retry-btn]');
+    if (retryBtn) {
+      retryBtn.addEventListener('click', () => this.retryTheme(clubId));
     }
   }
 }

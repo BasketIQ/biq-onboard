@@ -123,13 +123,90 @@ jobs:
           gcloud beta builds log "${BUILD_ID}" --project "${PROJECT_ID}" --stream --quiet
           gcloud builds describe "${BUILD_ID}" --project "${PROJECT_ID}" --format='value(status)' | grep -q '^SUCCESS$'
 
+      - name: Verify dedicated task-invoker SA (C5/R1)
+        env:
+          PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+        run: |
+          # R1: Fail-closed verification of the dedicated task-invoker SA.
+          # The SA must be provisioned via the governed IAM path (console/terraform).
+          # The deployer SA typically lacks iam.serviceAccounts.create — that is
+          # expected. This step verifies the SA EXISTS and has the required binding.
+          # No best-effort: if the SA doesn't exist or binding is missing, fail.
+          TASK_INVOKER_SA="biq-task-invoker@${PROJECT_ID}.iam.gserviceaccount.com"
+          echo "TASK_INVOKER_SA=${TASK_INVOKER_SA}" >> "${GITHUB_ENV}"
+
+          # R1: Verify SA exists — fail closed if not
+          if ! gcloud iam service-accounts describe "${TASK_INVOKER_SA}" --project "${PROJECT_ID}" >/dev/null 2>&1; then
+            echo "::error::Dedicated task-invoker SA does not exist: ${TASK_INVOKER_SA}"
+            echo "::error::Provision it via the governed IAM path (console/terraform) with:"
+            echo "::error::  roles/run.jobsExecutorWithOverrides on club-theme-generation Cloud Run Job"
+            echo "::error::  roles/iam.serviceAccountTokenCreator for Cloud Tasks service agent"
+            exit 1
+          fi
+          echo "Verified: task-invoker SA exists: ${TASK_INVOKER_SA}"
+
+          # R1: Verify the SA has run.jobs.run on the club-theme-generation job
+          JOB_NAME="club-theme-generation"
+          JOB_LOCATION="europe-west1"
+          POLICY=$(gcloud run jobs get-iam-policy "${JOB_NAME}" \
+            --project "${PROJECT_ID}" \
+            --region "${JOB_LOCATION}" \
+            --format="json(bindings)" 2>/dev/null || echo '{"bindings":[]}')
+
+          if echo "${POLICY}" | jq -e --arg sa "serviceAccount:${TASK_INVOKER_SA}" \
+            '.bindings[]? | select(.role=="roles/run.jobsExecutorWithOverrides") | .members[]? | select(.==$sa)' >/dev/null 2>&1; then
+            echo "Verified: ${TASK_INVOKER_SA} has roles/run.jobsExecutorWithOverrides on ${JOB_NAME}"
+          else
+            echo "::error::${TASK_INVOKER_SA} is missing roles/run.jobsExecutorWithOverrides on ${JOB_NAME}"
+            echo "::error::Grant the binding via: gcloud run jobs add-iam-policy-binding ${JOB_NAME} --region ${JOB_LOCATION} --member serviceAccount:${TASK_INVOKER_SA} --role roles/run.jobsExecutorWithOverrides"
+            exit 1
+          fi
+
+          echo "Dedicated task-invoker SA name: ${TASK_INVOKER_SA}"
+
+          # V1: Verify Cloud Tasks service agent has tokenCreator on the invoker SA
+          PROJECT_NUM=$(gcloud projects describe "${PROJECT_ID}" --format="value(projectNumber)" 2>/dev/null || echo "")
+          CT_SA="service-${PROJECT_NUM}@gcp-sa-cloudtasks.iam.gserviceaccount.com"
+          SA_POLICY=$(gcloud iam service-accounts get-iam-policy "${TASK_INVOKER_SA}" --project "${PROJECT_ID}" --format="json" 2>/dev/null || echo "{}")
+          if echo "${SA_POLICY}" | jq -e --arg ct_sa "serviceAccount:${CT_SA}" \
+            '.bindings[]? | select(.role=="roles/iam.serviceAccountTokenCreator") | .members[]? | select(.==$ct_sa)' >/dev/null 2>&1; then
+            echo "Verified: Cloud Tasks SA (${CT_SA}) has roles/iam.serviceAccountTokenCreator on ${TASK_INVOKER_SA}"
+          else
+            echo "::error::Cloud Tasks SA (${CT_SA}) is missing roles/iam.serviceAccountTokenCreator on ${TASK_INVOKER_SA}"
+            echo "::error::Grant via: gcloud iam service-accounts add-iam-policy-binding ${TASK_INVOKER_SA} --project ${PROJECT_ID} --member serviceAccount:${CT_SA} --role roles/iam.serviceAccountTokenCreator"
+            exit 1
+          fi
+
       - name: Deploy to Cloud Run
         env:
           PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
           RUN_SERVICE: ${{ vars.GCP_RUN_SERVICE }}
         run: |
+          # C14: Fail-closed — validate all required env vars are non-empty
+          # before deploying. Missing config must not produce a silently
+          # broken deployment.
+          REQUIRED_VARS=(
+            "BIQ_ONBOARD_S2S_SECRET=${{ secrets.BIQ_ONBOARD_S2S_SECRET }}"
+            "BIQ_THEME_JOB_RESULT_TOKEN=${{ secrets.BIQ_THEME_JOB_RESULT_TOKEN }}"
+            "BIQ_ONBOARD_CALLBACK_URL=${{ vars.BIQ_ONBOARD_CALLBACK_URL }}"
+            "GCP_PROJECT_ID=${{ vars.GCP_PROJECT_ID }}"
+          )
+          for var_pair in "${REQUIRED_VARS[@]}"; do
+            var_name="${var_pair%%=*}"
+            var_value="${var_pair#*=}"
+            if [ -z "${var_value}" ]; then
+              echo "::error::Required config '${var_name}' is empty — refusing to deploy (C14 fail-closed)"
+              exit 1
+            fi
+          done
+          echo "All required config values present (C14 fail-closed check passed)"
+
           PROJECT_NUMBER=$(gcloud projects describe "${PROJECT_ID}" --format='value(projectNumber)')
           DEFAULT_SA="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
+
+          # C5: Use the dedicated task-invoker SA, not the deployer SA
+          TASK_INVOKER_SA="${TASK_INVOKER_SA}"
+
           gcloud run deploy "${RUN_SERVICE}" \
             --project "${PROJECT_ID}" \
             --region europe-west1 \
@@ -137,7 +214,7 @@ jobs:
             --image "${IMAGE_URI}" \
             --allow-unauthenticated \
             --port 8080 \
-            --set-env-vars "BIQ_ENV=prod,BIQ_ORG_STORE=firestore,BIQ_ROLES_STORE=firestore,GCP_PROJECT_ID=${{ vars.GCP_PROJECT_ID }},GOOGLE_CLOUD_PROJECT=${{ vars.GCP_PROJECT_ID }},BIQ_ONBOARD_USER=${{ secrets.BIQ_ONBOARD_USER }},BIQ_ONBOARD_PASSWORD=${{ secrets.BIQ_ONBOARD_PASSWORD }},BIQ_ONBOARD_SESSION_SECRET=${{ secrets.BIQ_ONBOARD_SESSION_SECRET }}" \
+            --set-env-vars "BIQ_ENV=prod,BIQ_ORG_STORE=firestore,BIQ_ROLES_STORE=firestore,GCP_PROJECT_ID=${{ vars.GCP_PROJECT_ID }},GOOGLE_CLOUD_PROJECT=${{ vars.GCP_PROJECT_ID }},BIQ_ONBOARD_USER=${{ secrets.BIQ_ONBOARD_USER }},BIQ_ONBOARD_PASSWORD=${{ secrets.BIQ_ONBOARD_PASSWORD }},BIQ_ONBOARD_SESSION_SECRET=${{ secrets.BIQ_ONBOARD_SESSION_SECRET }},BIQ_ONBOARD_S2S_SECRET=${{ secrets.BIQ_ONBOARD_S2S_SECRET }},BIQ_THEME_JOB_RESULT_TOKEN=${{ secrets.BIQ_THEME_JOB_RESULT_TOKEN }},BIQ_CLOUD_TASKS_QUEUE=club-theme-generation,GCP_TASKS_QUEUE=club-theme-generation,GCP_TASKS_LOCATION=europe-west1,GCP_THEME_JOB_NAME=club-theme-generation,GCP_TASK_INVOKER_SA=${TASK_INVOKER_SA},BIQ_ONBOARD_CALLBACK_URL=${{ vars.BIQ_ONBOARD_CALLBACK_URL }}" \
             --service-account "${DEFAULT_SA}"
 
       - name: Health check

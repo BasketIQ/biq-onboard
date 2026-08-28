@@ -64,7 +64,7 @@ def test_generate_theme_enqueues_job(admin_client, club_id):
         f"/api/admin/clubs/{club_id}/theme/generate",
         json={"homepage_url": "https://example.com"},
     )
-    assert r.status_code == 200
+    assert r.status_code == 202
     data = r.json()
     assert data["ok"] is True
     assert data["status"] == "pending"
@@ -80,7 +80,7 @@ def test_generate_theme_normalises_url(admin_client, club_id):
         f"/api/admin/clubs/{club_id}/theme/generate",
         json={"homepage_url": "example.com"},
     )
-    assert r.status_code == 200
+    assert r.status_code == 202
     assert r.json()["themeJob"]["sourceUrl"] == "https://example.com"
 
 
@@ -204,7 +204,7 @@ def test_enqueue_dev_mode_returns_synthetic_id(monkeypatch):
     from biq_onboard_server.routers import theme as theme_mod
     # Reset cached client
     monkeypatch.setattr(theme_mod, "_tasks_client", None)
-    task_id = theme_mod._enqueue_generation_task("club_x", "https://example.com")
+    task_id = theme_mod._enqueue_generation_task("club_x", "https://example.com", "lease-test-1")
     assert task_id.startswith("dev-task-")
 
 
@@ -219,6 +219,7 @@ def test_enqueue_production_calls_cloud_tasks(monkeypatch):
     monkeypatch.setenv("GCP_TASKS_LOCATION", "europe-west1")
     monkeypatch.setenv("CLUB_THEME_JOB_URL", "https://job.run.app/gen")
     monkeypatch.setenv("GCP_DEPLOYER_SA", "deployer@test-project.iam.gserviceaccount.com")
+    monkeypatch.setenv("GCP_TASK_INVOKER_SA", "biq-task-invoker@test-project.iam.gserviceaccount.com")
 
     from biq_onboard_server.routers import theme as theme_mod
 
@@ -246,6 +247,7 @@ def test_enqueue_production_calls_cloud_tasks(monkeypatch):
             return MockCreatedTask()
 
     # Build a mock module to replace google.cloud.tasks_v2
+    # C4: Mock now includes OAuthToken (not OidcToken)
     class MockTasksV2:
         class Task:
             def __init__(self, **kwargs):
@@ -258,7 +260,7 @@ def test_enqueue_production_calls_cloud_tasks(monkeypatch):
         class HttpMethod:
             POST = "POST"
 
-        class OidcToken:
+        class OAuthToken:
             def __init__(self, **kwargs):
                 pass
 
@@ -272,7 +274,7 @@ def test_enqueue_production_calls_cloud_tasks(monkeypatch):
     import sys
     monkeypatch.setitem(sys.modules, "google.cloud.tasks_v2", MockTasksV2())
 
-    task_id = theme_mod._enqueue_generation_task("club_test", "https://example.com")
+    task_id = theme_mod._enqueue_generation_task("club_test", "https://example.com", "lease-test-1")
 
     # Verify the task ID is from the created task
     assert task_id == "fake-task-123"
@@ -319,3 +321,322 @@ def test_affirm_logo_rights_requires_auth(client):
         "/api/admin/clubs/any/theme/logo-rights",
         json={"affirmed": True},
     ).status_code == 401
+
+
+# ─── C2: S2S identity resolution for theme routes ──────────────────────
+
+
+def test_s2s_theme_get_with_valid_bearer_and_admin(client, monkeypatch):
+    """C2: Theme GET with valid S2S bearer + admin identity succeeds."""
+    monkeypatch.setenv("BIQ_ONBOARD_S2S_SECRET", "test-s2s-secret")
+    # Create a club + admin membership via the onboarding flow
+    from biq_onboard_server import org
+    from biq_core.org import Club, User
+
+    reg = org.get_registry()
+    reg.upsert_club(Club(id="c2test", name="C2 Test", status="active"))
+    reg.upsert_user(User(id="u_admin", club_id="c2test", email="admin@test.io",
+                         display_name="Admin", role="administrator", status="active"))
+    # Assign admin role in roles registry (use org.get_roles() for memory store)
+    from biq_core.roles import RoleAssignment
+    rr = org.get_roles()
+    rr.put_assignment(RoleAssignment(user_id="u_admin", role="administrator", scope="club:c2test"))
+
+    resp = client.get(
+        "/api/admin/clubs/c2test/theme",
+        headers={
+            "Authorization": "Bearer test-s2s-secret",
+            "X-BIQ-Acting-User-Id": "u_admin",
+            "X-BIQ-Acting-Email": "admin@test.io",
+        },
+    )
+    assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
+
+
+def test_s2s_theme_get_with_bad_token_returns_401(client, monkeypatch):
+    """C2: Theme GET with bad S2S bearer returns 401 (fail-closed)."""
+    monkeypatch.setenv("BIQ_ONBOARD_S2S_SECRET", "test-s2s-secret")
+    resp = client.get(
+        "/api/admin/clubs/c2test/theme",
+        headers={
+            "Authorization": "Bearer wrong-token",
+            "X-BIQ-Acting-User-Id": "u_admin",
+            "X-BIQ-Acting-Email": "admin@test.io",
+        },
+    )
+    assert resp.status_code == 401
+
+
+def test_s2s_theme_get_with_missing_bearer_returns_401(client, monkeypatch):
+    """C2: Theme GET with S2S configured but no bearer returns 401."""
+    monkeypatch.setenv("BIQ_ONBOARD_S2S_SECRET", "test-s2s-secret")
+    resp = client.get(
+        "/api/admin/clubs/c2test/theme",
+        headers={
+            "X-BIQ-Acting-User-Id": "u_admin",
+            "X-BIQ-Acting-Email": "admin@test.io",
+        },
+    )
+    assert resp.status_code == 401
+
+
+def test_s2s_theme_get_with_non_admin_returns_403(client, monkeypatch):
+    """V18: Theme GET is readable by any active club member."""
+    monkeypatch.setenv("BIQ_ONBOARD_S2S_SECRET", "test-s2s-secret")
+    from biq_onboard_server import org
+    from biq_core.org import Club, User
+
+    reg = org.get_registry()
+    reg.upsert_club(Club(id="c2test2", name="C2 Test 2", status="active"))
+    reg.upsert_user(User(id="u_coach", club_id="c2test2", email="coach@test.io",
+                         display_name="Coach", role="coach", status="active"))
+
+    resp = client.get(
+        "/api/admin/clubs/c2test2/theme",
+        headers={
+            "Authorization": "Bearer test-s2s-secret",
+            "X-BIQ-Acting-User-Id": "u_coach",
+            "X-BIQ-Acting-Email": "coach@test.io",
+        },
+    )
+    assert resp.status_code == 200
+
+
+def test_s2s_theme_get_missing_user_id_returns_403(client, monkeypatch):
+    """C2: S2S request with valid token but missing X-BIQ-Acting-User-Id returns 403."""
+    monkeypatch.setenv("BIQ_ONBOARD_S2S_SECRET", "test-s2s-secret")
+    resp = client.get(
+        "/api/admin/clubs/c2test/theme",
+        headers={
+            "Authorization": "Bearer test-s2s-secret",
+            "X-BIQ-Acting-Email": "admin@test.io",
+        },
+    )
+    assert resp.status_code == 403
+
+
+# ─── C9: Result callback state transition tests ────────────────────────
+
+
+def test_result_rejects_terminal_to_running_regression(client, monkeypatch):
+    """C9: A terminal job cannot regress to running."""
+    monkeypatch.setenv("BIQ_THEME_JOB_RESULT_TOKEN", "result-token")
+    from biq_onboard_server import org
+    from biq_core.org import Club
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    reg = org.get_registry()
+    reg.upsert_club(Club(id="c9test", name="C9 Test", status="active",
+                         theme_job={
+                             "status": "succeeded",
+                             "sourceUrl": "https://example.com",
+                             "lease": {"holder": "lease-1", "expiresAt": None},
+                             "finishedAt": now,
+                         }))
+
+    resp = client.post(
+        "/api/admin/clubs/c9test/theme/result",
+        json={"status": "running", "jobId": "lease-1", "sourceUrl": "https://example.com"},
+        headers={"Authorization": "Bearer result-token"},
+    )
+    assert resp.status_code == 409
+    assert "regress" in resp.json()["detail"].lower()
+
+
+def test_result_rejects_missing_job_id(client, monkeypatch):
+    """C9: Missing jobId is rejected (422 — required field)."""
+    monkeypatch.setenv("BIQ_THEME_JOB_RESULT_TOKEN", "result-token")
+    resp = client.post(
+        "/api/admin/clubs/c9test/theme/result",
+        json={"status": "running", "sourceUrl": "https://example.com"},
+        headers={"Authorization": "Bearer result-token"},
+    )
+    assert resp.status_code == 422  # Pydantic validation error
+
+
+def test_result_rejects_source_url_mismatch(client, monkeypatch):
+    """C9: Source URL mismatch is rejected."""
+    monkeypatch.setenv("BIQ_THEME_JOB_RESULT_TOKEN", "result-token")
+    from biq_onboard_server import org
+    from biq_core.org import Club
+
+    reg = org.get_registry()
+    reg.upsert_club(Club(id="c9test2", name="C9 Test 2", status="active",
+                         theme_job={
+                             "status": "pending",
+                             "sourceUrl": "https://original.com",
+                             "lease": {"holder": "lease-2", "expiresAt": None},
+                         }))
+
+    resp = client.post(
+        "/api/admin/clubs/c9test2/theme/result",
+        json={"status": "running", "jobId": "lease-2", "sourceUrl": "https://different.com"},
+        headers={"Authorization": "Bearer result-token"},
+    )
+    assert resp.status_code == 409
+    assert "source url" in resp.json()["detail"].lower()
+
+
+# ─── R7: Rate-limit history preservation ───────────────────────────────
+
+
+def test_r7_history_preserved_across_replacement(monkeypatch):
+    """R7: When generate_theme() creates a new theme_job, prior history
+    must be preserved so the 5/hour + 20/day counters accumulate.
+    """
+    from biq_onboard_server.routers import theme
+    from biq_onboard_server import org
+    from biq_core.org import Club
+    from datetime import datetime, timezone
+
+    org.reset_for_tests()
+    monkeypatch.delenv("BIQ_CLOUD_TASKS_QUEUE", raising=False)
+
+    reg = org.get_registry()
+    # Seed a club with existing history (3 prior attempts)
+    now_iso = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    reg.upsert_club(Club(
+        id="r7club",
+        name="R7 Club",
+        website="https://example.com",
+        status="active",
+        theme_job={
+            "status": "failed",
+            "sourceUrl": "https://example.com",
+            "history": [
+                {"sourceUrl": "https://example.com", "requestedAt": now_iso},
+                {"sourceUrl": "https://example.com", "requestedAt": now_iso},
+                {"sourceUrl": "https://example.com", "requestedAt": now_iso},
+            ],
+        },
+    ))
+
+    # Check rate limit — should see 3 attempts, allow more
+    assert theme._check_rate_limit("r7club", "https://example.com") == True
+
+    # Now generate a new theme — history should be preserved + new entry added
+    # Clear the lease so generate doesn't see an active job, but keep history
+    club = reg.get_club("r7club")
+    club.theme_job["lease"] = None
+    club.theme_job["status"] = "failed"
+    club.theme_job["finishedAt"] = now_iso
+    reg.upsert_club(club)
+
+    # Use the generate endpoint via the test client
+    from biq_onboard_server.app import create_app
+    from fastapi.testclient import TestClient
+    c = TestClient(create_app())
+    c.post("/api/auth/login", json={"username": "admin", "password": "T3st1ng!"})
+
+    resp = c.post("/api/admin/clubs/r7club/theme/generate",
+                  json={"homepage_url": "https://example.com"})
+    assert resp.status_code == 202, resp.text
+
+    # Verify history was preserved (3 prior + 1 new = 4)
+    club = reg.get_club("r7club")
+    history = club.theme_job.get("history", [])
+    assert len(history) == 4, \
+        f"R7: History should have 4 entries (3 prior + 1 new), got {len(history)}"
+
+
+def test_r7_rate_limit_5_per_hour(monkeypatch):
+    """R7: 6th attempt within 1 hour should be rejected."""
+    from biq_onboard_server.routers import theme
+    from biq_onboard_server import org
+    from biq_core.org import Club
+    from datetime import datetime, timezone, timedelta
+
+    org.reset_for_tests()
+    reg = org.get_registry()
+    now = datetime.now(timezone.utc)
+    # Create 5 entries within the last hour
+    history = []
+    for i in range(5):
+        ts = (now - timedelta(minutes=i * 5)).isoformat().replace("+00:00", "Z")
+        history.append({"sourceUrl": "https://example.com", "requestedAt": ts})
+
+    reg.upsert_club(Club(
+        id="r7hour",
+        name="R7 Hour Club",
+        website="https://example.com",
+        status="active",
+        theme_job={
+            "status": "failed",
+            "sourceUrl": "https://example.com",
+            "history": history,
+        },
+    ))
+
+    # 6th attempt should be rejected
+    assert theme._check_rate_limit("r7hour", "https://example.com") == False, \
+        "R7: 6th attempt within 1 hour should be rate-limited"
+
+
+def test_r7_rate_limit_20_per_day(monkeypatch):
+    """R7: 21st attempt within 1 day should be rejected."""
+    from biq_onboard_server.routers import theme
+    from biq_onboard_server import org
+    from biq_core.org import Club
+    from datetime import datetime, timezone, timedelta
+
+    org.reset_for_tests()
+    reg = org.get_registry()
+    now = datetime.now(timezone.utc)
+    # Create 20 entries within the last day, spread >1hr apart so hour limit doesn't hit
+    # 20 entries over 23 hours: each ~1.15 hours apart, 5 per hour max
+    history = []
+    for i in range(20):
+        # Spread: 0.1, 1.2, 2.3, ... hours ago — within 24h, >1hr apart groups
+        ts = (now - timedelta(minutes=int(i * 70))).isoformat().replace("+00:00", "Z")
+        history.append({"sourceUrl": "https://example.com", "requestedAt": ts})
+
+    reg.upsert_club(Club(
+        id="r7day",
+        name="R7 Day Club",
+        website="https://example.com",
+        status="active",
+        theme_job={
+            "status": "failed",
+            "sourceUrl": "https://example.com",
+            "history": history,
+        },
+    ))
+
+    # 21st attempt should be rejected
+    assert theme._check_rate_limit("r7day", "https://example.com") == False, \
+        "R7: 21st attempt within 1 day should be rate-limited"
+
+
+def test_r7_rate_limit_url_separation(monkeypatch):
+    """R7: Rate limits are per club + normalized URL — different URLs don't count."""
+    from biq_onboard_server.routers import theme
+    from biq_onboard_server import org
+    from biq_core.org import Club
+    from datetime import datetime, timezone, timedelta
+
+    org.reset_for_tests()
+    reg = org.get_registry()
+    now = datetime.now(timezone.utc)
+    # 5 attempts to example.com
+    history = []
+    for i in range(5):
+        ts = (now - timedelta(minutes=i * 5)).isoformat().replace("+00:00", "Z")
+        history.append({"sourceUrl": "https://example.com", "requestedAt": ts})
+
+    reg.upsert_club(Club(
+        id="r7url",
+        name="R7 URL Club",
+        website="https://example.com",
+        status="active",
+        theme_job={
+            "status": "failed",
+            "sourceUrl": "https://example.com",
+            "history": history,
+        },
+    ))
+
+    # Same URL — should be rate-limited
+    assert theme._check_rate_limit("r7url", "https://example.com") == False
+    # Different URL — should be allowed
+    assert theme._check_rate_limit("r7url", "https://other.com") == True

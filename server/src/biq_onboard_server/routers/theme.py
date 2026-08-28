@@ -738,12 +738,16 @@ def activate_theme(club_id: str, payload: ActivateRequest, request: Request) -> 
     # V5: Gate-bound activation — verify a deterministic hash of the token
     # payload matches the hash stored at gate time. If tokens were modified
     # after gate output, the hash won't match and activation is rejected.
+    #
+    # F6: Use compact separators (no spaces) to match the JS-side
+    # JSON.stringify canonical form. The previous code used default
+    # json.dumps which adds spaces, causing a cross-language mismatch.
     import hashlib
     import json as _json_hash
     stored_hash = gate.get("payloadHash") if isinstance(gate, dict) else None
     current_payload = {"light": tokens.get("light"), "dark": tokens.get("dark")}
     current_hash = hashlib.sha256(
-        _json_hash.dumps(current_payload, sort_keys=True).encode()
+        _json_hash.dumps(current_payload, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()[:16]
     if stored_hash and current_hash != stored_hash:
         raise HTTPException(

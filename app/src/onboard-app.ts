@@ -175,6 +175,29 @@ function canCreateClub(memberships: MembershipInfo[] | undefined): boolean {
   return ms.length === 0 || ms.some((m) => ADMIN_ROLES.includes(m.role));
 }
 
+// F7: Pure function for tab/membership-state mapping. Extracted from
+// renderClubStep for unit testing without a browser.
+interface ClubTab {
+  id: string;
+  label: string;
+}
+
+function clubTabsForMembershipState(memberships: MembershipInfo[] | undefined): ClubTab[] {
+  const ms = memberships || [];
+  const showCreate = canCreateClub(ms);
+  const tabs: ClubTab[] = [
+    ...(ms.length ? [{ id: 'memberships', label: 'Mis clubes' }] : []),
+    { id: 'join', label: 'Unirme a un club' },
+    ...(showCreate ? [{ id: 'create', label: 'Crear un club' }] : []),
+  ];
+  return tabs;
+}
+
+function defaultClubTab(memberships: MembershipInfo[] | undefined): string {
+  const ms = memberships || [];
+  return ms.length ? 'memberships' : 'join';
+}
+
 // Normalise a club website: prepend https:// to bare domains ("cbnorte.es"),
 // reject non-https schemes (ADDENDUM-03 §5.2 / ADDENDUM-02 §9.1). Returns
 // null when the value is invalid; "" when empty/optional.
@@ -971,16 +994,11 @@ class BiqOnboardApp extends HTMLElement {
   private renderClubStep(): string {
     const orgCtx = this._org;
     const memberships = orgCtx?.memberships || [];
-    const showCreate = canCreateClub(memberships);
     const err = this._stepError;
-    const tabs = [
-      ...(memberships.length ? [{ id: 'memberships', label: 'Mis clubes' }] : []),
-      { id: 'join', label: 'Unirme a un club' },
-      ...(showCreate ? [{ id: 'create', label: 'Crear un club' }] : []),
-    ];
+    const tabs = clubTabsForMembershipState(memberships);
     const activeTab = tabs.some((tab) => tab.id === this._activeClubTab)
       ? this._activeClubTab
-      : memberships.length ? 'memberships' : 'join';
+      : defaultClubTab(memberships);
     this._activeClubTab = activeTab;
     const locked = this._clubSubmitLocked;
     const tabButtons = tabs.map((tab) => `
@@ -1192,3 +1210,7 @@ class BiqOnboardApp extends HTMLElement {
 }
 
 customElements.define('biq-onboard-app', BiqOnboardApp);
+
+// F7: Exports for unit testing (not part of the public bundle API)
+export { canCreateClub, clubTabsForMembershipState, defaultClubTab, normaliseWebsiteUrl };
+export type { ClubTab };

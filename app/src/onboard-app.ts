@@ -963,6 +963,30 @@ class BiqOnboardApp extends HTMLElement {
     }
   }
 
+  // Bug A: Exit the pending-confirmation screen — log out, clear all
+  // in-memory club-decision state, and navigate to /login so a fresh
+  // visit starts clean. Mirrors the shell's logout() mechanism (shell.js).
+  private async _exitToLogin(): Promise<void> {
+    try {
+      await fetch('/api/auth/logout', { method: 'POST', credentials: 'include', cache: 'no-store' });
+    } catch { /* red no disponible: navegamos igualmente */ }
+    // Reset all club-decision state so a later mount is clean.
+    this._stepMessage = '';
+    this._stepError = null;
+    this._error = null;
+    this._loading = false;
+    this._clubSubmitLocked = false;
+    this._clubSubmitSeq += 1;
+    if (this._clubSubmitAbort) {
+      this._clubSubmitAbort.abort();
+      this._clubSubmitAbort = null;
+    }
+    this._clubForm = { joinId: '', createName: '', createWebsite: '' };
+    this._activeClubTab = '';
+    this._createIdempotencyKey = '';
+    window.location.replace('/login');
+  }
+
   private async handleStepResponse(
     res: Response,
     scope: 'join' | 'create',
@@ -1028,6 +1052,7 @@ class BiqOnboardApp extends HTMLElement {
           </div>
           ${err?.scope === 'join' ? `<div class="onboard-error" role="alert" tabindex="-1">${escapeHtml(err.message)}</div>` : ''}
           ${this._stepMessage ? `<div class="onboard-success" aria-live="polite">${escapeHtml(this._stepMessage)}</div>` : ''}
+          ${this._stepMessage ? `<button class="onboard-btn onboard-btn-secondary" data-exit-login>Volver a la página de inicio</button>` : ''}
         </section>`;
       }
       return `<section id="club-panel-create" role="tabpanel" aria-labelledby="club-tab-create" aria-busy="${selected && this._loading ? 'true' : 'false'}" ${selected ? '' : 'hidden'}>
@@ -1092,6 +1117,12 @@ class BiqOnboardApp extends HTMLElement {
           this.submitJoin();
         }
       });
+    }
+
+    // Bug A: wire the exit button on the pending-confirmation screen.
+    const exitBtn = this.shadow.querySelector('[data-exit-login]');
+    if (exitBtn) {
+      exitBtn.addEventListener('click', () => this._exitToLogin());
     }
 
     const createBtn = this.shadow.querySelector('[data-create-btn]');

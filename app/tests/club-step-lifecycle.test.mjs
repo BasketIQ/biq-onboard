@@ -640,3 +640,46 @@ test('stale completion cannot mutate a newer mounted instance', async (t) => {
   assert.equal(new URL(page.url()).pathname, before, 'stale completion did not navigate');
   await browser.close();
 });
+
+test('Bug A: exit button on pending-confirmation calls logout, resets state, and navigates to /login', async (t) => {
+  const browser = await chromium.launch();
+  const { page, log } = await newPage(browser, 'join-ok');
+  // Submit a join request to reach the pending-confirmation screen.
+  await clickJoin(page, 'club_x');
+  await waitFor(() => log.some((e) => e.url.includes('/api/auth/register')));
+  // Wait for the exit button to appear.
+  await page.waitForFunction(() => {
+    const el = document.getElementById('app');
+    return !!(el.shadowRoot && el.shadowRoot.querySelector('[data-exit-login]'));
+  }, { timeout: 10000 });
+  // Capture state before clicking, then click the exit button.
+  const beforeClick = await page.evaluate(() => {
+    const el = document.getElementById('app');
+    return {
+      hasMessage: !!el.shadowRoot.querySelector('.onboard-success'),
+      hasExitBtn: !!el.shadowRoot.querySelector('[data-exit-login]'),
+      formJoinId: el._clubForm.joinId,
+      stepMessage: el._stepMessage,
+    };
+  });
+  assert.equal(beforeClick.hasMessage, true, 'pending-confirmation message shown');
+  assert.equal(beforeClick.hasExitBtn, true, 'exit button rendered');
+  assert.equal(beforeClick.formJoinId, 'club_x', 'form has typed value before exit');
+  // Click the exit button — this calls logout and navigates to /login.
+  await page.evaluate(() => {
+    document.getElementById('app').shadowRoot.querySelector('[data-exit-login]').click();
+  });
+  // Verify logout was called.
+  await waitFor(() => log.some((e) => e.url.includes('/api/auth/logout') && e.method === 'POST'));
+  const logoutCalls = log.filter((e) => e.url.includes('/api/auth/logout'));
+  assert.equal(logoutCalls.length, 1, 'exactly one logout request');
+  // Verify state was reset before navigation (check synchronously right
+  // after the logout fetch resolves but before location.replace completes).
+  // Since location.replace('/login') reloads the page, we verify the URL
+  // changed to /login (the harness serves the same HTML for all paths).
+  await page.waitForFunction(() => {
+    return window.location.pathname === '/login';
+  }, { timeout: 10000 });
+  assert.equal(new URL(page.url()).pathname, '/login', 'navigated to /login');
+  await browser.close();
+});

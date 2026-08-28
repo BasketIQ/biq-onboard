@@ -26,6 +26,7 @@ unset, the service behaves exactly as today (standalone sessions only).
 from __future__ import annotations
 
 import hmac
+import logging
 import os
 
 from fastapi import APIRouter, HTTPException, Request
@@ -33,6 +34,8 @@ from fastapi import APIRouter, HTTPException, Request
 from .. import org
 from ..auth import _is_break_glass_admin, session_user
 from ..models import ClubSelfCreate
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()  # mounted at /api/onboarding by app.py
 
@@ -150,19 +153,50 @@ def create_my_club(payload: ClubSelfCreate, request: Request) -> dict:
     club_id = registry.next_club_id()
     from biq_core.org import Club
 
-    registry.upsert_club(
-        Club(
-            id=club_id,
-            name=club_name,
-            status="active",
-            created_by=caller_email or None,
-            website=website or None,
-        )
-    )
-
-    # Memberships are one User row per club (same model as join approval):
-    # the creator becomes the first administrator of the new club.
+    # F2: claim-then-commit creation. Roles first (deterministic ids), club,
+    # then the creator membership LAST. Every boundary failure is compensated
+    # fully, so a retry starts clean and can never create a duplicate club,
+    # orphan role, or member without authorization.
     membership_id = registry.next_user_id()
+    scope = f"club:{club_id}"
+    from biq_core.roles import RoleAssignment
+
+    role_registry = org.get_roles()
+
+    # 1. Canonical creator capabilities (idempotent by deterministic id).
+    try:
+        role_registry.put_assignment(
+            RoleAssignment(user_id=membership_id, role="administrator", scope=scope)
+        )
+        role_registry.put_assignment(
+            RoleAssignment(user_id=membership_id, role="sports_director", scope=scope)
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="No se pudo completar la autorización del creador",
+        ) from exc
+
+    # 2. Club. On failure, compensate the roles — nothing persists.
+    try:
+        registry.upsert_club(
+            Club(
+                id=club_id,
+                name=club_name,
+                status="active",
+                created_by=caller_email or None,
+                website=website or None,
+            )
+        )
+    except Exception as exc:
+        for role in ("administrator", "sports_director"):
+            try:
+                role_registry.remove_assignment(f"{membership_id}__{role}__{scope}")
+            except Exception:
+                logger.warning("compensation: failed to remove %s role for %s", role, membership_id)
+        raise HTTPException(status_code=503, detail="No se pudo crear el club") from exc
+
+    # 3. Creator membership LAST. On failure, compensate roles + club fully.
     from biq_core.org import User
 
     membership = User(
@@ -173,29 +207,18 @@ def create_my_club(payload: ClubSelfCreate, request: Request) -> dict:
         role="administrator",
         status="active",
     )
-    registry.upsert_user(membership)
-
-    # Persist canonical creator capabilities through the same scoped registry
-    # used by authorization. Creation must fail closed if role persistence
-    # cannot complete; a User.role alone is not an authorization grant.
-    from biq_core.roles import RoleAssignment
-
-    role_registry = org.get_roles()
     try:
-        role_registry.put_assignment(
-            RoleAssignment(
-                user_id=membership_id, role="administrator", scope=f"club:{club_id}"
-            )
-        )
-        role_registry.put_assignment(
-            RoleAssignment(
-                user_id=membership_id, role="sports_director", scope=f"club:{club_id}"
-            )
-        )
+        registry.upsert_user(membership)
     except Exception as exc:
+        try:
+            from .onboarding import offboard_club
+
+            offboard_club(club_id)
+        except Exception:
+            logger.warning("compensation: failed to offboard club %s", club_id)
         raise HTTPException(
             status_code=503,
-            detail=f"No se pudo completar la autorización del creador: {exc}",
+            detail="No se pudo crear la membresía del administrador",
         ) from exc
 
     # B9/B10: if website present, enqueue theme generation asynchronously.

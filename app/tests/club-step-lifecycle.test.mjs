@@ -86,7 +86,7 @@ async function newPage(browser, scenario) {
     });
     const u = req.url();
     try {
-      if (scenario === 'hang' && u.includes('/api/onboarding/clubs')) {
+      if (scenario === 'hang' && (u.includes('/api/onboarding/clubs') || u.includes('/api/auth/register'))) {
         await hangPromise;
         await json({ ok: true, club: { id: 'club-new' } });
         return;
@@ -274,5 +274,67 @@ test('disconnect aborts the in-flight request and rejects stale completion', asy
   releaseHang();
   await page.waitForTimeout(400);
   assert.equal(new URL(page.url()).pathname, '/', 'page did not navigate from stale completion');
+  await browser.close();
+});
+
+test('initial enabled state with no busy flags', async (t) => {
+  const browser = await chromium.launch();
+  const { page } = await newPage(browser, 'join-ok');
+  const initial = await page.evaluate(() => {
+    const el = document.getElementById('app');
+    const sr = el.shadowRoot;
+    const joinBtn = sr.querySelector('[data-join-btn]');
+    const joinInput = sr.querySelector('[data-join-id]');
+    const createTab = sr.querySelector('[data-club-tab="create"]');
+    const joinPanel = sr.querySelector('#club-panel-join');
+    return {
+      joinBtnDisabled: joinBtn.disabled,
+      joinInputDisabled: joinInput.disabled,
+      createTabDisabled: createTab.disabled,
+      ariaBusy: joinPanel.getAttribute('aria-busy'),
+      tabSelected: sr.querySelector('[data-club-tab="join"]').getAttribute('aria-selected'),
+    };
+  });
+  assert.equal(initial.joinBtnDisabled, false, 'join button enabled initially');
+  assert.equal(initial.joinInputDisabled, false, 'join input enabled initially');
+  assert.equal(initial.createTabDisabled, false, 'tabs enabled initially');
+  assert.equal(initial.ariaBusy, 'false', 'no aria-busy before submission');
+  assert.equal(initial.tabSelected, 'true', 'join tab selected by default for zero memberships');
+  await browser.close();
+});
+
+test('accepted submission sets aria-busy and a real spinner with reduced-motion support', async (t) => {
+  const browser = await chromium.launch();
+  const { page, log } = await newPage(browser, 'hang');
+  // reduced-motion preference must disable the spinner animation.
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await page.evaluate(() => {
+    const el = document.getElementById('app');
+    const input = el.shadowRoot.querySelector('[data-join-id]');
+    input.value = 'club_x';
+    el.shadowRoot.querySelector('[data-join-btn]').click();
+  });
+  await waitFor(() => log.length >= 1);
+  const busy = await page.evaluate(() => {
+    const el = document.getElementById('app');
+    const sr = el.shadowRoot;
+    const panel = sr.querySelector('#club-panel-join');
+    const spinner = sr.querySelector('.onboard-spinner');
+    const style = spinner ? getComputedStyle(spinner) : null;
+    return {
+      ariaBusy: panel.getAttribute('aria-busy'),
+      joinBtnDisabled: sr.querySelector('[data-join-btn]').disabled,
+      joinInputDisabled: sr.querySelector('[data-join-id]').disabled,
+      spinnerVisible: !!(spinner && style && style.display !== 'none'),
+      animationName: style ? style.animationName : null,
+      statusText: sr.querySelector('[data-join-btn]').textContent.trim(),
+    };
+  });
+  assert.equal(busy.ariaBusy, 'true', 'panel aria-busy during submission');
+  assert.equal(busy.joinBtnDisabled, true, 'join button natively disabled');
+  assert.equal(busy.joinInputDisabled, true, 'join input natively disabled');
+  assert.equal(busy.spinnerVisible, true, 'spinner element rendered');
+  assert.equal(busy.animationName, 'none', 'reduced-motion disables spinner animation');
+  assert.match(busy.statusText, /Enviando solicitud/, 'action-specific status text shown');
   await browser.close();
 });

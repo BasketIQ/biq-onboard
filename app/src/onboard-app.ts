@@ -973,15 +973,15 @@ class BiqOnboardApp extends HTMLElement {
       this._clubSubmitAbort = null; // D21: request completed — clear the controller
     }
     if (res.ok) {
-      if (scope === 'join') {
-        // Join: a pending JoinRequest was created — redirect to home so the
-        // user lands on the authenticated shell and can resume from there
-        // once the admin approves the request.
-        window.location.replace('/');
-        return;
-      }
+      // D1 fix: A successful join only creates a pending JoinRequest — the
+      // user has no real club yet. Navigating to "/" would trigger
+      // needsClubStep() → redirect back to #/onboard, appearing stuck.
+      // Instead, stay on the panel and show a pending-confirmation message,
+      // mirroring the existing create-with-pending-approval UX pattern.
       this._stepMessage = 'Solicitud enviada. Un administrador del club revisará tu acceso.';
       this._stepError = null;
+      this._loading = false;
+      this._clubSubmitLocked = false;
       this.render();
       return;
     }

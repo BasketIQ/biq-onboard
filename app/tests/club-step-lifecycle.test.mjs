@@ -65,7 +65,7 @@ async function stopServer() {
 
 /**
  * Scenario responses:
- *   'join-ok'     → /api/auth/register ok (component redirects to /)
+ *   'join-ok'     → /api/auth/register ok (component shows pending-confirmation, no redirect)
  *   'join-fail'   → /api/auth/register 422 {"detail": "El ID del club no existe"}
  *   'join-netfail'→ /api/auth/register aborted (network rejection)
  *   'create-ok'   → onboarding/clubs ok with club.id, select-club ok
@@ -220,18 +220,43 @@ test('repeated submit still issues exactly one request', async (t) => {
   await browser.close();
 });
 
-test('success remains locked through redirect', async (t) => {
+test('join success shows pending-confirmation and does not navigate', async (t) => {
+  // D1 fix: A successful join creates a pending JoinRequest — the user has
+  // no real club yet. The component must NOT navigate to "/" (which would
+  // loop back to #/onboard via needsClubStep()). Instead it should stay on
+  // the join panel, clear the lock/spinner, and show a confirmation message.
   const browser = await chromium.launch();
   const { page, log } = await newPage(browser, 'join-ok');
   const state = await clickJoin(page, 'club_x');
   assert.equal(state.disabled, true, 'join button disabled at submission');
   await waitFor(() => log.some((e) => e.url.includes('/api/auth/register')));
-  // The ok response drives window.location.replace('/'); the component must not
-  // re-enable or re-submit. Give the redirect a moment to commit.
+  // Give the response handler a moment to process
   await page.waitForTimeout(250);
   const joins = log.filter((e) => e.url.includes('/api/auth/register'));
-  assert.equal(joins.length, 1, 'still exactly one request through redirect');
-  assert.equal(new URL(page.url()).pathname, '/', 'redirects to home');
+  assert.equal(joins.length, 1, 'still exactly one request');
+  // D1 fix: Must NOT have navigated. In this harness all paths serve the same
+  // HTML, so we verify non-navigation by checking the success message is visible
+  // (only set in the non-navigate path) and controls are re-enabled.
+  // If window.location.replace('/') had fired, the page would reload and the
+  // success message would not be present.
+  // Check that the pending-confirmation message is shown
+  const result = await page.evaluate(() => {
+    const el = document.getElementById('app');
+    const sr = el.shadowRoot;
+    const success = sr.querySelector('#club-panel-join .onboard-success');
+    const btn = sr.querySelector('[data-join-btn]');
+    const input = sr.querySelector('[data-join-id]');
+    return {
+      hasSuccess: !!success,
+      successText: success ? success.textContent.trim() : '',
+      btnDisabled: btn.disabled,
+      inputDisabled: input.disabled,
+    };
+  });
+  assert.equal(result.hasSuccess, true, 'pending-confirmation message is shown');
+  assert.match(result.successText, /Solicitud enviada/, 'message says request was sent');
+  assert.equal(result.btnDisabled, false, 'join button re-enabled after success');
+  assert.equal(result.inputDisabled, false, 'join input re-enabled after success');
   await browser.close();
 });
 

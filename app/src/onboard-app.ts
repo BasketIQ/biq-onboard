@@ -265,6 +265,10 @@ class BiqOnboardApp extends HTMLElement {
   private _pollStartedAt = 0; // timestamp (ms) when polling began
   private _staleThresholdMs = 180_000; // 3 minutes
   private _isStale = false;
+  // F5: When true, suppress rendering of old theme data fetched by
+  // loadThemeData() — the user triggered a new generation/retry and the
+  // backend still returns the previous theme until the new job completes.
+  private _awaitingNewJob = false;
   private _visibilityHandler: (() => void) | null = null; // C11: visibility handling
   // F12: Team catalog management
   private _teams: Array<{ id: string; name: string; category: string | null; gender: string | null; label: string | null; archived: boolean }> = [];
@@ -316,8 +320,20 @@ class BiqOnboardApp extends HTMLElement {
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
-      this._theme = data.theme || null;
-      this._themeJob = data.themeJob || null;
+      // F5: When a new generation/retry was triggered, the backend still
+      // returns the OLD theme until the new job completes. Suppress the
+      // stale theme while the new job is pending/running so the user
+      // doesn't see the old rejection/error card reappear.
+      const jobStatus = data.themeJob?.status || '';
+      if (this._awaitingNewJob && (jobStatus === 'pending' || jobStatus === 'running')) {
+        this._theme = null;
+        this._themeJob = data.themeJob || null;
+      } else {
+        // Job reached terminal state (or no job) — show the theme
+        this._awaitingNewJob = false;
+        this._theme = data.theme || null;
+        this._themeJob = data.themeJob || null;
+      }
       // B14: start polling if pending/running
       this._maybeStartPolling(clubId);
       // B15: emit state event to shell
@@ -473,8 +489,18 @@ class BiqOnboardApp extends HTMLElement {
         return; // stale response for a different club
       }
       const prevStatus = this._themeJob?.status;
-      this._theme = data.theme || null;
-      this._themeJob = data.themeJob || null;
+      // F5: When awaiting a new job, suppress old theme data while
+      // the job is still pending/running. Only show the theme once
+      // the job reaches a terminal state.
+      const pollJobStatus = data.themeJob?.status || '';
+      if (this._awaitingNewJob && (pollJobStatus === 'pending' || pollJobStatus === 'running')) {
+        this._theme = null;
+        this._themeJob = data.themeJob || null;
+      } else {
+        this._awaitingNewJob = false;
+        this._theme = data.theme || null;
+        this._themeJob = data.themeJob || null;
+      }
       const newStatus = this._themeJob?.status;
       // B15: emit event on status change
       if (prevStatus !== newStatus) {
@@ -517,6 +543,7 @@ class BiqOnboardApp extends HTMLElement {
     // cards from a prior generation don't persist into the new one.
     this._theme = null;
     this._themeJob = null;
+    this._awaitingNewJob = true;
     this.render();
     try {
       const res = await fetch(`/api/clubs/${clubId}/theme/generate`, {
@@ -638,6 +665,7 @@ class BiqOnboardApp extends HTMLElement {
     // cards from a prior run don't persist into the retry.
     this._theme = null;
     this._themeJob = null;
+    this._awaitingNewJob = true;
     this.render();
     try {
       const res = await fetch(`/api/clubs/${clubId}/theme/retry`, {

@@ -567,3 +567,57 @@ def test_f12_coach_denied_team_catalog_management(f12_client):
 
     r = f12_client.put("/api/admin/clubs/club_f12/teams/team_club_f12_senior_m/archive")
     assert r.status_code == 403
+
+
+def test_f12_s2s_admin_can_list_teams_via_bearer_headers(f12_client, monkeypatch):
+    """F12: S2S mode — admin identity via bearer + headers succeeds.
+
+    This is the exact path the BFF proxy uses: biq-app forwards the request
+    with Authorization: Bearer <secret> + X-BIQ-Acting-User-Id headers,
+    not a session cookie. Without S2S-aware authorization, this 401s.
+    """
+    monkeypatch.setenv("BIQ_ONBOARD_S2S_SECRET", "test-s2s-secret")
+    _f12_seed_club_and_users(f12_client)
+
+    r = f12_client.get(
+        "/api/admin/clubs/club_f12/teams",
+        headers={
+            "Authorization": "Bearer test-s2s-secret",
+            "X-BIQ-Acting-User-Id": "u_admin",
+            "X-BIQ-Acting-Email": "u_admin@basketiq.io",
+        },
+    )
+    assert r.status_code == 200, f"Expected 200, got {r.status_code}: {r.text}"
+    assert r.json()["total"] >= 1
+
+
+def test_f12_s2s_sports_director_can_list_teams_via_bearer_headers(f12_client, monkeypatch):
+    """F12: S2S mode — Sports Director identity via bearer + headers succeeds."""
+    monkeypatch.setenv("BIQ_ONBOARD_S2S_SECRET", "test-s2s-secret")
+    _f12_seed_club_and_users(f12_client)
+
+    r = f12_client.get(
+        "/api/admin/clubs/club_f12/teams",
+        headers={
+            "Authorization": "Bearer test-s2s-secret",
+            "X-BIQ-Acting-User-Id": "u_sd",
+            "X-BIQ-Acting-Email": "u_sd@basketiq.io",
+        },
+    )
+    assert r.status_code == 200, f"Expected 200, got {r.status_code}: {r.text}"
+
+
+def test_f12_s2s_bad_token_returns_401(f12_client, monkeypatch):
+    """F12: S2S mode — wrong token returns 401 (fail-closed)."""
+    monkeypatch.setenv("BIQ_ONBOARD_S2S_SECRET", "test-s2s-secret")
+    _f12_seed_club_and_users(f12_client)
+
+    r = f12_client.get(
+        "/api/admin/clubs/club_f12/teams",
+        headers={
+            "Authorization": "Bearer wrong-token",
+            "X-BIQ-Acting-User-Id": "u_admin",
+            "X-BIQ-Acting-Email": "u_admin@basketiq.io",
+        },
+    )
+    assert r.status_code == 401

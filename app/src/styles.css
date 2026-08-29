@@ -510,9 +510,18 @@
 
 .onboard-team-table {
   width: 100%;
+  table-layout: fixed;
   border-collapse: collapse;
   margin-top: 8px;
 }
+
+/* Column widths: name flexible, gender narrow, actions fixed for 3 icons */
+.onboard-team-table th:nth-child(1),
+.onboard-team-table td:nth-child(1) { width: auto; }
+.onboard-team-table th:nth-child(2),
+.onboard-team-table td:nth-child(2) { width: 70px; }
+.onboard-team-table th:nth-child(3),
+.onboard-team-table td:nth-child(3) { width: 112px; }
 
 .onboard-team-table th {
   text-align: left;
@@ -527,6 +536,17 @@
   padding: 8px;
   font-size: 14px;
   border-bottom: 1px solid var(--biq-border, #f0f0f0);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Inputs inside the team table must fill the cell, not expand it */
+.onboard-team-table .onboard-input {
+  width: 100%;
+  min-width: 0;
+  flex: none;
+  padding: 6px 8px;
+  font-size: 14px;
 }
 
 .onboard-team-actions {

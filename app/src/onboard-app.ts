@@ -315,7 +315,7 @@ class BiqOnboardApp extends HTMLElement {
     this._teamsError = null;
     this.render();
     try {
-      const res = await fetch(`/api/admin/clubs/${clubId}/teams`, {
+      const res = await fetch(`/api/clubs/${clubId}/teams`, {
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
       });
@@ -1396,7 +1396,7 @@ class BiqOnboardApp extends HTMLElement {
         const category = (row.querySelector('[data-edit-team-category]') as HTMLSelectElement)?.value || '';
         const gender = (row.querySelector('[data-edit-team-gender]') as HTMLSelectElement)?.value || '';
         try {
-          const res = await fetch(`/api/admin/clubs/${clubId}/teams/${teamId}`, {
+          const res = await fetch(`/api/clubs/${clubId}/teams/${teamId}`, {
             method: 'PUT',
             credentials: 'include',
             headers: { 'Content-Type': 'application/json' },
@@ -1417,7 +1417,7 @@ class BiqOnboardApp extends HTMLElement {
       btn.addEventListener('click', async () => {
         const teamId = (btn as HTMLElement).dataset.archiveTeam || '';
         try {
-          const res = await fetch(`/api/admin/clubs/${clubId}/teams/${teamId}/archive`, {
+          const res = await fetch(`/api/clubs/${clubId}/teams/${teamId}/archive`, {
             method: 'PUT',
             credentials: 'include',
           });
@@ -1435,7 +1435,7 @@ class BiqOnboardApp extends HTMLElement {
       btn.addEventListener('click', async () => {
         const teamId = (btn as HTMLElement).dataset.unarchiveTeam || '';
         try {
-          const res = await fetch(`/api/admin/clubs/${clubId}/teams/${teamId}/unarchive`, {
+          const res = await fetch(`/api/clubs/${clubId}/teams/${teamId}/unarchive`, {
             method: 'PUT',
             credentials: 'include',
           });
@@ -1462,7 +1462,7 @@ class BiqOnboardApp extends HTMLElement {
           return;
         }
         try {
-          const res = await fetch(`/api/admin/clubs/${clubId}/teams`, {
+          const res = await fetch(`/api/clubs/${clubId}/teams`, {
             method: 'POST',
             credentials: 'include',
             headers: { 'Content-Type': 'application/json' },

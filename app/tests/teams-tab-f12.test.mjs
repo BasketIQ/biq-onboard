@@ -75,12 +75,12 @@ async function newPage(browser) {
       status, contentType: 'application/json', body: JSON.stringify(data),
     });
 
-    // GET /api/admin/clubs/{clubId}/teams → return seed teams
-    if (u.includes('/api/admin/clubs/') && u.includes('/teams') && method === 'GET') {
+    // GET /api/clubs/{clubId}/teams → return seed teams (proxied path)
+    if (u.includes('/api/clubs/') && u.includes('/teams') && method === 'GET') {
       await json({ teams: SEED_TEAMS, total: SEED_TEAMS.length });
       return;
     }
-    // PUT /api/admin/clubs/{clubId}/teams/{teamId} → update team
+    // PUT /api/clubs/{clubId}/teams/{teamId} → update team (proxied path)
     if (u.match(/\/teams\/[^/]+$/) && method === 'PUT' && !u.includes('archive') && !u.includes('unarchive')) {
       const body = JSON.parse(req.postData() || '{}');
       await json({ ok: true, team: { id: 'updated', name: body.name || 'Updated' } });

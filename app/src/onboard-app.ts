@@ -777,7 +777,7 @@ class BiqOnboardApp extends HTMLElement {
         ${this._loading && !theme && !jobCopy ? '<div class="onboard-loading">Cargando…</div>' : ''}
 
         ${theme ? this.renderBrandingState(theme, verdictCopy, statusCopy) : ''}
-        ${theme?.logo?.url ? this.renderLogoSection(theme) : ''}
+        ${theme?.logo?.onLight ? this.renderLogoSection(theme) : ''}
         ${theme ? this.renderPreview(theme) : ''}
         ${theme ? this.renderManualPicker(club.id, theme) : this.renderManualPicker(club.id)}
         ${theme ? this.renderRevertButton(club.id) : ''}
@@ -836,7 +836,7 @@ class BiqOnboardApp extends HTMLElement {
     return `
       <div class="onboard-card">
         <h3 class="onboard-card-title">Escudo del club</h3>
-        ${logo.url ? `<img class="onboard-logo-preview" src="${escapeHtml(logo.url)}" alt="Escudo" />` : '<p class="onboard-card-desc">No se encontró escudo.</p>'}
+        ${logo.onLight ? `<img class="onboard-logo-preview" src="${escapeHtml(logo.onLight)}" alt="Escudo" />` : '<p class="onboard-card-desc">No se encontró escudo.</p>'}
         ${awaitingRights ? `
           <div class="onboard-rights">
             <p class="onboard-rights-text">Para mostrar el escudo necesitas confirmar que el club tiene derecho a usarlo.</p>

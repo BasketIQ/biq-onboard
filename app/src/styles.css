@@ -322,6 +322,32 @@
   border: 1px solid var(--biq-line);
 }
 
+/* Activation toggle */
+.onboard-activation-card {
+  border: 1px solid var(--biq-line);
+}
+
+.onboard-activation-toggle {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  cursor: pointer;
+  padding: 8px 0;
+}
+
+.onboard-activation-toggle input[type="checkbox"] {
+  width: 24px;
+  height: 24px;
+  cursor: pointer;
+  accent-color: var(--biq-color-brand, #FF5A00);
+}
+
+.onboard-activation-label {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--biq-text, #0D1735);
+}
+
 /* Profile */
 .onboard-profile-card {
   display: flex;

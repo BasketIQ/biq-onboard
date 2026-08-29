@@ -289,9 +289,15 @@ class BiqOnboardApp extends HTMLElement {
 
   // Shell-injected properties (ADR-009)
   set org(value: OrgContext | null) {
+    const prevClubId = this._org?.club?.id;
+    const newClubId = value?.club?.id;
     this._org = value;
     this.render();
-    if (value?.club?.id) this.loadThemeData(value.club.id);
+    // Only reload theme data when the club actually changes — prevents
+    // infinite loop when shell refreshes org context after theme state event
+    if (newClubId && newClubId !== prevClubId) {
+      this.loadThemeData(newClubId);
+    }
   }
   get org(): OrgContext | null { return this._org; }
 
@@ -310,9 +316,10 @@ class BiqOnboardApp extends HTMLElement {
   // ─── Data loading ─────────────────────────────────────────────────────
 
   private async loadThemeData(clubId: string): Promise<void> {
-    this._loading = true;
+    // Don't set _loading on data refreshes — only generateTheme/revertTheme
+    // set it. This prevents the "Generar tema" button from flashing
+    // "Generando…" on every poll or org context refresh.
     this._error = null;
-    this.render();
     try {
       const res = await fetch(`/api/clubs/${clubId}/theme`, {
         credentials: 'include',
@@ -320,6 +327,8 @@ class BiqOnboardApp extends HTMLElement {
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
+      const prevJobStatus = this._themeJob?.status;
+      const prevThemeStatus = this._theme?.status;
       // F5: When a new generation/retry was triggered, the backend still
       // returns the OLD theme until the new job completes. Suppress the
       // stale theme while the new job is pending/running so the user
@@ -336,12 +345,16 @@ class BiqOnboardApp extends HTMLElement {
       }
       // B14: start polling if pending/running
       this._maybeStartPolling(clubId);
-      // B15: emit state event to shell
-      this._emitThemeStateEvent(clubId);
+      // B15: emit state event to shell ONLY when status actually changes
+      // (prevents infinite loop: shell refreshes org → loadThemeData → emit → shell refresh)
+      const newJobStatus = this._themeJob?.status;
+      const newThemeStatus = this._theme?.status;
+      if (prevJobStatus !== newJobStatus || prevThemeStatus !== newThemeStatus) {
+        this._emitThemeStateEvent(clubId);
+      }
     } catch (err) {
       this._error = (err as Error).message;
     } finally {
-      this._loading = false;
       this.render();
     }
   }
@@ -779,8 +792,7 @@ class BiqOnboardApp extends HTMLElement {
         ${theme ? this.renderBrandingState(theme, verdictCopy, statusCopy) : ''}
         ${theme?.logo?.onLight ? this.renderLogoSection(theme) : ''}
         ${theme ? this.renderPreview(theme) : ''}
-        ${theme ? this.renderManualPicker(club.id, theme) : this.renderManualPicker(club.id)}
-        ${theme ? this.renderRevertButton(club.id) : ''}
+        ${theme ? this.renderActivationToggle(club.id, theme) : ''}
       </section>`;
   }
 
@@ -822,8 +834,7 @@ class BiqOnboardApp extends HTMLElement {
 
         ${theme.status === 'draft' ? `
           <div class="onboard-draft-notice">
-            <p>El tema está en borrador. Revisa los colores y actívalo cuando estés conforme.</p>
-            <button class="onboard-btn onboard-btn-primary" data-activate-btn>Activar tema</button>
+            <p>El tema está listo. Actívalo con el interruptor de abajo.</p>
           </div>
         ` : ''}
       </div>`;
@@ -873,39 +884,34 @@ class BiqOnboardApp extends HTMLElement {
       </div>`;
   }
 
-  private renderManualPicker(clubId: string, theme?: ClubTheme): string {
-    // F6: Manual picker must be reachable even when no theme object exists yet.
-    // This is the intended fallback when automatic extraction doesn't work.
-    const brand = theme?.seed?.brand || '#FF5A00';
-    const brandAlt = theme?.seed?.brandAlt || '';
+  private renderActivationToggle(clubId: string, theme: ClubTheme): string {
+    const isActive = theme.status === 'active';
+    const gateFailed = theme.gate && theme.gate.passed === false;
+    if (gateFailed) {
+      // Gate failed — show revert button only
+      return `
+        <div class="onboard-card onboard-revert-card">
+          <h3 class="onboard-card-title">Tema BasketIQ</h3>
+          <p class="onboard-card-desc">El tema generado no superó el control de contraste. Se mantiene el tema BasketIQ por defecto.</p>
+          <button class="onboard-btn onboard-btn-danger" data-revert-btn ${this._loading ? 'disabled' : ''}>
+            Restablecer tema BasketIQ
+          </button>
+        </div>`;
+    }
     return `
-      <div class="onboard-card">
-        <h3 class="onboard-card-title">Selector manual de colores</h3>
-        <p class="onboard-card-desc">Si la extracción automática no es correcta, puedes elegir los colores manualmente.</p>
-        <div class="onboard-form-row">
-          <label class="onboard-color-label">
-            <span>Color principal</span>
-            <input type="color" class="onboard-color-input" data-manual-brand value="${escapeHtml(brand)}" />
-          </label>
-          <label class="onboard-color-label">
-            <span>Color secundario (opcional)</span>
-            <input type="color" class="onboard-color-input" data-manual-brand-alt value="${escapeHtml(brandAlt || '#0A153A')}" />
-          </label>
-        </div>
-        <button class="onboard-btn onboard-btn-secondary" data-save-manual-btn ${this._loading ? 'disabled' : ''}>
-          ${this._loading ? 'Guardando…' : 'Guardar colores manuales'}
-        </button>
-      </div>`;
-  }
-
-  private renderRevertButton(clubId: string): string {
-    return `
-      <div class="onboard-card onboard-revert-card">
-        <h3 class="onboard-card-title">Restablecer tema BasketIQ</h3>
-        <p class="onboard-card-desc">Vuelve al tema BasketIQ por defecto, eliminando los colores del club.</p>
-        <button class="onboard-btn onboard-btn-danger" data-revert-btn ${this._loading ? 'disabled' : ''}>
-          Restablecer
-        </button>
+      <div class="onboard-card onboard-activation-card">
+        <h3 class="onboard-card-title">Activación del tema</h3>
+        <label class="onboard-activation-toggle">
+          <input type="checkbox" data-activate-checkbox ${isActive ? 'checked' : ''} ${this._loading ? 'disabled' : ''} />
+          <span class="onboard-activation-label">
+            ${isActive ? 'Tema del club activo' : 'Activar tema del club'}
+          </span>
+        </label>
+        <p class="onboard-card-desc">
+          ${isActive
+            ? 'El tema del club está activo y visible para todos los miembros. Desmarca para volver al tema BasketIQ por defecto.'
+            : 'Al activar, el tema del club será visible y aplicable a todos los miembros del equipo. Si se desactiva, cualquier miembro que lo tuviera seleccionado volverá al tema BasketIQ por defecto.'}
+        </p>
       </div>`;
   }
 
@@ -1467,25 +1473,27 @@ class BiqOnboardApp extends HTMLElement {
       });
     }
 
-    // Save manual theme
-    const saveBtn = this.shadow.querySelector('[data-save-manual-btn]');
-    const brandInput = this.shadow.querySelector('[data-manual-brand]') as HTMLInputElement | null;
-    const brandAltInput = this.shadow.querySelector('[data-manual-brand-alt]') as HTMLInputElement | null;
-    if (saveBtn && brandInput) {
-      saveBtn.addEventListener('click', () => {
-        const brand = brandInput.value.toUpperCase();
-        const brandAlt = brandAltInput?.value.toUpperCase() || null;
-        this.saveManualTheme(clubId, brand, brandAlt);
+    // Activation checkbox — toggle theme active/inactive
+    const activateCheckbox = this.shadow.querySelector('[data-activate-checkbox]') as HTMLInputElement | null;
+    if (activateCheckbox) {
+      activateCheckbox.addEventListener('change', () => {
+        if (activateCheckbox.checked) {
+          this.activateTheme(clubId);
+        } else {
+          if (confirm('¿Desactivar el tema del club y volver al tema BasketIQ por defecto?')) {
+            this.revertTheme(clubId);
+          } else {
+            activateCheckbox.checked = true; // revert the checkbox
+          }
+        }
       });
     }
 
-    // Revert theme
+    // Revert theme (gate-failed case)
     const revertBtn = this.shadow.querySelector('[data-revert-btn]');
     if (revertBtn) {
       revertBtn.addEventListener('click', () => {
-        if (confirm('¿Restablecer al tema BasketIQ por defecto?')) {
-          this.revertTheme(clubId);
-        }
+        this.revertTheme(clubId);
       });
     }
 

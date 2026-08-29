@@ -700,7 +700,11 @@ class BiqOnboardApp extends HTMLElement {
     const jobStatus = job?.status || '';
     const jobCopy = jobStatus ? THEME_JOB_COPY[jobStatus] : null;
     const isPolling = jobStatus === 'pending' || jobStatus === 'running';
-    const canActivate = theme && (theme.status === 'draft' || theme.status === 'uncertain' || (jobStatus === 'succeeded' && theme.status !== 'active'));
+    // F5: Don't allow activation when the theme was rejected by the
+    // contrast gate — a rejected theme failed WCAG 2.2 AA and should
+    // not be activatable. The user should adjust manually or use the
+    // default BasketIQ theme instead.
+    const canActivate = theme && theme.status !== 'rejected' && (theme.status === 'draft' || theme.status === 'uncertain' || (jobStatus === 'succeeded' && theme.status !== 'active'));
     // F5: Allow retry when the job is in a terminal failed state OR when
     // the staleness timeout has fired (job stuck pending/running without
     // a terminal callback for > _staleThresholdMs).
@@ -759,7 +763,16 @@ class BiqOnboardApp extends HTMLElement {
             <h4>El tema no superó el control de contraste</h4>
             <p>Algunas combinaciones de color no cumplen WCAG 2.2 AA. Puedes ajustar manualmente los colores o usar el tema BasketIQ por defecto.</p>
             <ul class="onboard-gate-failures">
-              ${(theme.gate?.failures || []).map(f => `<li>${escapeHtml(f)}</li>`).join('')}
+              ${(theme.gate?.failures || []).map(f => {
+                // F5: Failure objects are { fg, bg, fgHex, bgHex, ratio, required }
+                // or { fg, bg, error } — format as readable text, not [object Object]
+                if (f.error) {
+                  return `<li>${escapeHtml(f.fg || '?')} → ${escapeHtml(f.bg || '?')}: ${escapeHtml(f.error)}</li>`;
+                }
+                const ratio = f.ratio != null ? f.ratio.toFixed(2) : '?';
+                const required = f.required != null ? f.required.toFixed(1) : '?';
+                return `<li>${escapeHtml(f.fg || '?')} sobre ${escapeHtml(f.bg || '?')}: ratio ${ratio}:1 (mínimo ${required}:1)</li>`;
+              }).join('')}
             </ul>
           </div>
         ` : ''}

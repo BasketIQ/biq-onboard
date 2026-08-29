@@ -513,6 +513,10 @@ class BiqOnboardApp extends HTMLElement {
     // F5: Reset staleness flag when a new generation is triggered
     this._isStale = false;
     this._pollStartedAt = 0;
+    // F5: Clear previous theme/job state so stale errors and branding
+    // cards from a prior generation don't persist into the new one.
+    this._theme = null;
+    this._themeJob = null;
     this.render();
     try {
       const res = await fetch(`/api/clubs/${clubId}/theme/generate`, {
@@ -630,6 +634,10 @@ class BiqOnboardApp extends HTMLElement {
     // F5: Reset staleness flag when retrying
     this._isStale = false;
     this._pollStartedAt = 0;
+    // F5: Clear previous theme/job state so stale errors and branding
+    // cards from a prior run don't persist into the retry.
+    this._theme = null;
+    this._themeJob = null;
     this.render();
     try {
       const res = await fetch(`/api/clubs/${clubId}/theme/retry`, {
@@ -727,7 +735,7 @@ class BiqOnboardApp extends HTMLElement {
           </div>
         </div>
 
-        ${jobCopy ? `
+        ${jobCopy && !(jobStatus === 'succeeded' && theme?.status === 'rejected') ? `
           <div class="onboard-card onboard-theme-job-state" data-job-state="${jobStatus}">
             <h3 class="onboard-card-title">${escapeHtml(jobCopy.title)}</h3>
             <p class="onboard-card-desc">${escapeHtml(jobCopy.description)}</p>
@@ -741,7 +749,7 @@ class BiqOnboardApp extends HTMLElement {
         ${this._loading && !theme && !jobCopy ? '<div class="onboard-loading">Cargando…</div>' : ''}
 
         ${theme ? this.renderBrandingState(theme, verdictCopy, statusCopy) : ''}
-        ${theme?.logo ? this.renderLogoSection(theme) : ''}
+        ${theme?.logo?.url ? this.renderLogoSection(theme) : ''}
         ${theme ? this.renderPreview(theme) : ''}
         ${theme ? this.renderManualPicker(club.id, theme) : this.renderManualPicker(club.id)}
         ${theme ? this.renderRevertButton(club.id) : ''}
@@ -763,7 +771,7 @@ class BiqOnboardApp extends HTMLElement {
             <h4>El tema no superó el control de contraste</h4>
             <p>Algunas combinaciones de color no cumplen WCAG 2.2 AA. Puedes ajustar manualmente los colores o usar el tema BasketIQ por defecto.</p>
             <ul class="onboard-gate-failures">
-              ${(theme.gate?.failures || []).map(f => {
+              ${(theme.gate?.failures || []).slice(0, 5).map(f => {
                 // F5: Failure objects are { fg, bg, fgHex, bgHex, ratio, required }
                 // or { fg, bg, error } — format as readable text, not [object Object]
                 if (f.error) {
@@ -773,6 +781,7 @@ class BiqOnboardApp extends HTMLElement {
                 const required = f.required != null ? f.required.toFixed(1) : '?';
                 return `<li>${escapeHtml(f.fg || '?')} sobre ${escapeHtml(f.bg || '?')}: ratio ${ratio}:1 (mínimo ${required}:1)</li>`;
               }).join('')}
+              ${(theme.gate?.failures || []).length > 5 ? `<li>… y ${(theme.gate?.failures || []).length - 5} más</li>` : ''}
             </ul>
           </div>
         ` : ''}

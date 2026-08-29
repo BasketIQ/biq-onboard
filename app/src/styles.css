@@ -556,6 +556,17 @@
   white-space: nowrap;
 }
 
+/* F12: Category header row — title left, + button right-aligned with action icons */
+.onboard-team-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.onboard-team-header .onboard-card-title {
+  margin: 0;
+}
+
 /* F12: Plain icon buttons — no box, stroke currentColor (matches biq-methodology / STT style) */
 .onboard-icon-btn {
   appearance: none;

@@ -1274,15 +1274,17 @@ class BiqOnboardApp extends HTMLElement {
       if (!hasTeams) {
         // Empty category: just show the header with + button
         return `<div class="onboard-card">
-          <h3 class="onboard-card-title">${escapeHtml(catLabel)}
+          <div class="onboard-team-header">
+            <h3 class="onboard-card-title">${escapeHtml(catLabel)}</h3>
             <button class="onboard-icon-btn" data-add-team-category="${escapeHtml(cat)}" title="Añadir equipo" aria-label="Añadir equipo a ${escapeHtml(catLabel)}">${ICON_PLUS}</button>
-          </h3>
+          </div>
         </div>`;
       }
       return `<div class="onboard-card">
-        <h3 class="onboard-card-title">${escapeHtml(catLabel)}
+        <div class="onboard-team-header">
+          <h3 class="onboard-card-title">${escapeHtml(catLabel)}</h3>
           <button class="onboard-icon-btn" data-add-team-category="${escapeHtml(cat)}" title="Añadir equipo" aria-label="Añadir equipo a ${escapeHtml(catLabel)}">${ICON_PLUS}</button>
-        </h3>
+        </div>
         <table class="onboard-team-table">
           <thead><tr><th>Nombre</th><th>Género</th><th></th></tr></thead>
           <tbody>${rows}${addRow}</tbody>

@@ -536,6 +536,47 @@
   white-space: nowrap;
 }
 
+/* F12: Plain icon buttons — no box, stroke currentColor (matches biq-methodology / STT style) */
+.onboard-icon-btn {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: none;
+  border-radius: var(--biq-radius-sm, 6px);
+  background: transparent;
+  color: var(--biq-text);
+  cursor: pointer;
+  transition: color 0.12s, background 0.12s;
+  -webkit-tap-highlight-color: transparent;
+}
+.onboard-icon-btn:hover {
+  color: var(--biq-orange, #E87722);
+  background: var(--biq-surface-2, #f5f5f5);
+}
+.onboard-icon-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--biq-orange, #E87722);
+}
+.onboard-icon-btn:active {
+  transform: scale(0.95);
+}
+.onboard-icon-btn svg {
+  width: 18px;
+  height: 18px;
+  display: block;
+}
+.onboard-icon-btn-danger {
+  color: var(--biq-red, #d32f2f);
+}
+.onboard-icon-btn-danger:hover {
+  color: var(--biq-red, #d32f2f);
+  background: var(--biq-red-soft, #FCEAEC);
+}
+
 .onboard-filter-label {
   display: flex;
   align-items: center;

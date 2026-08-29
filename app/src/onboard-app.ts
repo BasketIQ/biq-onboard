@@ -168,7 +168,16 @@ const CATEGORY_LABELS: Record<string, string> = {
   alevin: 'Alevín', infantil: 'Infantil', cadete: 'Cadete',
   junior: 'Junior', senior: 'Senior',
 };
-const GENDER_LABELS: Record<string, string> = { M: 'Masculino', F: 'Femenino', X: 'Mixto' };
+const GENDER_LABELS: Record<string, string> = { M: 'Masc', F: 'Fem', X: 'Mix' };
+
+// F12: Inline SVG icons (stroke currentColor, same style as biq-methodology / STT).
+const ICON_EDIT = '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 20h9" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const ICON_ARCHIVE = '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M3 7h18M5 7v12h14V7M10 11h4" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const ICON_RESTORE = '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/><path d="M3 3v5h5" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const ICON_TRASH = '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M3 6h18" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/><path d="M8 6V4h8v2" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/><path d="m19 6-1 14H6L5 6" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const ICON_PLUS = '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg>';
+const ICON_CHECK = '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 12.5l4.2 4.2L19 7" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const ICON_CANCEL = '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>';
 
 // ─── Helpers ────────────────────────────────────────────────────────────
 
@@ -1223,22 +1232,22 @@ class BiqOnboardApp extends HTMLElement {
             <td><input type="text" class="onboard-input onboard-input-sm" data-edit-team-name value="${escapeHtml(t.name)}" /></td>
             <td>${escapeHtml(genderLabel)}</td>
             <td class="onboard-team-actions">
-              <button class="onboard-btn onboard-btn-sm onboard-btn-primary" data-save-team="${escapeHtml(t.id)}">Guardar</button>
-              <button class="onboard-btn onboard-btn-sm onboard-btn-secondary" data-cancel-edit>Cancelar</button>
+              <button class="onboard-icon-btn" data-save-team="${escapeHtml(t.id)}" title="Guardar" aria-label="Guardar">${ICON_CHECK}</button>
+              <button class="onboard-icon-btn" data-cancel-edit title="Cancelar" aria-label="Cancelar">${ICON_CANCEL}</button>
             </td>
           </tr>`;
         }
         const actions = [
-          `<button class="onboard-btn onboard-btn-sm onboard-btn-secondary" data-edit-team="${escapeHtml(t.id)}" title="Editar nombre" aria-label="Editar nombre">✏️</button>`,
+          `<button class="onboard-icon-btn" data-edit-team="${escapeHtml(t.id)}" title="Editar nombre" aria-label="Editar nombre">${ICON_EDIT}</button>`,
         ];
         if (t.archived) {
-          // Archived teams: show unarchive (restore) + delete (physical)
-          actions.push(`<button class="onboard-btn onboard-btn-sm onboard-btn-secondary" data-unarchive-team="${escapeHtml(t.id)}" title="Restaurar" aria-label="Restaurar">↩️</button>`);
-          actions.push(`<button class="onboard-btn onboard-btn-sm onboard-btn-secondary" data-delete-team="${escapeHtml(t.id)}" title="Eliminar" aria-label="Eliminar">🗑️</button>`);
+          // Archived teams: show restore + delete (physical)
+          actions.push(`<button class="onboard-icon-btn" data-unarchive-team="${escapeHtml(t.id)}" title="Restaurar" aria-label="Restaurar">${ICON_RESTORE}</button>`);
+          actions.push(`<button class="onboard-icon-btn onboard-icon-btn-danger" data-delete-team="${escapeHtml(t.id)}" title="Eliminar" aria-label="Eliminar">${ICON_TRASH}</button>`);
         } else {
           // Active teams: archive (logical) + delete (physical)
-          actions.push(`<button class="onboard-btn onboard-btn-sm onboard-btn-secondary" data-archive-team="${escapeHtml(t.id)}" title="Archivar" aria-label="Archivar">📦</button>`);
-          actions.push(`<button class="onboard-btn onboard-btn-sm onboard-btn-secondary" data-delete-team="${escapeHtml(t.id)}" title="Eliminar" aria-label="Eliminar">🗑️</button>`);
+          actions.push(`<button class="onboard-icon-btn" data-archive-team="${escapeHtml(t.id)}" title="Archivar" aria-label="Archivar">${ICON_ARCHIVE}</button>`);
+          actions.push(`<button class="onboard-icon-btn onboard-icon-btn-danger" data-delete-team="${escapeHtml(t.id)}" title="Eliminar" aria-label="Eliminar">${ICON_TRASH}</button>`);
         }
         return `<tr data-team-row="${escapeHtml(t.id)}">
           <td>${escapeHtml(t.name)} ${archivedBadge}</td>
@@ -1251,13 +1260,13 @@ class BiqOnboardApp extends HTMLElement {
       const addRow = this._addingTeamCategory === cat ? `<tr data-adding-row="true">
         <td><input type="text" class="onboard-input onboard-input-sm" data-new-team-name placeholder="Nombre del equipo" /></td>
         <td><select class="onboard-input onboard-input-sm" data-new-team-gender>
-          <option value="M">Masculino</option>
-          <option value="F">Femenino</option>
-          <option value="X">Mixto</option>
+          <option value="M">Masc</option>
+          <option value="F">Fem</option>
+          <option value="X">Mix</option>
         </select></td>
         <td class="onboard-team-actions">
-          <button class="onboard-btn onboard-btn-sm onboard-btn-primary" data-confirm-add-team="${escapeHtml(cat)}">Añadir</button>
-          <button class="onboard-btn onboard-btn-sm onboard-btn-secondary" data-cancel-add-team>Cancelar</button>
+          <button class="onboard-icon-btn" data-confirm-add-team="${escapeHtml(cat)}" title="Confirmar" aria-label="Confirmar">${ICON_CHECK}</button>
+          <button class="onboard-icon-btn" data-cancel-add-team title="Cancelar" aria-label="Cancelar">${ICON_CANCEL}</button>
         </td>
       </tr>` : '';
 
@@ -1266,13 +1275,13 @@ class BiqOnboardApp extends HTMLElement {
         // Empty category: just show the header with + button
         return `<div class="onboard-card">
           <h3 class="onboard-card-title">${escapeHtml(catLabel)}
-            <button class="onboard-btn onboard-btn-sm onboard-btn-secondary" data-add-team-category="${escapeHtml(cat)}" title="Añadir equipo" aria-label="Añadir equipo a ${escapeHtml(catLabel)}">+</button>
+            <button class="onboard-icon-btn" data-add-team-category="${escapeHtml(cat)}" title="Añadir equipo" aria-label="Añadir equipo a ${escapeHtml(catLabel)}">${ICON_PLUS}</button>
           </h3>
         </div>`;
       }
       return `<div class="onboard-card">
         <h3 class="onboard-card-title">${escapeHtml(catLabel)}
-          <button class="onboard-btn onboard-btn-sm onboard-btn-secondary" data-add-team-category="${escapeHtml(cat)}" title="Añadir equipo" aria-label="Añadir equipo a ${escapeHtml(catLabel)}">+</button>
+          <button class="onboard-icon-btn" data-add-team-category="${escapeHtml(cat)}" title="Añadir equipo" aria-label="Añadir equipo a ${escapeHtml(catLabel)}">${ICON_PLUS}</button>
         </h3>
         <table class="onboard-team-table">
           <thead><tr><th>Nombre</th><th>Género</th><th></th></tr></thead>

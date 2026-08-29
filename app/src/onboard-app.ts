@@ -253,6 +253,9 @@ class BiqOnboardApp extends HTMLElement {
   private _teamsLoading = false;
   private _teamsError: string | null = null;
   private _editingTeamId: string | null = null;
+  private _addingTeamCategory: string | null = null;
+  private _teamsFilter: 'active' | 'all' = 'active';
+  private _deleteConfirmTeamId: string | null = null;
 
   constructor() {
     super();
@@ -1166,13 +1169,18 @@ class BiqOnboardApp extends HTMLElement {
     if (this._teamsLoading) {
       return '<div class="onboard-loading" role="status" aria-live="polite"><span class="onboard-spinner" aria-hidden="true"></span> Cargando equipos…</div>';
     }
-    if (this._teamsError) {
+    if (this._teamsError && !this._deleteConfirmTeamId) {
       return `<div class="onboard-error" role="alert">${escapeHtml(this._teamsError)}</div>`;
     }
 
+    // Filter teams based on the current filter setting.
+    const visibleTeams = this._teamsFilter === 'all'
+      ? this._teams
+      : this._teams.filter(t => !t.archived);
+
     // Group teams by category using the canonical order.
     const groups = new Map<string, typeof this._teams>();
-    for (const t of this._teams) {
+    for (const t of visibleTeams) {
       const cat = t.category || 'senior';
       if (!groups.has(cat)) groups.set(cat, []);
       groups.get(cat)!.push(t);
@@ -1186,75 +1194,125 @@ class BiqOnboardApp extends HTMLElement {
       if (!CATEGORY_ORDER.includes(cat)) ordered.push([cat, teams]);
     }
 
-    const sections = ordered.map(([cat, teams]) => {
+    // Check which categories have teams (including archived, for the + button)
+    const allCategoryIds = new Set<string>();
+    for (const t of this._teams) {
+      allCategoryIds.add(t.category || 'senior');
+    }
+    // Always show all canonical categories so + is available even if empty
+    for (const cat of CATEGORY_ORDER) {
+      allCategoryIds.add(cat);
+    }
+
+    const sections = Array.from(allCategoryIds).sort((a, b) => {
+      const ia = CATEGORY_ORDER.indexOf(a);
+      const ib = CATEGORY_ORDER.indexOf(b);
+      if (ia === -1 && ib === -1) return a.localeCompare(b);
+      if (ia === -1) return 1;
+      if (ib === -1) return -1;
+      return ia - ib;
+    }).map((cat) => {
       const catLabel = CATEGORY_LABELS[cat] || cat;
+      const teams = groups.get(cat) || [];
       const rows = teams.map((t) => {
         const genderLabel = GENDER_LABELS[t.gender || ''] || t.gender || '';
         const archivedBadge = t.archived ? '<span class="onboard-badge onboard-badge-muted">Archivado</span>' : '';
         if (this._editingTeamId === t.id) {
+          // Edit: only name is editable (pen icon → inline name field)
           return `<tr data-team-row="${escapeHtml(t.id)}" data-editing="true">
             <td><input type="text" class="onboard-input onboard-input-sm" data-edit-team-name value="${escapeHtml(t.name)}" /></td>
-            <td><select class="onboard-input onboard-input-sm" data-edit-team-category>
-              ${CATEGORY_ORDER.map(c => `<option value="${c}" ${c === t.category ? 'selected' : ''}>${escapeHtml(CATEGORY_LABELS[c] || c)}</option>`).join('')}
-            </select></td>
-            <td><select class="onboard-input onboard-input-sm" data-edit-team-gender>
-              <option value="M" ${t.gender === 'M' ? 'selected' : ''}>Masculino</option>
-              <option value="F" ${t.gender === 'F' ? 'selected' : ''}>Femenino</option>
-              <option value="X" ${t.gender === 'X' ? 'selected' : ''}>Mixto</option>
-            </select></td>
+            <td>${escapeHtml(genderLabel)}</td>
             <td class="onboard-team-actions">
               <button class="onboard-btn onboard-btn-sm onboard-btn-primary" data-save-team="${escapeHtml(t.id)}">Guardar</button>
               <button class="onboard-btn onboard-btn-sm onboard-btn-secondary" data-cancel-edit>Cancelar</button>
             </td>
           </tr>`;
         }
+        const actions = [
+          `<button class="onboard-btn onboard-btn-sm onboard-btn-secondary" data-edit-team="${escapeHtml(t.id)}" title="Editar nombre" aria-label="Editar nombre">✏️</button>`,
+        ];
+        if (t.archived) {
+          // Archived teams: show unarchive (restore) + delete (physical)
+          actions.push(`<button class="onboard-btn onboard-btn-sm onboard-btn-secondary" data-unarchive-team="${escapeHtml(t.id)}" title="Restaurar" aria-label="Restaurar">↩️</button>`);
+          actions.push(`<button class="onboard-btn onboard-btn-sm onboard-btn-secondary" data-delete-team="${escapeHtml(t.id)}" title="Eliminar" aria-label="Eliminar">🗑️</button>`);
+        } else {
+          // Active teams: archive (logical) + delete (physical)
+          actions.push(`<button class="onboard-btn onboard-btn-sm onboard-btn-secondary" data-archive-team="${escapeHtml(t.id)}" title="Archivar" aria-label="Archivar">📦</button>`);
+          actions.push(`<button class="onboard-btn onboard-btn-sm onboard-btn-secondary" data-delete-team="${escapeHtml(t.id)}" title="Eliminar" aria-label="Eliminar">🗑️</button>`);
+        }
         return `<tr data-team-row="${escapeHtml(t.id)}">
           <td>${escapeHtml(t.name)} ${archivedBadge}</td>
-          <td>${escapeHtml(catLabel)}</td>
           <td>${escapeHtml(genderLabel)}</td>
-          <td class="onboard-team-actions">
-            <button class="onboard-btn onboard-btn-sm onboard-btn-secondary" data-edit-team="${escapeHtml(t.id)}">Editar</button>
-            ${t.archived
-              ? `<button class="onboard-btn onboard-btn-sm onboard-btn-secondary" data-unarchive-team="${escapeHtml(t.id)}">Desarchivar</button>`
-              : `<button class="onboard-btn onboard-btn-sm onboard-btn-secondary" data-archive-team="${escapeHtml(t.id)}">Archivar</button>`
-            }
-          </td>
+          <td class="onboard-team-actions">${actions.join('')}</td>
         </tr>`;
       }).join('');
+
+      // Category-level add row (when _addingTeamCategory === cat)
+      const addRow = this._addingTeamCategory === cat ? `<tr data-adding-row="true">
+        <td><input type="text" class="onboard-input onboard-input-sm" data-new-team-name placeholder="Nombre del equipo" /></td>
+        <td><select class="onboard-input onboard-input-sm" data-new-team-gender>
+          <option value="M">Masculino</option>
+          <option value="F">Femenino</option>
+          <option value="X">Mixto</option>
+        </select></td>
+        <td class="onboard-team-actions">
+          <button class="onboard-btn onboard-btn-sm onboard-btn-primary" data-confirm-add-team="${escapeHtml(cat)}">Añadir</button>
+          <button class="onboard-btn onboard-btn-sm onboard-btn-secondary" data-cancel-add-team>Cancelar</button>
+        </td>
+      </tr>` : '';
+
+      const hasTeams = teams.length > 0 || this._addingTeamCategory === cat;
+      if (!hasTeams) {
+        // Empty category: just show the header with + button
+        return `<div class="onboard-card">
+          <h3 class="onboard-card-title">${escapeHtml(catLabel)}
+            <button class="onboard-btn onboard-btn-sm onboard-btn-secondary" data-add-team-category="${escapeHtml(cat)}" title="Añadir equipo" aria-label="Añadir equipo a ${escapeHtml(catLabel)}">+</button>
+          </h3>
+        </div>`;
+      }
       return `<div class="onboard-card">
-        <h3 class="onboard-card-title">${escapeHtml(catLabel)}</h3>
+        <h3 class="onboard-card-title">${escapeHtml(catLabel)}
+          <button class="onboard-btn onboard-btn-sm onboard-btn-secondary" data-add-team-category="${escapeHtml(cat)}" title="Añadir equipo" aria-label="Añadir equipo a ${escapeHtml(catLabel)}">+</button>
+        </h3>
         <table class="onboard-team-table">
-          <thead><tr><th>Nombre</th><th>Categoría</th><th>Género</th><th></th></tr></thead>
-          <tbody>${rows}</tbody>
+          <thead><tr><th>Nombre</th><th>Género</th><th></th></tr></thead>
+          <tbody>${rows}${addRow}</tbody>
         </table>
       </div>`;
     }).join('');
 
-    const addForm = `<div class="onboard-card">
-      <h3 class="onboard-card-title">Añadir equipo</h3>
-      <div class="onboard-form-row">
-        <input type="text" class="onboard-input" data-new-team-id placeholder="ID del equipo" />
-        <input type="text" class="onboard-input" data-new-team-name placeholder="Nombre" />
-      </div>
-      <div class="onboard-form-row">
-        <select class="onboard-input" data-new-team-category>
-          ${CATEGORY_ORDER.map(c => `<option value="${c}">${escapeHtml(CATEGORY_LABELS[c] || c)}</option>`).join('')}
-        </select>
-        <select class="onboard-input" data-new-team-gender>
-          <option value="M">Masculino</option>
-          <option value="F">Femenino</option>
-          <option value="X">Mixto</option>
-        </select>
-        <button class="onboard-btn onboard-btn-primary" data-add-team>Añadir</button>
-      </div>
-    </div>`;
+    // Delete confirmation modal
+    const deleteModal = this._deleteConfirmTeamId ? (() => {
+      const team = this._teams.find(t => t.id === this._deleteConfirmTeamId);
+      const teamName = team ? team.name : this._deleteConfirmTeamId;
+      return `<div class="onboard-modal-overlay" role="dialog" aria-modal="true" aria-labelledby="delete-modal-title">
+        <div class="onboard-modal">
+          <h3 id="delete-modal-title">Confirmar eliminación</h3>
+          <p>¿Seguro que quieres eliminar definitivamente el equipo <strong>${escapeHtml(teamName)}</strong>?</p>
+          <p class="onboard-card-desc">Esta acción no se puede deshacer.</p>
+          <div class="onboard-team-actions">
+            <button class="onboard-btn onboard-btn-danger" data-confirm-delete-team="${escapeHtml(this._deleteConfirmTeamId)}">Eliminar</button>
+            <button class="onboard-btn onboard-btn-secondary" data-cancel-delete>Cancelar</button>
+          </div>
+        </div>
+      </div>`;
+    })() : '';
 
     return `<section class="onboard-section">
       <h2 class="onboard-section-title">Equipos</h2>
-      <p class="onboard-card-desc">Catálogo de equipos del club. Gestiona categorías, géneros y estado.</p>
+      <div class="onboard-form-row" style="justify-content: space-between; align-items: center;">
+        <p class="onboard-card-desc" style="margin:0;">Catálogo de equipos del club.</p>
+        <label class="onboard-filter-label">
+          Ver:
+          <select class="onboard-input onboard-input-sm" data-teams-filter>
+            <option value="active" ${this._teamsFilter === 'active' ? 'selected' : ''}>Activos</option>
+            <option value="all" ${this._teamsFilter === 'all' ? 'selected' : ''}>Todos</option>
+          </select>
+        </label>
+      </div>
       ${this._teamsError ? `<div class="onboard-error" role="alert">${escapeHtml(this._teamsError)}</div>` : ''}
-      ${sections || '<p class="onboard-card-desc">No hay equipos. Crea el primero abajo.</p>'}
-      ${addForm}
+      ${sections || '<p class="onboard-card-desc">No hay equipos.</p>'}
+      ${deleteModal}
     </section>`;
   }
 
@@ -1361,6 +1419,8 @@ class BiqOnboardApp extends HTMLElement {
         const nav = (btn as HTMLElement).dataset.nav || 'club-details';
         this._subRoute = nav;
         this._editingTeamId = null;
+        this._addingTeamCategory = null;
+        this._deleteConfirmTeamId = null;
         if (nav === 'teams' && this._teams.length === 0 && !this._teamsLoading) {
           this.loadTeams(clubId);
         } else {
@@ -1369,10 +1429,24 @@ class BiqOnboardApp extends HTMLElement {
       });
     });
 
-    // Edit team
+    // Filter toggle (active / all)
+    const filterSelect = this.shadow.querySelector('[data-teams-filter]');
+    if (filterSelect) {
+      filterSelect.addEventListener('change', () => {
+        this._teamsFilter = (filterSelect as HTMLSelectElement).value as 'active' | 'all';
+        this._editingTeamId = null;
+        this._addingTeamCategory = null;
+        this._deleteConfirmTeamId = null;
+        this.render();
+      });
+    }
+
+    // Edit team (pen icon → only name editable)
     this.shadow.querySelectorAll('[data-edit-team]').forEach(btn => {
       btn.addEventListener('click', () => {
         this._editingTeamId = (btn as HTMLElement).dataset.editTeam || '';
+        this._addingTeamCategory = null;
+        this._deleteConfirmTeamId = null;
         this.render();
       });
     });
@@ -1386,21 +1460,24 @@ class BiqOnboardApp extends HTMLElement {
       });
     }
 
-    // Save team edit
+    // Save team edit (only name is sent)
     this.shadow.querySelectorAll('[data-save-team]').forEach(btn => {
       btn.addEventListener('click', async () => {
         const teamId = (btn as HTMLElement).dataset.saveTeam || '';
         const row = this.shadow.querySelector(`tr[data-team-row="${CSS.escape(teamId)}"][data-editing="true"]`);
         if (!row) return;
-        const name = (row.querySelector('[data-edit-team-name]') as HTMLInputElement)?.value || '';
-        const category = (row.querySelector('[data-edit-team-category]') as HTMLSelectElement)?.value || '';
-        const gender = (row.querySelector('[data-edit-team-gender]') as HTMLSelectElement)?.value || '';
+        const name = (row.querySelector('[data-edit-team-name]') as HTMLInputElement)?.value.trim() || '';
+        if (!name) {
+          this._teamsError = 'El nombre es obligatorio.';
+          this.render();
+          return;
+        }
         try {
           const res = await fetch(`/api/clubs/${clubId}/teams/${teamId}`, {
             method: 'PUT',
             credentials: 'include',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name, category, gender }),
+            body: JSON.stringify({ name }),
           });
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
           this._editingTeamId = null;
@@ -1412,7 +1489,7 @@ class BiqOnboardApp extends HTMLElement {
       });
     });
 
-    // Archive team
+    // Archive team (logical — 📦 icon)
     this.shadow.querySelectorAll('[data-archive-team]').forEach(btn => {
       btn.addEventListener('click', async () => {
         const teamId = (btn as HTMLElement).dataset.archiveTeam || '';
@@ -1430,7 +1507,7 @@ class BiqOnboardApp extends HTMLElement {
       });
     });
 
-    // Unarchive team
+    // Unarchive team (restore — ↩️ icon, only visible when filter=all)
     this.shadow.querySelectorAll('[data-unarchive-team]').forEach(btn => {
       btn.addEventListener('click', async () => {
         const teamId = (btn as HTMLElement).dataset.unarchiveTeam || '';
@@ -1448,19 +1525,80 @@ class BiqOnboardApp extends HTMLElement {
       });
     });
 
-    // Add team
-    const addBtn = this.shadow.querySelector('[data-add-team]');
-    if (addBtn) {
-      addBtn.addEventListener('click', async () => {
-        const id = (this.shadow.querySelector('[data-new-team-id]') as HTMLInputElement)?.value.trim() || '';
-        const name = (this.shadow.querySelector('[data-new-team-name]') as HTMLInputElement)?.value.trim() || '';
-        const category = (this.shadow.querySelector('[data-new-team-category]') as HTMLSelectElement)?.value || '';
-        const gender = (this.shadow.querySelector('[data-new-team-gender]') as HTMLSelectElement)?.value || '';
-        if (!id || !name) {
-          this._teamsError = 'ID y nombre son obligatorios.';
+    // Delete team (physical — 🗑️ icon → opens confirmation modal)
+    this.shadow.querySelectorAll('[data-delete-team]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        this._deleteConfirmTeamId = (btn as HTMLElement).dataset.deleteTeam || '';
+        this._editingTeamId = null;
+        this._addingTeamCategory = null;
+        this.render();
+      });
+    });
+
+    // Cancel delete (modal)
+    const cancelDeleteBtn = this.shadow.querySelector('[data-cancel-delete]');
+    if (cancelDeleteBtn) {
+      cancelDeleteBtn.addEventListener('click', () => {
+        this._deleteConfirmTeamId = null;
+        this.render();
+      });
+    }
+
+    // Confirm delete (modal → physical DELETE)
+    this.shadow.querySelectorAll('[data-confirm-delete-team]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const teamId = (btn as HTMLElement).dataset.confirmDeleteTeam || '';
+        try {
+          const res = await fetch(`/api/clubs/${clubId}/teams/${teamId}`, {
+            method: 'DELETE',
+            credentials: 'include',
+          });
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          this._deleteConfirmTeamId = null;
+          await this.loadTeams(clubId);
+        } catch (err) {
+          this._teamsError = (err as Error).message;
+          this._deleteConfirmTeamId = null;
+          this.render();
+        }
+      });
+    });
+
+    // Category-level Add (+) — show inline add row under the category
+    this.shadow.querySelectorAll('[data-add-team-category]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        this._addingTeamCategory = (btn as HTMLElement).dataset.addTeamCategory || '';
+        this._editingTeamId = null;
+        this._deleteConfirmTeamId = null;
+        this.render();
+      });
+    });
+
+    // Cancel add team
+    const cancelAddBtn = this.shadow.querySelector('[data-cancel-add-team]');
+    if (cancelAddBtn) {
+      cancelAddBtn.addEventListener('click', () => {
+        this._addingTeamCategory = null;
+        this.render();
+      });
+    }
+
+    // Confirm add team (from category-level inline row)
+    this.shadow.querySelectorAll('[data-confirm-add-team]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const category = (btn as HTMLElement).dataset.confirmAddTeam || '';
+        const addRow = this.shadow.querySelector('tr[data-adding-row="true"]');
+        if (!addRow) return;
+        const name = (addRow.querySelector('[data-new-team-name]') as HTMLInputElement)?.value.trim() || '';
+        const gender = (addRow.querySelector('[data-new-team-gender]') as HTMLSelectElement)?.value || 'M';
+        if (!name) {
+          this._teamsError = 'El nombre es obligatorio.';
           this.render();
           return;
         }
+        // Generate a deterministic ID from club + category + gender + name slug
+        const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
+        const id = `${clubId}_${category}_${gender.toLowerCase()}_${slug}`;
         try {
           const res = await fetch(`/api/clubs/${clubId}/teams`, {
             method: 'POST',
@@ -1469,13 +1607,14 @@ class BiqOnboardApp extends HTMLElement {
             body: JSON.stringify({ id, club_id: clubId, name, category, gender }),
           });
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          this._addingTeamCategory = null;
           await this.loadTeams(clubId);
         } catch (err) {
           this._teamsError = (err as Error).message;
           this.render();
         }
       });
-    }
+    });
   }
 }
 

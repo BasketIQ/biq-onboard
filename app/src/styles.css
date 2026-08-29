@@ -505,3 +505,76 @@
   border-radius: 8px;
   font-size: 14px;
 }
+
+/* F12: Equipos tab — team table, filter, modal */
+
+.onboard-team-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 8px;
+}
+
+.onboard-team-table th {
+  text-align: left;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--biq-muted);
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--biq-border, #e0e0e0);
+}
+
+.onboard-team-table td {
+  padding: 8px;
+  font-size: 14px;
+  border-bottom: 1px solid var(--biq-border, #f0f0f0);
+}
+
+.onboard-team-actions {
+  display: flex;
+  gap: 4px;
+  justify-content: flex-end;
+  white-space: nowrap;
+}
+
+.onboard-filter-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--biq-muted);
+}
+
+.onboard-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.onboard-modal {
+  background: var(--biq-surface, #fff);
+  border-radius: 12px;
+  padding: 24px;
+  max-width: 400px;
+  width: 90%;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+}
+
+.onboard-modal h3 {
+  margin: 0 0 12px 0;
+  font-size: 18px;
+}
+
+.onboard-modal p {
+  margin: 0 0 8px 0;
+  font-size: 14px;
+}
+
+.onboard-modal .onboard-team-actions {
+  margin-top: 16px;
+  justify-content: flex-end;
+}

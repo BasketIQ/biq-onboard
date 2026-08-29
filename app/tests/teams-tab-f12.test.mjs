@@ -59,6 +59,7 @@ const SEED_TEAMS = [
   { id: 'team_club1_senior_m', club_id: 'club1', name: 'Senior Masculino', category: 'senior', gender: 'M', label: '', archived: false },
   { id: 'team_club1_senior_f', club_id: 'club1', name: 'Senior Femenino', category: 'senior', gender: 'F', label: '', archived: false },
   { id: 'team_club1_cadete_m', club_id: 'club1', name: 'Cadete Masculino', category: 'cadete', gender: 'M', label: '2011', archived: false },
+  { id: 'team_club1_cadete_f', club_id: 'club1', name: 'Cadete Femenino', category: 'cadete', gender: 'F', label: '', archived: true },
 ];
 
 async function newPage(browser) {
@@ -101,6 +102,11 @@ async function newPage(browser) {
       await json({ ok: true, team: { id: 'new', name: 'New' } });
       return;
     }
+    // DELETE .../teams/{teamId} → physical delete
+    if (u.match(/\/teams\/[^/]+$/) && method === 'DELETE') {
+      await json({ ok: true, team_id: 'deleted' });
+      return;
+    }
     await json({ ok: true });
   });
 
@@ -127,7 +133,7 @@ async function newPage(browser) {
 test.before(async () => { await startServer(); });
 test.after(async () => { await stopServer(); });
 
-test('F12: Equipos tab lists teams grouped by category and allows archive', async () => {
+test('F12: Equipos tab lists active teams, filter shows archived, archive works', async () => {
   const browser = await chromium.launch();
   const { page, log } = await newPage(browser);
 
@@ -145,33 +151,36 @@ test('F12: Equipos tab lists teams grouped by category and allows archive', asyn
   // Verify teams were fetched
   assert.ok(log.some((e) => e.url.includes('/teams') && e.method === 'GET'), 'teams API called');
 
-  // Verify team rows are rendered
+  // Default filter is "active" — only 3 active teams should be visible (1 archived hidden)
   const rowCount = await page.evaluate(() => {
     return document.getElementById('app').shadowRoot.querySelectorAll('tr[data-team-row]').length;
   });
-  assert.equal(rowCount, 3, '3 seed teams rendered');
+  assert.equal(rowCount, 3, '3 active teams rendered (archived hidden by default)');
 
-  // Verify category grouping (Senior and Cadete sections)
-  const sectionTitles = await page.evaluate(() => {
-    return Array.from(document.getElementById('app').shadowRoot.querySelectorAll('.onboard-card-title'))
-      .map((el) => el.textContent.trim());
+  // Switch filter to "all" — now 4 teams should be visible
+  await page.evaluate(() => {
+    const select = document.getElementById('app').shadowRoot.querySelector('[data-teams-filter]');
+    select.value = 'all';
+    select.dispatchEvent(new Event('change', { bubbles: true }));
   });
-  assert.ok(sectionTitles.includes('Senior'), 'Senior category section present');
-  assert.ok(sectionTitles.includes('Cadete'), 'Cadete category section present');
+  await page.waitForFunction(() => {
+    return document.getElementById('app').shadowRoot.querySelectorAll('tr[data-team-row]').length === 4;
+  }, { timeout: 10000 });
 
-  // Click archive on the first team
+  // Verify the unarchive button is visible for archived teams
+  const unarchiveBtn = await page.evaluate(() => {
+    return !!document.getElementById('app').shadowRoot.querySelector('[data-unarchive-team]');
+  });
+  assert.ok(unarchiveBtn, 'unarchive button visible for archived team when filter=all');
+
+  // Click archive on the first active team
   await page.evaluate(() => {
     const btn = document.getElementById('app').shadowRoot.querySelector('[data-archive-team]');
     if (btn) btn.click();
   });
 
   // Wait for the archive API call
-  await page.waitForFunction(
-    () => window.__testArchiveCalled,
-    { timeout: 10000 }
-  ).catch(() => {});
-
-  // Check the archive request was made
+  await page.waitForTimeout(500);
   const archiveCalls = log.filter((e) => e.url.includes('/archive') && e.method === 'PUT');
   assert.equal(archiveCalls.length, 1, 'exactly one archive request');
 
@@ -217,6 +226,47 @@ test('F12: Edit team opens inline form and saves via PUT', async () => {
   assert.ok(putCalls.length >= 1, 'PUT request made to update team');
   const body = JSON.parse(putCalls[0].postData || '{}');
   assert.equal(body.name, 'Senior Masculino Editado', 'updated name sent in PUT body');
+
+  await browser.close();
+});
+
+test('F12: Delete team opens confirmation modal and sends DELETE on confirm', async () => {
+  const browser = await chromium.launch();
+  const { page, log } = await newPage(browser);
+
+  // Navigate to Equipos tab
+  await page.evaluate(() => {
+    document.getElementById('app').shadowRoot.querySelector('[data-nav="teams"]').click();
+  });
+  await page.waitForFunction(() => {
+    const el = document.getElementById('app');
+    return !!(el.shadowRoot && el.shadowRoot.querySelector('.onboard-team-table'));
+  }, { timeout: 10000 });
+
+  // Click delete (🗑️) on the first team
+  await page.evaluate(() => {
+    const btn = document.getElementById('app').shadowRoot.querySelector('[data-delete-team]');
+    if (btn) btn.click();
+  });
+
+  // Verify the confirmation modal appears
+  await page.waitForFunction(() => {
+    return !!document.getElementById('app').shadowRoot.querySelector('[data-confirm-delete-team]');
+  }, { timeout: 10000 });
+  const modalExists = await page.evaluate(() => {
+    return !!document.getElementById('app').shadowRoot.querySelector('.onboard-modal');
+  });
+  assert.ok(modalExists, 'delete confirmation modal appears');
+
+  // Confirm the deletion
+  await page.evaluate(() => {
+    document.getElementById('app').shadowRoot.querySelector('[data-confirm-delete-team]').click();
+  });
+
+  // Wait for the DELETE request
+  await page.waitForTimeout(500);
+  const deleteCalls = log.filter((e) => e.method === 'DELETE');
+  assert.equal(deleteCalls.length, 1, 'exactly one DELETE request after confirmation');
 
   await browser.close();
 });

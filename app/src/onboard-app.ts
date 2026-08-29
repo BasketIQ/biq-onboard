@@ -161,6 +161,24 @@ const THEME_JOB_COPY: Record<string, { title: string; description: string; actio
   },
 };
 
+// F12: Canonical category taxonomy (mirrors shell.js CATEGORY_ORDER)
+const CATEGORY_ORDER = ['babybasket', 'prebenjamin', 'benjamin', 'alevin', 'infantil', 'cadete', 'junior', 'senior'];
+const CATEGORY_LABELS: Record<string, string> = {
+  babybasket: 'Babybasket', prebenjamin: 'Prebenjamín', benjamin: 'Benjamín',
+  alevin: 'Alevín', infantil: 'Infantil', cadete: 'Cadete',
+  junior: 'Junior', senior: 'Senior',
+};
+const GENDER_LABELS: Record<string, string> = { M: 'Masc', F: 'Fem', X: 'Mix' };
+
+// F12: Inline SVG icons (stroke currentColor, same style as biq-methodology / STT).
+const ICON_EDIT = '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 20h9" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const ICON_ARCHIVE = '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M3 7h18M5 7v12h14V7M10 11h4" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const ICON_RESTORE = '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/><path d="M3 3v5h5" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const ICON_TRASH = '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M3 6h18" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/><path d="M8 6V4h8v2" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/><path d="m19 6-1 14H6L5 6" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const ICON_PLUS = '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg>';
+const ICON_CHECK = '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 12.5l4.2 4.2L19 7" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const ICON_CANCEL = '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>';
+
 // ─── Helpers ────────────────────────────────────────────────────────────
 
 const escapeHtml = (s: string): string =>
@@ -239,6 +257,14 @@ class BiqOnboardApp extends HTMLElement {
   private _pollBackoff = 3000; // C11: starts at 3s, backs off
   private _polling = false; // C11: prevent overlap
   private _visibilityHandler: (() => void) | null = null; // C11: visibility handling
+  // F12: Team catalog management
+  private _teams: Array<{ id: string; name: string; category: string | null; gender: string | null; label: string | null; archived: boolean }> = [];
+  private _teamsLoading = false;
+  private _teamsError: string | null = null;
+  private _editingTeamId: string | null = null;
+  private _addingTeamCategory: string | null = null;
+  private _teamsFilter: 'active' | 'all' = 'active';
+  private _deleteConfirmTeamId: string | null = null;
 
   constructor() {
     super();
@@ -291,6 +317,27 @@ class BiqOnboardApp extends HTMLElement {
       this._error = (err as Error).message;
     } finally {
       this._loading = false;
+      this.render();
+    }
+  }
+
+  // F12: Load the club's team catalog from the teams API.
+  private async loadTeams(clubId: string): Promise<void> {
+    this._teamsLoading = true;
+    this._teamsError = null;
+    this.render();
+    try {
+      const res = await fetch(`/api/clubs/${clubId}/teams`, {
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      this._teams = data.teams || [];
+    } catch (err) {
+      this._teamsError = (err as Error).message;
+    } finally {
+      this._teamsLoading = false;
       this.render();
     }
   }
@@ -584,6 +631,8 @@ class BiqOnboardApp extends HTMLElement {
     let content = '';
     if (section === 'profile') {
       content = this.renderProfile();
+    } else if (section === 'teams') {
+      content = this.renderTeamsTab(club.id);
     } else {
       content = this.renderClubDetails(club);
     }
@@ -592,11 +641,16 @@ class BiqOnboardApp extends HTMLElement {
       <div class="onboard-app">
         <nav class="onboard-nav">
           <button class="onboard-nav-item ${section === 'club-details' ? 'active' : ''}" data-nav="club-details">Club</button>
+          <button class="onboard-nav-item ${section === 'teams' ? 'active' : ''}" data-nav="teams">Equipos</button>
           <button class="onboard-nav-item ${section === 'profile' ? 'active' : ''}" data-nav="profile">Perfil</button>
         </nav>
         ${content}
       </div>`;
-    this.wireEvents(club.id);
+    if (section === 'teams') {
+      this.wireTeamsEvents(club.id);
+    } else {
+      this.wireEvents(club.id);
+    }
   }
 
   private renderClubDetails(club: { id: string; name?: string; website?: string }): string {
@@ -1119,6 +1173,160 @@ class BiqOnboardApp extends HTMLElement {
     }
   }
 
+  // F12: Render the Equipos tab — club team catalog management.
+  private renderTeamsTab(clubId: string): string {
+    if (this._teamsLoading) {
+      return '<div class="onboard-loading" role="status" aria-live="polite"><span class="onboard-spinner" aria-hidden="true"></span> Cargando equipos…</div>';
+    }
+    if (this._teamsError && !this._deleteConfirmTeamId) {
+      return `<div class="onboard-error" role="alert">${escapeHtml(this._teamsError)}</div>`;
+    }
+
+    // Filter teams based on the current filter setting.
+    const visibleTeams = this._teamsFilter === 'all'
+      ? this._teams
+      : this._teams.filter(t => !t.archived);
+
+    // Group teams by category using the canonical order.
+    const groups = new Map<string, typeof this._teams>();
+    for (const t of visibleTeams) {
+      const cat = t.category || 'senior';
+      if (!groups.has(cat)) groups.set(cat, []);
+      groups.get(cat)!.push(t);
+    }
+    const ordered: [string, typeof this._teams][] = [];
+    for (const cat of CATEGORY_ORDER) {
+      if (groups.has(cat)) ordered.push([cat, groups.get(cat)!]);
+    }
+    // Non-canonical categories at the end (defensive).
+    for (const [cat, teams] of groups) {
+      if (!CATEGORY_ORDER.includes(cat)) ordered.push([cat, teams]);
+    }
+
+    // Check which categories have teams (including archived, for the + button)
+    const allCategoryIds = new Set<string>();
+    for (const t of this._teams) {
+      allCategoryIds.add(t.category || 'senior');
+    }
+    // Always show all canonical categories so + is available even if empty
+    for (const cat of CATEGORY_ORDER) {
+      allCategoryIds.add(cat);
+    }
+
+    const sections = Array.from(allCategoryIds).sort((a, b) => {
+      const ia = CATEGORY_ORDER.indexOf(a);
+      const ib = CATEGORY_ORDER.indexOf(b);
+      if (ia === -1 && ib === -1) return a.localeCompare(b);
+      if (ia === -1) return 1;
+      if (ib === -1) return -1;
+      return ia - ib;
+    }).map((cat) => {
+      const catLabel = CATEGORY_LABELS[cat] || cat;
+      const teams = groups.get(cat) || [];
+      const rows = teams.map((t) => {
+        const genderLabel = GENDER_LABELS[t.gender || ''] || t.gender || '';
+        const archivedBadge = t.archived ? '<span class="onboard-badge onboard-badge-muted">Archivado</span>' : '';
+        if (this._editingTeamId === t.id) {
+          // Edit: only name is editable (pen icon → inline name field)
+          return `<tr data-team-row="${escapeHtml(t.id)}" data-editing="true">
+            <td><input type="text" class="onboard-input onboard-input-sm" data-edit-team-name value="${escapeHtml(t.name)}" /></td>
+            <td>${escapeHtml(genderLabel)}</td>
+            <td class="onboard-team-actions">
+              <button class="onboard-icon-btn" data-save-team="${escapeHtml(t.id)}" title="Guardar" aria-label="Guardar">${ICON_CHECK}</button>
+              <button class="onboard-icon-btn" data-cancel-edit title="Cancelar" aria-label="Cancelar">${ICON_CANCEL}</button>
+            </td>
+          </tr>`;
+        }
+        const actions = [
+          `<button class="onboard-icon-btn" data-edit-team="${escapeHtml(t.id)}" title="Editar nombre" aria-label="Editar nombre">${ICON_EDIT}</button>`,
+        ];
+        if (t.archived) {
+          // Archived teams: show restore + delete (physical)
+          actions.push(`<button class="onboard-icon-btn" data-unarchive-team="${escapeHtml(t.id)}" title="Restaurar" aria-label="Restaurar">${ICON_RESTORE}</button>`);
+          actions.push(`<button class="onboard-icon-btn onboard-icon-btn-danger" data-delete-team="${escapeHtml(t.id)}" title="Eliminar" aria-label="Eliminar">${ICON_TRASH}</button>`);
+        } else {
+          // Active teams: archive (logical) + delete (physical)
+          actions.push(`<button class="onboard-icon-btn" data-archive-team="${escapeHtml(t.id)}" title="Archivar" aria-label="Archivar">${ICON_ARCHIVE}</button>`);
+          actions.push(`<button class="onboard-icon-btn onboard-icon-btn-danger" data-delete-team="${escapeHtml(t.id)}" title="Eliminar" aria-label="Eliminar">${ICON_TRASH}</button>`);
+        }
+        return `<tr data-team-row="${escapeHtml(t.id)}">
+          <td>${escapeHtml(t.name)} ${archivedBadge}</td>
+          <td>${escapeHtml(genderLabel)}</td>
+          <td class="onboard-team-actions">${actions.join('')}</td>
+        </tr>`;
+      }).join('');
+
+      // Category-level add row (when _addingTeamCategory === cat)
+      const addRow = this._addingTeamCategory === cat ? `<tr data-adding-row="true">
+        <td><input type="text" class="onboard-input onboard-input-sm" data-new-team-name placeholder="Nombre del equipo" /></td>
+        <td><select class="onboard-input onboard-input-sm" data-new-team-gender>
+          <option value="M">Masc</option>
+          <option value="F">Fem</option>
+          <option value="X">Mix</option>
+        </select></td>
+        <td class="onboard-team-actions">
+          <button class="onboard-icon-btn" data-confirm-add-team="${escapeHtml(cat)}" title="Confirmar" aria-label="Confirmar">${ICON_CHECK}</button>
+          <button class="onboard-icon-btn" data-cancel-add-team title="Cancelar" aria-label="Cancelar">${ICON_CANCEL}</button>
+        </td>
+      </tr>` : '';
+
+      const hasTeams = teams.length > 0 || this._addingTeamCategory === cat;
+      if (!hasTeams) {
+        // Empty category: just show the header with + button
+        return `<div class="onboard-card">
+          <div class="onboard-team-header">
+            <h3 class="onboard-card-title">${escapeHtml(catLabel)}</h3>
+            <button class="onboard-icon-btn" data-add-team-category="${escapeHtml(cat)}" title="Añadir equipo" aria-label="Añadir equipo a ${escapeHtml(catLabel)}">${ICON_PLUS}</button>
+          </div>
+        </div>`;
+      }
+      return `<div class="onboard-card">
+        <div class="onboard-team-header">
+          <h3 class="onboard-card-title">${escapeHtml(catLabel)}</h3>
+          <button class="onboard-icon-btn" data-add-team-category="${escapeHtml(cat)}" title="Añadir equipo" aria-label="Añadir equipo a ${escapeHtml(catLabel)}">${ICON_PLUS}</button>
+        </div>
+        <table class="onboard-team-table">
+          <thead><tr><th>Nombre</th><th>Género</th><th></th></tr></thead>
+          <tbody>${rows}${addRow}</tbody>
+        </table>
+      </div>`;
+    }).join('');
+
+    // Delete confirmation modal
+    const deleteModal = this._deleteConfirmTeamId ? (() => {
+      const team = this._teams.find(t => t.id === this._deleteConfirmTeamId);
+      const teamName = team ? team.name : this._deleteConfirmTeamId;
+      return `<div class="onboard-modal-overlay" role="dialog" aria-modal="true" aria-labelledby="delete-modal-title">
+        <div class="onboard-modal">
+          <h3 id="delete-modal-title">Confirmar eliminación</h3>
+          <p>¿Seguro que quieres eliminar definitivamente el equipo <strong>${escapeHtml(teamName)}</strong>?</p>
+          <p class="onboard-card-desc">Esta acción no se puede deshacer.</p>
+          <div class="onboard-team-actions">
+            <button class="onboard-btn onboard-btn-danger" data-confirm-delete-team="${escapeHtml(this._deleteConfirmTeamId)}">Eliminar</button>
+            <button class="onboard-btn onboard-btn-secondary" data-cancel-delete>Cancelar</button>
+          </div>
+        </div>
+      </div>`;
+    })() : '';
+
+    return `<section class="onboard-section">
+      <h2 class="onboard-section-title">Equipos</h2>
+      <div class="onboard-form-row" style="justify-content: space-between; align-items: center;">
+        <p class="onboard-card-desc" style="margin:0;">Catálogo de equipos del club.</p>
+        <label class="onboard-filter-label">
+          Ver:
+          <select class="onboard-input onboard-input-sm" data-teams-filter>
+            <option value="active" ${this._teamsFilter === 'active' ? 'selected' : ''}>Activos</option>
+            <option value="all" ${this._teamsFilter === 'all' ? 'selected' : ''}>Todos</option>
+          </select>
+        </label>
+      </div>
+      ${this._teamsError ? `<div class="onboard-error" role="alert">${escapeHtml(this._teamsError)}</div>` : ''}
+      ${sections || '<p class="onboard-card-desc">No hay equipos.</p>'}
+      ${deleteModal}
+    </section>`;
+  }
+
   private renderProfile(): string {
     const user = this._user || 'Usuario';
     const club = this._org?.club;
@@ -1146,8 +1354,14 @@ class BiqOnboardApp extends HTMLElement {
     // Navigation
     this.shadow.querySelectorAll('[data-nav]').forEach(btn => {
       btn.addEventListener('click', () => {
-        this._subRoute = (btn as HTMLElement).dataset.nav || 'club-details';
-        this.render();
+        const nav = (btn as HTMLElement).dataset.nav || 'club-details';
+        this._subRoute = nav;
+        // F12: Load teams when navigating to the Equipos tab.
+        if (nav === 'teams' && this._teams.length === 0 && !this._teamsLoading) {
+          this.loadTeams(clubId);
+        } else {
+          this.render();
+        }
       });
     });
 
@@ -1206,6 +1420,212 @@ class BiqOnboardApp extends HTMLElement {
     if (retryBtn) {
       retryBtn.addEventListener('click', () => this.retryTheme(clubId));
     }
+  }
+
+  // F12: Wire events for the Equipos tab.
+  private wireTeamsEvents(clubId: string): void {
+    // Navigation (same as wireEvents but routes to teams-specific wiring)
+    this.shadow.querySelectorAll('[data-nav]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const nav = (btn as HTMLElement).dataset.nav || 'club-details';
+        this._subRoute = nav;
+        this._editingTeamId = null;
+        this._addingTeamCategory = null;
+        this._deleteConfirmTeamId = null;
+        if (nav === 'teams' && this._teams.length === 0 && !this._teamsLoading) {
+          this.loadTeams(clubId);
+        } else {
+          this.render();
+        }
+      });
+    });
+
+    // Filter toggle (active / all)
+    const filterSelect = this.shadow.querySelector('[data-teams-filter]');
+    if (filterSelect) {
+      filterSelect.addEventListener('change', () => {
+        this._teamsFilter = (filterSelect as HTMLSelectElement).value as 'active' | 'all';
+        this._editingTeamId = null;
+        this._addingTeamCategory = null;
+        this._deleteConfirmTeamId = null;
+        this.render();
+      });
+    }
+
+    // Edit team (pen icon → only name editable)
+    this.shadow.querySelectorAll('[data-edit-team]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        this._editingTeamId = (btn as HTMLElement).dataset.editTeam || '';
+        this._addingTeamCategory = null;
+        this._deleteConfirmTeamId = null;
+        this.render();
+      });
+    });
+
+    // Cancel edit
+    const cancelBtn = this.shadow.querySelector('[data-cancel-edit]');
+    if (cancelBtn) {
+      cancelBtn.addEventListener('click', () => {
+        this._editingTeamId = null;
+        this.render();
+      });
+    }
+
+    // Save team edit (only name is sent)
+    this.shadow.querySelectorAll('[data-save-team]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const teamId = (btn as HTMLElement).dataset.saveTeam || '';
+        const row = this.shadow.querySelector(`tr[data-team-row="${CSS.escape(teamId)}"][data-editing="true"]`);
+        if (!row) return;
+        const name = (row.querySelector('[data-edit-team-name]') as HTMLInputElement)?.value.trim() || '';
+        if (!name) {
+          this._teamsError = 'El nombre es obligatorio.';
+          this.render();
+          return;
+        }
+        try {
+          const res = await fetch(`/api/clubs/${clubId}/teams/${teamId}`, {
+            method: 'PUT',
+            credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name }),
+          });
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          this._editingTeamId = null;
+          await this.loadTeams(clubId);
+        } catch (err) {
+          this._teamsError = (err as Error).message;
+          this.render();
+        }
+      });
+    });
+
+    // Archive team (logical — 📦 icon)
+    this.shadow.querySelectorAll('[data-archive-team]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const teamId = (btn as HTMLElement).dataset.archiveTeam || '';
+        try {
+          const res = await fetch(`/api/clubs/${clubId}/teams/${teamId}/archive`, {
+            method: 'PUT',
+            credentials: 'include',
+          });
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          await this.loadTeams(clubId);
+        } catch (err) {
+          this._teamsError = (err as Error).message;
+          this.render();
+        }
+      });
+    });
+
+    // Unarchive team (restore — ↩️ icon, only visible when filter=all)
+    this.shadow.querySelectorAll('[data-unarchive-team]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const teamId = (btn as HTMLElement).dataset.unarchiveTeam || '';
+        try {
+          const res = await fetch(`/api/clubs/${clubId}/teams/${teamId}/unarchive`, {
+            method: 'PUT',
+            credentials: 'include',
+          });
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          await this.loadTeams(clubId);
+        } catch (err) {
+          this._teamsError = (err as Error).message;
+          this.render();
+        }
+      });
+    });
+
+    // Delete team (physical — 🗑️ icon → opens confirmation modal)
+    this.shadow.querySelectorAll('[data-delete-team]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        this._deleteConfirmTeamId = (btn as HTMLElement).dataset.deleteTeam || '';
+        this._editingTeamId = null;
+        this._addingTeamCategory = null;
+        this.render();
+      });
+    });
+
+    // Cancel delete (modal)
+    const cancelDeleteBtn = this.shadow.querySelector('[data-cancel-delete]');
+    if (cancelDeleteBtn) {
+      cancelDeleteBtn.addEventListener('click', () => {
+        this._deleteConfirmTeamId = null;
+        this.render();
+      });
+    }
+
+    // Confirm delete (modal → physical DELETE)
+    this.shadow.querySelectorAll('[data-confirm-delete-team]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const teamId = (btn as HTMLElement).dataset.confirmDeleteTeam || '';
+        try {
+          const res = await fetch(`/api/clubs/${clubId}/teams/${teamId}`, {
+            method: 'DELETE',
+            credentials: 'include',
+          });
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          this._deleteConfirmTeamId = null;
+          await this.loadTeams(clubId);
+        } catch (err) {
+          this._teamsError = (err as Error).message;
+          this._deleteConfirmTeamId = null;
+          this.render();
+        }
+      });
+    });
+
+    // Category-level Add (+) — show inline add row under the category
+    this.shadow.querySelectorAll('[data-add-team-category]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        this._addingTeamCategory = (btn as HTMLElement).dataset.addTeamCategory || '';
+        this._editingTeamId = null;
+        this._deleteConfirmTeamId = null;
+        this.render();
+      });
+    });
+
+    // Cancel add team
+    const cancelAddBtn = this.shadow.querySelector('[data-cancel-add-team]');
+    if (cancelAddBtn) {
+      cancelAddBtn.addEventListener('click', () => {
+        this._addingTeamCategory = null;
+        this.render();
+      });
+    }
+
+    // Confirm add team (from category-level inline row)
+    this.shadow.querySelectorAll('[data-confirm-add-team]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const category = (btn as HTMLElement).dataset.confirmAddTeam || '';
+        const addRow = this.shadow.querySelector('tr[data-adding-row="true"]');
+        if (!addRow) return;
+        const name = (addRow.querySelector('[data-new-team-name]') as HTMLInputElement)?.value.trim() || '';
+        const gender = (addRow.querySelector('[data-new-team-gender]') as HTMLSelectElement)?.value || 'M';
+        if (!name) {
+          this._teamsError = 'El nombre es obligatorio.';
+          this.render();
+          return;
+        }
+        // Generate a deterministic ID from club + category + gender + name slug
+        const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
+        const id = `${clubId}_${category}_${gender.toLowerCase()}_${slug}`;
+        try {
+          const res = await fetch(`/api/clubs/${clubId}/teams`, {
+            method: 'POST',
+            credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id, club_id: clubId, name, category, gender }),
+          });
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          this._addingTeamCategory = null;
+          await this.loadTeams(clubId);
+        } catch (err) {
+          this._teamsError = (err as Error).message;
+          this.render();
+        }
+      });
+    });
   }
 }
 

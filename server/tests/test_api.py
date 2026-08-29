@@ -485,3 +485,139 @@ def test_archive_team_requires_admin(client, admin_client):
     client.post("/api/auth/login", json={"username": "plain_" + club_id, "password": "secret123"})
     r = client.put(f"/api/admin/clubs/{club_id}/teams/{team_id}/archive")
     assert r.status_code == 403
+
+
+# ─── F12: Team-catalog authorization (admin + sports_director, not coach) ──
+
+
+@pytest.fixture
+def f12_client(monkeypatch):
+    """Client with memory stores and a shared role registry for F12 tests."""
+    monkeypatch.setenv("BIQ_ORG_STORE", "memory")
+    monkeypatch.setenv("BIQ_ROLES_STORE", "memory")
+    from biq_onboard_server import org
+    org.reset_for_tests()
+    app = create_app()
+    c = TestClient(app)
+    # Login as break-glass admin to seed data
+    c.post("/api/auth/login", json={"username": "admin", "password": "T3st1ng!"})
+    return c
+
+
+def _f12_seed_club_and_users(client, club_id="club_f12"):
+    """Seed a club with admin, sports_director, and coach users + role assignments."""
+    from biq_onboard_server import org
+    from biq_core.org import Club, User
+    from biq_core.roles import RoleAssignment
+
+    reg = org.get_registry()
+    roles_reg = org.get_roles()
+    scope = f"club:{club_id}"
+
+    reg.upsert_club(Club(id=club_id, name="Club F12"))
+    # Seed a team so list/update/archive have something to operate on
+    from biq_core.org import Team
+    reg.upsert_team(Team(id=f"team_{club_id}_senior_m", club_id=club_id, name="Senior M", category="senior", gender="M"))
+
+    for uid, role in [("u_admin", "administrator"), ("u_sd", "sports_director"), ("u_coach", "coach")]:
+        reg.upsert_user(User(
+            id=uid, club_id=club_id, email=f"{uid}@basketiq.io",
+            display_name=uid, role=role, status="active",
+            password_hash=__import__("biq_core.org.passwords", fromlist=["hash_password"]).hash_password("secret123"),
+        ))
+        roles_reg.put_assignment(RoleAssignment(
+            id=f"{uid}__{role}__{scope}", user_id=uid, role=role, scope=scope,
+        ))
+
+
+def test_f12_administrator_can_list_and_archive_teams(f12_client):
+    """F12: administrator (club.admin) can manage team catalog."""
+    _f12_seed_club_and_users(f12_client)
+    f12_client.post("/api/auth/login", json={"username": "u_admin", "password": "secret123"})
+
+    r = f12_client.get("/api/admin/clubs/club_f12/teams")
+    assert r.status_code == 200
+    assert r.json()["total"] >= 1
+
+    r = f12_client.put("/api/admin/clubs/club_f12/teams/team_club_f12_senior_m/archive")
+    assert r.status_code == 200
+    assert r.json()["archived"] is True
+
+
+def test_f12_sports_director_can_list_and_archive_teams(f12_client):
+    """F12: Sports Director (club.teams.manage) can manage team catalog."""
+    _f12_seed_club_and_users(f12_client)
+    f12_client.post("/api/auth/login", json={"username": "u_sd", "password": "secret123"})
+
+    r = f12_client.get("/api/admin/clubs/club_f12/teams")
+    assert r.status_code == 200
+
+    r = f12_client.put("/api/admin/clubs/club_f12/teams/team_club_f12_senior_m/archive")
+    assert r.status_code == 200
+    assert r.json()["archived"] is True
+
+
+def test_f12_coach_denied_team_catalog_management(f12_client):
+    """F12: coach (no club.admin, no club.teams.manage) gets 403."""
+    _f12_seed_club_and_users(f12_client)
+    f12_client.post("/api/auth/login", json={"username": "u_coach", "password": "secret123"})
+
+    r = f12_client.get("/api/admin/clubs/club_f12/teams")
+    assert r.status_code == 403
+
+    r = f12_client.put("/api/admin/clubs/club_f12/teams/team_club_f12_senior_m/archive")
+    assert r.status_code == 403
+
+
+def test_f12_s2s_admin_can_list_teams_via_bearer_headers(f12_client, monkeypatch):
+    """F12: S2S mode — admin identity via bearer + headers succeeds.
+
+    This is the exact path the BFF proxy uses: biq-app forwards the request
+    with Authorization: Bearer <secret> + X-BIQ-Acting-User-Id headers,
+    not a session cookie. Without S2S-aware authorization, this 401s.
+    """
+    monkeypatch.setenv("BIQ_ONBOARD_S2S_SECRET", "test-s2s-secret")
+    _f12_seed_club_and_users(f12_client)
+
+    r = f12_client.get(
+        "/api/admin/clubs/club_f12/teams",
+        headers={
+            "Authorization": "Bearer test-s2s-secret",
+            "X-BIQ-Acting-User-Id": "u_admin",
+            "X-BIQ-Acting-Email": "u_admin@basketiq.io",
+        },
+    )
+    assert r.status_code == 200, f"Expected 200, got {r.status_code}: {r.text}"
+    assert r.json()["total"] >= 1
+
+
+def test_f12_s2s_sports_director_can_list_teams_via_bearer_headers(f12_client, monkeypatch):
+    """F12: S2S mode — Sports Director identity via bearer + headers succeeds."""
+    monkeypatch.setenv("BIQ_ONBOARD_S2S_SECRET", "test-s2s-secret")
+    _f12_seed_club_and_users(f12_client)
+
+    r = f12_client.get(
+        "/api/admin/clubs/club_f12/teams",
+        headers={
+            "Authorization": "Bearer test-s2s-secret",
+            "X-BIQ-Acting-User-Id": "u_sd",
+            "X-BIQ-Acting-Email": "u_sd@basketiq.io",
+        },
+    )
+    assert r.status_code == 200, f"Expected 200, got {r.status_code}: {r.text}"
+
+
+def test_f12_s2s_bad_token_returns_401(f12_client, monkeypatch):
+    """F12: S2S mode — wrong token returns 401 (fail-closed)."""
+    monkeypatch.setenv("BIQ_ONBOARD_S2S_SECRET", "test-s2s-secret")
+    _f12_seed_club_and_users(f12_client)
+
+    r = f12_client.get(
+        "/api/admin/clubs/club_f12/teams",
+        headers={
+            "Authorization": "Bearer wrong-token",
+            "X-BIQ-Acting-User-Id": "u_admin",
+            "X-BIQ-Acting-Email": "u_admin@basketiq.io",
+        },
+    )
+    assert r.status_code == 401

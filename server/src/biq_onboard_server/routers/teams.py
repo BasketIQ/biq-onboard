@@ -2,18 +2,72 @@
 
 from __future__ import annotations
 
+import os
+
 from fastapi import APIRouter, HTTPException, Request
 
+from biq_core.roles import effective_capabilities
+
 from .. import org
-from ..auth import require_admin
+from ..auth import _is_break_glass_admin, require_admin, session_user
 from ..models import TeamCreate, TeamUpdate
+from ..routers.onboarding_flow import _resolve_acting_identity
 
 router = APIRouter(prefix="/clubs/{club_id}/teams")
 
 
+def _s2s_secret() -> str | None:
+    """Return the configured S2S secret, or None when S2S is disabled."""
+    return os.environ.get("BIQ_ONBOARD_S2S_SECRET") or None
+
+
+def _require_teams_manage(request: Request, club_id: str) -> str:
+    """Authorize team-catalog management, resolving identity from S2S or session.
+
+    F12: Accepts ``club.admin`` (administrator) OR ``club.teams.manage``
+    (administrator + Sports Director). This is deliberately separate from
+    ``require_admin`` so the broader ``roles.manage`` gate is not loosened
+    for non-team endpoints.
+
+    S2S mode (C2): when a valid S2S bearer token is present, identity comes
+    from the asserted headers (X-BIQ-Acting-User-Id / X-BIQ-Acting-Email),
+    not the local session. This is required for the BFF proxy path
+    (browser → biq-app → biq-onboard) where the proxy forwards identity
+    via headers, not cookies.
+
+    Standalone mode: falls back to ``session_user()`` when no S2S secret
+    is configured.
+    """
+    secret = _s2s_secret()
+    if secret:
+        # S2S mode: resolve identity from headers (fail-closed on bad token)
+        user_id, _email = _resolve_acting_identity(request)
+        if _is_break_glass_admin(user_id):
+            return user_id
+        caps = effective_capabilities(user_id, f"club:{club_id}", org.get_roles())
+        if "club.admin" not in caps and "club.teams.manage" not in caps:
+            raise HTTPException(
+                status_code=403,
+                detail=f"team-catalog management requires club.admin or club.teams.manage for club {club_id}",
+            )
+        return user_id
+
+    # Standalone mode — local session
+    user = session_user(request)
+    if _is_break_glass_admin(user):
+        return user
+    caps = effective_capabilities(user, f"club:{club_id}", org.get_roles())
+    if "club.admin" not in caps and "club.teams.manage" not in caps:
+        raise HTTPException(
+            status_code=403,
+            detail=f"team-catalog management requires club.admin or club.teams.manage for club {club_id}",
+        )
+    return user
+
+
 @router.post("")
 def create_team(club_id: str, payload: TeamCreate, request: Request) -> dict:
-    require_admin(request, club_id)
+    _require_teams_manage(request, club_id)
     from biq_core.org import Team
 
     registry = org.get_registry()
@@ -31,7 +85,7 @@ def create_team(club_id: str, payload: TeamCreate, request: Request) -> dict:
 
 @router.get("")
 def list_teams(club_id: str, request: Request) -> dict:
-    require_admin(request, club_id)
+    _require_teams_manage(request, club_id)
     registry = org.get_registry()
     teams = registry.list_teams(club_id)
     return {
@@ -45,6 +99,7 @@ def list_teams(club_id: str, request: Request) -> dict:
                 "label": t.label,
                 "timezone": t.timezone,
                 "staff_user_ids": t.staff_user_ids,
+                "archived": t.archived,
             }
             for t in teams
         ],
@@ -54,7 +109,7 @@ def list_teams(club_id: str, request: Request) -> dict:
 
 @router.put("/{team_id}")
 def update_team(club_id: str, team_id: str, payload: TeamUpdate, request: Request) -> dict:
-    require_admin(request, club_id)
+    _require_teams_manage(request, club_id)
     from biq_core.org import Team
 
     registry = org.get_registry()
@@ -91,7 +146,7 @@ def update_team(club_id: str, team_id: str, payload: TeamUpdate, request: Reques
 
 @router.delete("/{team_id}")
 def delete_team(club_id: str, team_id: str, request: Request) -> dict:
-    require_admin(request, club_id)
+    _require_teams_manage(request, club_id)
     from ..onboarding import _delete_team_safe
 
     registry = org.get_registry()
@@ -106,7 +161,7 @@ def archive_team(club_id: str, team_id: str, request: Request) -> dict:
     Sets archived=true on the team. Archived teams have their future
     operational occurrences and actions cancelled by the OEE engine.
     """
-    require_admin(request, club_id)
+    _require_teams_manage(request, club_id)
     from biq_core.org import Team
 
     registry = org.get_registry()
@@ -132,7 +187,7 @@ def archive_team(club_id: str, team_id: str, request: Request) -> dict:
 @router.put("/{team_id}/unarchive")
 def unarchive_team(club_id: str, team_id: str, request: Request) -> dict:
     """Unarchive a team — resume normal operational reconciliation."""
-    require_admin(request, club_id)
+    _require_teams_manage(request, club_id)
     from biq_core.org import Team
 
     registry = org.get_registry()

@@ -48,6 +48,13 @@ def _s2s_secret() -> str | None:
     return os.environ.get("BIQ_ONBOARD_S2S_SECRET") or None
 
 
+def _current_season_year() -> int:
+    """Return the current calendar year as a sensible season fallback."""
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).year
+
+
 def _resolve_acting_identity(request: Request) -> tuple[str, str]:
     """Resolve the acting user_id and email for the request.
 
@@ -205,6 +212,41 @@ def create_my_club(payload: ClubSelfCreate, request: Request) -> dict:
             detail="No se pudo crear el club",
         ) from exc
 
+    # F12: Seed the default team catalog for the new club. This mirrors
+    # what onboard_club() does — build_team_catalog() generates every
+    # category × gender combination (with birth-year cohorts) for a season.
+    # Club creation never fails or rolls back because team seeding fails:
+    # the club/creator are already persisted atomically above. If a team
+    # write fails, log it clearly (same discipline as the theme-job enqueue
+    # failure below — visible, not swallowed).
+    #
+    # upsert_team() uses merge semantics (Firestore set(merge=True) /
+    # Memory _merge_partial), so re-seeding with the same IDs on an
+    # idempotent replay is safe — it relabels docs in place.
+    teams_seeded = 0
+    try:
+        from biq_core.org.catalog import build_team_catalog
+        from biq_core.org import Team
+
+        season_str = registry.get_season()
+        season_year = int((season_str or "").split("/")[0]) if season_str else _current_season_year()
+        catalog_dicts = build_team_catalog(club_id, season_year)
+        for t in catalog_dicts:
+            registry.upsert_team(Team(
+                id=t["id"],
+                club_id=club_id,
+                name=t["name"],
+                category=t.get("category"),
+                gender=t.get("gender"),
+                label=t.get("label"),
+            ))
+        teams_seeded = len(catalog_dicts)
+    except Exception as exc:
+        logger.error(
+            "F12 team-catalog seeding failed for club %s: %s (club creation succeeded)",
+            club_id, exc, exc_info=True,
+        )
+
     # B9/B10: if website present, enqueue theme generation asynchronously.
     # Club creation never fails or rolls back because optional generation
     # cannot enqueue/complete.
@@ -248,4 +290,5 @@ def create_my_club(payload: ClubSelfCreate, request: Request) -> dict:
         "club": {"id": club_id, "name": club_name, "website": website or None},
         "membership_user_id": membership_id,
         "idempotent": bool(idem),
+        "teams_seeded": teams_seeded,
     }

@@ -338,30 +338,53 @@
   border: 1px solid var(--biq-line);
 }
 
-/* Activation toggle */
+/* Activation card */
 .onboard-activation-card {
   border: 1px solid var(--biq-line);
 }
 
-.onboard-activation-toggle {
+/* Modal overlay — centered vertically */
+.onboard-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
   display: flex;
   align-items: center;
-  gap: 12px;
-  cursor: pointer;
-  padding: 8px 0;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.45);
+  padding: 20px;
 }
 
-.onboard-activation-toggle input[type="checkbox"] {
-  width: 24px;
-  height: 24px;
-  cursor: pointer;
-  accent-color: var(--biq-color-brand, #FF5A00);
+.onboard-modal {
+  background: var(--biq-surface-1, #fff);
+  border-radius: 16px;
+  padding: 28px 24px;
+  max-width: 380px;
+  width: 100%;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
 }
 
-.onboard-activation-label {
-  font-size: 15px;
-  font-weight: 600;
+.onboard-modal-title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 800;
   color: var(--biq-text, #0D1735);
+}
+
+.onboard-modal-desc {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--biq-muted, #5a6478);
+}
+
+.onboard-modal-actions {
+  display: flex;
+  gap: 12px;
+  justify-content: flex-end;
 }
 
 /* Profile */

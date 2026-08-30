@@ -238,6 +238,7 @@ class BiqOnboardApp extends HTMLElement {
   private _themeJob: ThemeJob | null = null;
   private _loading = false;
   private _error: string | null = null;
+  private _showActivateModal = false;
   // Club step (ADDENDUM-07 §6) per-card feedback
   private _stepError: { scope: 'join' | 'create'; message: string } | null = null;
   private _stepMessage = '';
@@ -802,7 +803,7 @@ class BiqOnboardApp extends HTMLElement {
             <p class="onboard-card-desc">${escapeHtml(jobCopy.description)}</p>
             ${isPolling && !this._isStale ? '<div class="onboard-loading">Procesando…</div>' : ''}
             ${isPolling && this._isStale ? '<div class="onboard-error">El proceso está tardando demasiado. Puedes reintentar.</div>' : ''}
-            ${canActivate ? `<button class="onboard-btn onboard-btn-primary" data-activate-btn ${this._loading ? 'disabled' : ''}>Sí, usarlo</button>` : ''}
+            ${canActivate ? `<button class="onboard-btn onboard-btn-primary" data-job-activate-btn ${this._loading ? 'disabled' : ''}>Sí, usarlo</button>` : ''}
             ${canRetry ? `<button class="onboard-btn onboard-btn-primary" data-retry-btn ${this._loading ? 'disabled' : ''}>Reintentar</button>` : ''}
           </div>
         ` : ''}
@@ -811,7 +812,6 @@ class BiqOnboardApp extends HTMLElement {
 
         ${theme ? this.renderBrandingState(theme, verdictCopy, statusCopy) : ''}
         ${theme ? this.renderLogoSection(theme) : ''}
-        ${theme ? this.renderPreview(theme) : ''}
         ${theme ? this.renderActivationToggle(club.id, theme) : ''}
       </section>`;
   }
@@ -916,29 +916,42 @@ class BiqOnboardApp extends HTMLElement {
     if (gateFailed) {
       // Gate failed — show revert button only
       return `
-        <div class="onboard-card onboard-revert-card">
-          <h3 class="onboard-card-title">Tema BasketIQ</h3>
-          <p class="onboard-card-desc">El tema generado no superó el control de contraste. Se mantiene el tema BasketIQ por defecto.</p>
-          <button class="onboard-btn onboard-btn-danger" data-revert-btn ${this._loading ? 'disabled' : ''}>
-            Restablecer tema BasketIQ
-          </button>
-        </div>`;
+      <div class="onboard-card onboard-revert-card">
+        <h3 class="onboard-card-title">Tema BasketIQ</h3>
+        <p class="onboard-card-desc">El tema generado no superó el control de contraste. Se mantiene el tema BasketIQ por defecto.</p>
+        <button class="onboard-btn onboard-btn-danger" data-revert-btn ${this._loading ? 'disabled' : ''}>
+          Restablecer tema BasketIQ
+        </button>
+      </div>`;
     }
     return `
       <div class="onboard-card onboard-activation-card">
         <h3 class="onboard-card-title">Activación del tema</h3>
-        <label class="onboard-activation-toggle">
-          <input type="checkbox" data-activate-checkbox ${isActive ? 'checked' : ''} ${this._loading ? 'disabled' : ''} />
-          <span class="onboard-activation-label">
-            ${isActive ? 'Tema del club activo' : 'Activar tema del club'}
-          </span>
-        </label>
         <p class="onboard-card-desc">
           ${isActive
-            ? 'El tema del club está activo y visible para todos los miembros. Desmarca para volver al tema BasketIQ por defecto.'
+            ? 'El tema del club está activo y visible para todos los miembros.'
             : 'Al activar, el tema del club será visible y aplicable a todos los miembros del equipo. Si se desactiva, cualquier miembro que lo tuviera seleccionado volverá al tema BasketIQ por defecto.'}
         </p>
-      </div>`;
+        <button class="onboard-btn ${isActive ? 'onboard-btn-danger' : 'onboard-btn-primary'}" data-activate-btn ${this._loading ? 'disabled' : ''}>
+          ${isActive ? 'Desactivar' : 'Activar'}
+        </button>
+      </div>
+      ${this._showActivateModal ? `
+        <div class="onboard-modal-overlay" data-activate-modal>
+          <div class="onboard-modal">
+            <h3 class="onboard-modal-title">${isActive ? 'Desactivar tema del club' : 'Activar tema del club'}</h3>
+            <p class="onboard-modal-desc">
+              ${isActive
+                ? '¿Seguro que quieres desactivar el tema del club? Todos los miembros volverán al tema BasketIQ por defecto.'
+                : 'Al activar, el tema del club será visible y aplicable a todos los miembros del equipo.'}
+            </p>
+            <div class="onboard-modal-actions">
+              <button class="onboard-btn" data-modal-cancel>Cancelar</button>
+              <button class="onboard-btn ${isActive ? 'onboard-btn-danger' : 'onboard-btn-primary'}" data-modal-confirm>Confirmar</button>
+            </div>
+          </div>
+        </div>
+      ` : ''}`;
   }
 
   // ─── Club step (ADDENDUM-07 §6) ───────────────────────────────────────
@@ -1499,18 +1512,42 @@ class BiqOnboardApp extends HTMLElement {
       });
     }
 
-    // Activation checkbox — toggle theme active/inactive
-    const activateCheckbox = this.shadow.querySelector('[data-activate-checkbox]') as HTMLInputElement | null;
-    if (activateCheckbox) {
-      activateCheckbox.addEventListener('change', () => {
-        if (activateCheckbox.checked) {
-          this.activateTheme(clubId);
+    // Activation button — open modal to confirm activate/deactivate
+    const activateBtn = this.shadow.querySelector('[data-activate-btn]');
+    if (activateBtn) {
+      activateBtn.addEventListener('click', () => {
+        this._showActivateModal = true;
+        this.render();
+      });
+    }
+
+    // Modal confirm/cancel
+    const modalCancel = this.shadow.querySelector('[data-modal-cancel]');
+    if (modalCancel) {
+      modalCancel.addEventListener('click', () => {
+        this._showActivateModal = false;
+        this.render();
+      });
+    }
+    const modalConfirm = this.shadow.querySelector('[data-modal-confirm]');
+    if (modalConfirm) {
+      modalConfirm.addEventListener('click', () => {
+        this._showActivateModal = false;
+        const isActive = this._theme?.status === 'active';
+        if (isActive) {
+          this.revertTheme(clubId);
         } else {
-          if (confirm('¿Desactivar el tema del club y volver al tema BasketIQ por defecto?')) {
-            this.revertTheme(clubId);
-          } else {
-            activateCheckbox.checked = true; // revert the checkbox
-          }
+          this.activateTheme(clubId);
+        }
+      });
+    }
+    // Click on overlay closes modal
+    const modalOverlay = this.shadow.querySelector('[data-activate-modal]');
+    if (modalOverlay) {
+      modalOverlay.addEventListener('click', (e) => {
+        if (e.target === modalOverlay) {
+          this._showActivateModal = false;
+          this.render();
         }
       });
     }
@@ -1545,10 +1582,10 @@ class BiqOnboardApp extends HTMLElement {
       });
     }
 
-    // B14: Activate theme button
-    const activateBtn = this.shadow.querySelector('[data-activate-btn]');
-    if (activateBtn) {
-      activateBtn.addEventListener('click', () => this.activateTheme(clubId));
+    // B14: Activate theme from job-state card (Sí, usarlo)
+    const jobActivateBtn = this.shadow.querySelector('[data-job-activate-btn]');
+    if (jobActivateBtn) {
+      jobActivateBtn.addEventListener('click', () => this.activateTheme(clubId));
     }
 
     // B14: Retry theme button

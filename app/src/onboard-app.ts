@@ -889,27 +889,6 @@ class BiqOnboardApp extends HTMLElement {
       </div>`;
   }
 
-  private renderPreview(theme: ClubTheme): string {
-    const lightTokens = theme.tokens?.light || {};
-    const darkTokens = theme.tokens?.dark || {};
-    return `
-      <div class="onboard-card">
-        <h3 class="onboard-card-title">Vista previa</h3>
-        <div class="onboard-preview-grid">
-          <div class="onboard-preview onboard-preview-light" style="background: ${escapeHtml(lightTokens['--biq-bg'] || '#F4F6FA')}; color: ${escapeHtml(lightTokens['--biq-text'] || '#0D1735')}">
-            <span class="onboard-preview-label">Modo claro</span>
-            <div class="onboard-preview-swatch" style="background: ${escapeHtml(lightTokens['--biq-orange'] || '#FF5A00')}; color: ${escapeHtml(lightTokens['--biq-on-orange'] || '#FFFFFF')}">Acción</div>
-            <div class="onboard-preview-swatch" style="background: ${escapeHtml(lightTokens['--biq-surface-1'] || '#FFFFFF')}; border: 1px solid ${escapeHtml(lightTokens['--biq-line'] || '#E4E8F0')}">Superficie</div>
-          </div>
-          <div class="onboard-preview onboard-preview-dark" style="background: ${escapeHtml(darkTokens['--biq-bg'] || '#080D1A')}; color: ${escapeHtml(darkTokens['--biq-text'] || '#FFFFFF')}">
-            <span class="onboard-preview-label">Modo oscuro</span>
-            <div class="onboard-preview-swatch" style="background: ${escapeHtml(darkTokens['--biq-orange'] || '#FF5A00')}; color: ${escapeHtml(darkTokens['--biq-on-orange'] || '#FFFFFF')}">Acción</div>
-            <div class="onboard-preview-swatch" style="background: ${escapeHtml(darkTokens['--biq-surface-1'] || '#111A2D')}; border: 1px solid ${escapeHtml(darkTokens['--biq-line'] || '#1A2440')}">Superficie</div>
-          </div>
-        </div>
-      </div>`;
-  }
-
   private renderActivationToggle(clubId: string, theme: ClubTheme): string {
     const isActive = theme.status === 'active';
     const gateFailed = theme.gate && theme.gate.passed === false;

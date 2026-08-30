@@ -620,8 +620,6 @@ class BiqOnboardApp extends HTMLElement {
 
   private async affirmLogoRights(clubId: string): Promise<void> {
     // Logo rights affirmation (ADDENDUM-06 §C3)
-    // This would call a dedicated endpoint; for now we use the theme PUT
-    // to update the logo rights status
     this._loading = true;
     this.render();
     try {
@@ -632,8 +630,30 @@ class BiqOnboardApp extends HTMLElement {
         body: JSON.stringify({ affirmed: true }),
       });
       if (!res.ok && res.status !== 404) {
-        // 404 = endpoint not implemented yet; that's OK for now
         throw new Error(`HTTP ${res.status}`);
+      }
+      await this.loadThemeData(clubId);
+    } catch (err) {
+      this._error = (err as Error).message;
+      this._loading = false;
+      this.render();
+    }
+  }
+
+  private async updateLogoUrl(clubId: string, logoUrl: string): Promise<void> {
+    this._loading = true;
+    this._error = null;
+    this.render();
+    try {
+      const res = await fetch(`/api/clubs/${clubId}/theme/logo`, {
+        method: 'PUT',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ logo_url: logoUrl }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => null);
+        throw new Error(data?.detail || `HTTP ${res.status}`);
       }
       await this.loadThemeData(clubId);
     } catch (err) {
@@ -790,7 +810,7 @@ class BiqOnboardApp extends HTMLElement {
         ${this._loading && !theme && !jobCopy ? '<div class="onboard-loading">Cargando…</div>' : ''}
 
         ${theme ? this.renderBrandingState(theme, verdictCopy, statusCopy) : ''}
-        ${theme?.logo?.onLight ? this.renderLogoSection(theme) : ''}
+        ${theme ? this.renderLogoSection(theme) : ''}
         ${theme ? this.renderPreview(theme) : ''}
         ${theme ? this.renderActivationToggle(club.id, theme) : ''}
       </section>`;
@@ -842,13 +862,19 @@ class BiqOnboardApp extends HTMLElement {
 
   private renderLogoSection(theme: ClubTheme): string {
     const logo = theme.logo;
-    if (!logo) return '';
-    const awaitingRights = logo.rightsConfirmedAt === null;
+    const hasLogo = logo && logo.onLight;
+    const awaitingRights = logo && logo.rightsConfirmedAt === null;
     return `
       <div class="onboard-card">
         <h3 class="onboard-card-title">Escudo del club</h3>
-        ${logo.onLight ? `<img class="onboard-logo-preview" src="${escapeHtml(logo.onLight)}" alt="Escudo" />` : '<p class="onboard-card-desc">No se encontró escudo.</p>'}
-        ${awaitingRights ? `
+        ${hasLogo ? `<img class="onboard-logo-preview" src="${escapeHtml(logo.onLight)}" alt="Escudo" />` : `
+          <p class="onboard-card-desc">No se encontró escudo automáticamente.</p>
+          <div class="onboard-logo-input-group">
+            <input type="url" class="onboard-logo-input" data-logo-url-input placeholder="https://www.club.com/logo.png" />
+            <button class="onboard-btn onboard-btn-primary" data-logo-url-btn>Actualizar escudo</button>
+          </div>
+        `}
+        ${hasLogo && awaitingRights ? `
           <div class="onboard-rights">
             <p class="onboard-rights-text">Para mostrar el escudo necesitas confirmar que el club tiene derecho a usarlo.</p>
             <label class="onboard-rights-label">
@@ -857,9 +883,9 @@ class BiqOnboardApp extends HTMLElement {
             </label>
             <button class="onboard-btn onboard-btn-primary" data-affirm-rights-btn disabled>Confirmar</button>
           </div>
-        ` : `
+        ` : (hasLogo ? `
           <p class="onboard-rights-confirmed">Derechos de uso confirmados.</p>
-        `}
+        ` : '')}
       </div>`;
   }
 
@@ -1506,6 +1532,16 @@ class BiqOnboardApp extends HTMLElement {
       });
       affirmBtn.addEventListener('click', () => {
         if (!affirmBtn.disabled) this.affirmLogoRights(clubId);
+      });
+    }
+
+    // Logo URL input (manual logo override)
+    const logoUrlBtn = this.shadow.querySelector('[data-logo-url-btn]') as HTMLButtonElement | null;
+    const logoUrlInput = this.shadow.querySelector('[data-logo-url-input]') as HTMLInputElement | null;
+    if (logoUrlBtn && logoUrlInput) {
+      logoUrlBtn.addEventListener('click', () => {
+        const url = logoUrlInput.value.trim();
+        if (url) this.updateLogoUrl(clubId, url);
       });
     }
 

@@ -988,6 +988,63 @@ def affirm_logo_rights(club_id: str, payload: LogoRightsRequest, request: Reques
     return {"ok": True, "logo": logo}
 
 
+class LogoUrlRequest(BaseModel):
+    """Manual logo URL override."""
+    logo_url: str
+
+
+@router.put("/logo")
+def update_logo_url(club_id: str, payload: LogoUrlRequest, request: Request) -> dict:
+    """Manually set the club logo URL when extraction failed or returned
+    the wrong image. Fetches the image and stores it as a data URI in the
+    theme's logo field, preserving the existing logo structure."""
+    _require_theme_admin(request, club_id)
+
+    url = payload.logo_url.strip()
+    if not url.startswith("https://"):
+        raise HTTPException(status_code=400, detail="logo URL must use https://")
+
+    registry = org.get_registry()
+    club = registry.get_club(club_id)
+    if club is None:
+        raise HTTPException(status_code=404, detail="club not found")
+
+    theme = getattr(club, "theme", None)
+    if not theme or not isinstance(theme, dict):
+        raise HTTPException(status_code=404, detail="no theme found")
+
+    # Fetch the image and convert to data URI
+    import base64
+    import urllib.request
+
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "BasketIQ-ThemePipeline/1.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            content_type = resp.headers.get("Content-Type", "image/png")
+            data = resp.read()
+            if len(data) > 512 * 1024:
+                raise HTTPException(status_code=413, detail="logo image too large (max 512KB)")
+            b64 = base64.b64encode(data).decode("ascii")
+            data_uri = f"data:{content_type};base64,{b64}"
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"failed to fetch logo: {exc}")
+
+    logo = theme.get("logo") or {}
+    logo["onLight"] = data_uri
+    logo["onDark"] = data_uri
+    logo["sourceUrl"] = url
+    logo["status"] = "confirmed"
+    logo["rightsConfirmedAt"] = _now_iso()
+    logo["reason"] = None
+
+    theme["logo"] = logo
+    registry.merge_club_fields(club_id, {"theme": theme})
+
+    return {"ok": True, "logo": logo}
+
+
 # ─── Job result callback (B12) ──────────────────────────────────────────
 
 

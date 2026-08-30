@@ -242,6 +242,22 @@
   border: 1px solid var(--biq-line);
 }
 
+.onboard-logo-input-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.onboard-logo-input {
+  padding: 8px 12px;
+  border: 1px solid var(--biq-line);
+  border-radius: 8px;
+  font-size: 14px;
+  background: var(--biq-surface-1);
+  color: var(--biq-text);
+}
+
 .onboard-rights {
   display: flex;
   flex-direction: column;

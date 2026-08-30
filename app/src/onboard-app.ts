@@ -658,6 +658,7 @@ class BiqOnboardApp extends HTMLElement {
       await this.loadThemeData(clubId);
     } catch (err) {
       this._error = (err as Error).message;
+    } finally {
       this._loading = false;
       this.render();
     }
@@ -682,6 +683,7 @@ class BiqOnboardApp extends HTMLElement {
       await this.loadThemeData(clubId);
     } catch (err) {
       this._error = (err as Error).message;
+    } finally {
       this._loading = false;
       this.render();
     }

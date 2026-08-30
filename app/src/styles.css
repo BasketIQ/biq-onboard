@@ -343,48 +343,78 @@
   border: 1px solid var(--biq-line);
 }
 
-/* Modal overlay — centered vertically */
-.onboard-modal-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 9999;
+.onboard-activation-row {
   display: flex;
   align-items: center;
-  justify-content: center;
-  background: rgba(0, 0, 0, 0.45);
-  padding: 20px;
-}
-
-.onboard-modal {
-  background: var(--biq-surface-1, #fff);
-  border-radius: 16px;
-  padding: 28px 24px;
-  max-width: 380px;
-  width: 100%;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
-
-.onboard-modal-title {
-  margin: 0;
-  font-size: 18px;
-  font-weight: 800;
-  color: var(--biq-text, #0D1735);
-}
-
-.onboard-modal-desc {
-  margin: 0;
-  font-size: 14px;
-  line-height: 1.5;
-  color: var(--biq-muted, #5a6478);
-}
-
-.onboard-modal-actions {
-  display: flex;
+  justify-content: space-between;
   gap: 12px;
-  justify-content: flex-end;
+}
+
+/* On/off pill switch */
+.onboard-switch {
+  position: relative;
+  display: inline-block;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.onboard-switch input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.onboard-switch-track {
+  display: block;
+  width: 48px;
+  height: 28px;
+  border-radius: 14px;
+  background: var(--biq-line, #E4E8F0);
+  transition: background 0.2s ease;
+  position: relative;
+}
+
+.onboard-switch-thumb {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+  transition: transform 0.2s ease;
+}
+
+.onboard-switch.on .onboard-switch-track {
+  background: var(--biq-orange, #FF5A00);
+}
+
+.onboard-switch.on .onboard-switch-thumb {
+  transform: translateX(20px);
+}
+
+.onboard-switch input:disabled + .onboard-switch-track {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Logo upload */
+.onboard-logo-upload-group {
+  margin-top: 8px;
+}
+
+.onboard-file-label {
+  display: inline-block;
+  cursor: pointer;
+}
+
+.onboard-file-label input[type="file"] {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
 }
 
 /* Profile */

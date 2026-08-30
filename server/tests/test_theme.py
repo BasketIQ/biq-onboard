@@ -771,3 +771,102 @@ def test_r7_rate_limit_url_separation(monkeypatch):
     assert theme._check_rate_limit("r7url", "https://example.com") == False
     # Different URL — should be allowed
     assert theme._check_rate_limit("r7url", "https://other.com") == True
+
+
+# ─── Logo upload endpoint ───────────────────────────────────────────────
+
+
+def test_logo_upload_happy_path(admin_client, club_id):
+    """PUT /logo/upload accepts a multipart file and stores it as a data URI."""
+    # First create a theme so there's a theme to update
+    admin_client.put(
+        f"/api/admin/clubs/{club_id}/theme",
+        json={"seed_brand": "#FF5A00"},
+    )
+
+    # Upload a tiny PNG (1x1 transparent pixel)
+    import base64
+
+    tiny_png = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+    )
+
+    r = admin_client.put(
+        f"/api/admin/clubs/{club_id}/theme/logo/upload",
+        files={"file": ("logo.png", tiny_png, "image/png")},
+    )
+    assert r.status_code == 200
+    data = r.json()
+    assert data["ok"] is True
+    logo = data["logo"]
+    assert logo["onLight"].startswith("data:image/png;base64,")
+    assert logo["onDark"].startswith("data:image/png;base64,")
+    assert logo["sourceUrl"] == "manual-upload"
+    assert logo["status"] == "confirmed"
+    assert logo["rightsConfirmedAt"] is not None
+
+
+def test_logo_upload_404_without_theme(admin_client, club_id):
+    """Upload requires an existing theme."""
+    import base64
+
+    tiny_png = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+    )
+    r = admin_client.put(
+        f"/api/admin/clubs/{club_id}/theme/logo/upload",
+        files={"file": ("logo.png", tiny_png, "image/png")},
+    )
+    assert r.status_code == 404
+
+
+def test_logo_upload_rejects_oversized(admin_client, club_id):
+    """Upload rejects files > 512KB."""
+    admin_client.put(
+        f"/api/admin/clubs/{club_id}/theme",
+        json={"seed_brand": "#FF5A00"},
+    )
+    # 600KB of zeros
+    big_data = b"\x00" * (600 * 1024)
+    r = admin_client.put(
+        f"/api/admin/clubs/{club_id}/theme/logo/upload",
+        files={"file": ("big.png", big_data, "image/png")},
+    )
+    assert r.status_code == 413
+
+
+def test_logo_upload_rejects_unsupported_content_type(admin_client, club_id):
+    """Upload rejects non-image content types."""
+    admin_client.put(
+        f"/api/admin/clubs/{club_id}/theme",
+        json={"seed_brand": "#FF5A00"},
+    )
+    r = admin_client.put(
+        f"/api/admin/clubs/{club_id}/theme/logo/upload",
+        files={"file": ("file.txt", b"hello", "text/plain")},
+    )
+    assert r.status_code == 415
+
+
+def test_logo_upload_requires_auth(client):
+    """Upload endpoint requires authentication."""
+    r = client.put(
+        "/api/admin/clubs/any/theme/logo/upload",
+        files={"file": ("logo.png", b"data", "image/png")},
+    )
+    assert r.status_code == 401
+
+
+def test_logo_url_override_happy_path(admin_client, club_id):
+    """PUT /logo with a URL stores the fetched image as a data URI."""
+    admin_client.put(
+        f"/api/admin/clubs/{club_id}/theme",
+        json={"seed_brand": "#FF5A00"},
+    )
+    # We can't easily mock the fetch in a unit test, but we can verify
+    # the endpoint validates the URL format
+    r = admin_client.put(
+        f"/api/admin/clubs/{club_id}/theme/logo",
+        json={"logo_url": "http://insecure.com/logo.png"},
+    )
+    assert r.status_code == 400  # http:// rejected, must be https://

@@ -1045,6 +1045,61 @@ def update_logo_url(club_id: str, payload: LogoUrlRequest, request: Request) -> 
     return {"ok": True, "logo": logo}
 
 
+@router.put("/logo/upload")
+async def upload_logo_file(club_id: str, request: Request) -> dict:
+    """Manually upload a club logo file when extraction failed or returned
+    the wrong image. Accepts multipart/form-data with a 'file' field.
+    Converts to a data URI and stores it in the theme's logo field."""
+    _require_theme_admin(request, club_id)
+
+    content_type_header = request.headers.get("content-type", "")
+    if "multipart/form-data" not in content_type_header:
+        raise HTTPException(status_code=400, detail="expected multipart/form-data")
+
+    form = await request.form()
+    upload = form.get("file")
+    if upload is None:
+        raise HTTPException(status_code=400, detail="missing 'file' field")
+
+    # Read the uploaded bytes
+    data = await upload.read()
+    if len(data) > 512 * 1024:
+        raise HTTPException(status_code=413, detail="logo image too large (max 512KB)")
+
+    content_type = upload.content_type or "image/png"
+    # Accept common image types + SVG
+    allowed = {"image/png", "image/jpeg", "image/gif", "image/webp", "image/svg+xml", "image/svg"}
+    if content_type not in allowed:
+        raise HTTPException(status_code=415, detail=f"unsupported content type: {content_type}")
+
+    import base64
+
+    b64 = base64.b64encode(data).decode("ascii")
+    data_uri = f"data:{content_type};base64,{b64}"
+
+    registry = org.get_registry()
+    club = registry.get_club(club_id)
+    if club is None:
+        raise HTTPException(status_code=404, detail="club not found")
+
+    theme = getattr(club, "theme", None)
+    if not theme or not isinstance(theme, dict):
+        raise HTTPException(status_code=404, detail="no theme found")
+
+    logo = theme.get("logo") or {}
+    logo["onLight"] = data_uri
+    logo["onDark"] = data_uri
+    logo["sourceUrl"] = "manual-upload"
+    logo["status"] = "confirmed"
+    logo["rightsConfirmedAt"] = _now_iso()
+    logo["reason"] = None
+
+    theme["logo"] = logo
+    registry.merge_club_fields(club_id, {"theme": theme})
+
+    return {"ok": True, "logo": logo}
+
+
 # ─── Job result callback (B12) ──────────────────────────────────────────
 
 

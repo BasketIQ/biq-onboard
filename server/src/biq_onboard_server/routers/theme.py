@@ -293,15 +293,24 @@ def _enqueue_generation_task(
     if manual_seed_alt:
         env_vars.append({"name": "MANUAL_SEED_BRAND_ALT", "value": manual_seed_alt})
 
-    overrides = {
-        "containerOverrides": [
-            {
-                "env": env_vars,
-            }
-        ],
+    # The Cloud Run Admin API v2 RunJobRequest only recognizes
+    # {validateOnly, etag, overrides} at the top level — containerOverrides
+    # must be nested under "overrides" (see RunJobRequest.Overrides in
+    # google/cloud/run/v2/job.proto). A top-level "containerOverrides" key
+    # is an unrecognized field and the API rejects it with INVALID_ARGUMENT,
+    # which Cloud Tasks then retries and exhausts silently (root cause of
+    # the 2026-09-02 stuck-at-"pending" regression — see handoff).
+    run_job_request = {
+        "overrides": {
+            "containerOverrides": [
+                {
+                    "env": env_vars,
+                }
+            ],
+        },
     }
 
-    payload = _json.dumps(overrides).encode()
+    payload = _json.dumps(run_job_request).encode()
 
     # C4: Use OAuthToken (not OidcToken) for the run.googleapis.com API.
     # The Cloud Run Jobs :run endpoint is a Google API requiring OAuth

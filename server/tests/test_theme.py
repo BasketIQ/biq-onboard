@@ -251,11 +251,11 @@ def test_enqueue_production_calls_cloud_tasks(monkeypatch):
     class MockTasksV2:
         class Task:
             def __init__(self, **kwargs):
-                pass
+                self.kwargs = kwargs
 
         class HttpRequest:
             def __init__(self, **kwargs):
-                pass
+                self.kwargs = kwargs
 
         class HttpMethod:
             POST = "POST"
@@ -285,6 +285,24 @@ def test_enqueue_production_calls_cloud_tasks(monkeypatch):
     assert "parent" in call
     assert "club-theme-generation" in call["parent"]
     assert "task" in call
+
+    # Regression guard (2026-09-02 stuck-at-"pending" incident): the Cloud
+    # Run Admin API v2 RunJobRequest only recognizes {validateOnly, etag,
+    # overrides} at the top level. A body of {"containerOverrides": [...]}
+    # instead of {"overrides": {"containerOverrides": [...]}} is silently
+    # rejected with INVALID_ARGUMENT by run.googleapis.com — Cloud Tasks
+    # retries exhaust and the job never runs, with no visible error to the
+    # caller. Assert the real wire shape, not just presence of the kwarg.
+    http_request_kwargs = call["task"].kwargs["http_request"].kwargs
+    body = json.loads(http_request_kwargs["body"])
+    assert "overrides" in body, (
+        "RunJobRequest body must nest containerOverrides under 'overrides' "
+        "or the Cloud Run Admin API rejects it with INVALID_ARGUMENT"
+    )
+    assert "containerOverrides" not in body, "containerOverrides must not be a top-level key"
+    assert "containerOverrides" in body["overrides"]
+    env_names = {e["name"] for e in body["overrides"]["containerOverrides"][0]["env"]}
+    assert {"CLUB_ID", "SOURCE_URL", "LEASE_ID"} <= env_names
 
     # Clean up
     monkeypatch.delenv("BIQ_CLOUD_TASKS_QUEUE", raising=False)

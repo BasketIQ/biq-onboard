@@ -293,8 +293,19 @@ def test_enqueue_production_calls_cloud_tasks(monkeypatch):
     # rejected with INVALID_ARGUMENT by run.googleapis.com — Cloud Tasks
     # retries exhaust and the job never runs, with no visible error to the
     # caller. Assert the real wire shape, not just presence of the kwarg.
-    http_request_kwargs = call["task"].kwargs["http_request"].kwargs
-    body = json.loads(http_request_kwargs["body"])
+    #
+    # Note: `from google.cloud import tasks_v2` inside _enqueue_generation_task
+    # resolves to the REAL tasks_v2 module here, not MockTasksV2 above —
+    # `sys.modules` patching doesn't override an already-imported package
+    # attribute (google.cloud.tasks_v2 gets imported for real elsewhere in
+    # the test session first). So `call["task"]` is a real protobuf Task;
+    # read its fields directly instead of assuming the Mock* `.kwargs` shape.
+    task_obj = call["task"]
+    if hasattr(task_obj, "kwargs"):  # the mock path did take effect
+        body_bytes = task_obj.kwargs["http_request"].kwargs["body"]
+    else:  # real protobuf Task/HttpRequest
+        body_bytes = task_obj.http_request.body
+    body = json.loads(body_bytes)
     assert "overrides" in body, (
         "RunJobRequest body must nest containerOverrides under 'overrides' "
         "or the Cloud Run Admin API rejects it with INVALID_ARGUMENT"

@@ -293,13 +293,16 @@ def _enqueue_generation_task(
     if manual_seed_alt:
         env_vars.append({"name": "MANUAL_SEED_BRAND_ALT", "value": manual_seed_alt})
 
-    # The Cloud Run Admin API v2 RunJobRequest only recognizes
-    # {validateOnly, etag, overrides} at the top level — containerOverrides
-    # must be nested under "overrides" (see RunJobRequest.Overrides in
-    # google/cloud/run/v2/job.proto). A top-level "containerOverrides" key
-    # is an unrecognized field and the API rejects it with INVALID_ARGUMENT,
-    # which Cloud Tasks then retries and exhausts silently (root cause of
-    # the 2026-09-02 stuck-at-"pending" regression — see handoff).
+    # F5: The Cloud Run Admin API v2 RunJob method requires the body to be a
+    # RunJobRequest, which wraps containerOverrides inside an "overrides"
+    # field. Sending containerOverrides at the top level (missing the
+    # "overrides" wrapper) is rejected by Cloud Run's schema validation with
+    # INVALID_ARGUMENT before the job is ever triggered — Cloud Tasks then
+    # exhausts its retries and drops the task with no job execution and no
+    # visible audit trail (the request never reaches Cloud Run's
+    # audit-logged activity layer). This was independently confirmed and
+    # fixed on main (PR #25, 2026-09-02 stuck-at-"pending" regression) with
+    # the same wrapping; kept here as the superset F5 hardening fix.
     run_job_request = {
         "overrides": {
             "containerOverrides": [
@@ -644,10 +647,16 @@ def retry_theme(club_id: str, request: Request) -> dict:
         existing_job = {}
 
     current_status = existing_job.get("status", "")
-    if current_status not in ("failed", "unreachable", "rejected_not_a_club", "unsupported_source"):
+    # F5 Issue 2: Allow retry for terminal failure states AND for stuck
+    # pending/running jobs. When Cloud Tasks retries asynchronously with
+    # unbounded maxAttempts, the job may never reach a terminal state from
+    # the caller's side. The client-side staleness timeout fires after 3
+    # minutes and the user clicks "Reintentar" — the retry endpoint must
+    # accept this, otherwise the only recovery is a full page reload.
+    if current_status not in ("failed", "unreachable", "rejected_not_a_club", "unsupported_source", "pending", "running"):
         raise HTTPException(
             status_code=409,
-            detail=f"retry only available for terminal failure states (current: {current_status})",
+            detail=f"retry only available for failure or stuck states (current: {current_status})",
         )
 
     source_url = existing_job.get("sourceUrl", "")
@@ -972,6 +981,118 @@ def affirm_logo_rights(club_id: str, payload: LogoRightsRequest, request: Reques
     else:
         logo["rightsConfirmedAt"] = None
         logo["status"] = "awaiting_rights"
+
+    theme["logo"] = logo
+    registry.merge_club_fields(club_id, {"theme": theme})
+
+    return {"ok": True, "logo": logo}
+
+
+class LogoUrlRequest(BaseModel):
+    """Manual logo URL override."""
+    logo_url: str
+
+
+@router.put("/logo")
+def update_logo_url(club_id: str, payload: LogoUrlRequest, request: Request) -> dict:
+    """Manually set the club logo URL when extraction failed or returned
+    the wrong image. Fetches the image and stores it as a data URI in the
+    theme's logo field, preserving the existing logo structure."""
+    _require_theme_admin(request, club_id)
+
+    url = payload.logo_url.strip()
+    if not url.startswith("https://"):
+        raise HTTPException(status_code=400, detail="logo URL must use https://")
+
+    registry = org.get_registry()
+    club = registry.get_club(club_id)
+    if club is None:
+        raise HTTPException(status_code=404, detail="club not found")
+
+    theme = getattr(club, "theme", None)
+    if not theme or not isinstance(theme, dict):
+        raise HTTPException(status_code=404, detail="no theme found")
+
+    # Fetch the image and convert to data URI
+    import base64
+    import urllib.request
+
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "BasketIQ-ThemePipeline/1.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            content_type = resp.headers.get("Content-Type", "image/png")
+            data = resp.read()
+            if len(data) > 512 * 1024:
+                raise HTTPException(status_code=413, detail="logo image too large (max 512KB)")
+            b64 = base64.b64encode(data).decode("ascii")
+            data_uri = f"data:{content_type};base64,{b64}"
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"failed to fetch logo: {exc}")
+
+    logo = theme.get("logo") or {}
+    logo["onLight"] = data_uri
+    logo["onDark"] = data_uri
+    logo["sourceUrl"] = url
+    logo["status"] = "confirmed"
+    logo["rightsConfirmedAt"] = _now_iso()
+    logo["reason"] = None
+
+    theme["logo"] = logo
+    registry.merge_club_fields(club_id, {"theme": theme})
+
+    return {"ok": True, "logo": logo}
+
+
+@router.put("/logo/upload")
+async def upload_logo_file(club_id: str, request: Request) -> dict:
+    """Manually upload a club logo file when extraction failed or returned
+    the wrong image. Accepts multipart/form-data with a 'file' field.
+    Converts to a data URI and stores it in the theme's logo field."""
+    _require_theme_admin(request, club_id)
+
+    content_type_header = request.headers.get("content-type", "")
+    if "multipart/form-data" not in content_type_header:
+        raise HTTPException(status_code=400, detail="expected multipart/form-data")
+
+    form = await request.form()
+    upload = form.get("file")
+    if upload is None:
+        raise HTTPException(status_code=400, detail="missing 'file' field")
+
+    # Read the uploaded bytes
+    data = await upload.read()
+    if len(data) > 512 * 1024:
+        raise HTTPException(status_code=413, detail="logo image too large (max 512KB)")
+
+    content_type = upload.content_type or "image/png"
+    # Accept common image types + SVG
+    allowed = {"image/png", "image/jpeg", "image/gif", "image/webp", "image/svg+xml", "image/svg"}
+    if content_type not in allowed:
+        raise HTTPException(status_code=415, detail=f"unsupported content type: {content_type}")
+
+    import base64
+
+    b64 = base64.b64encode(data).decode("ascii")
+    data_uri = f"data:{content_type};base64,{b64}"
+
+    registry = org.get_registry()
+    club = registry.get_club(club_id)
+    if club is None:
+        raise HTTPException(status_code=404, detail="club not found")
+
+    theme = getattr(club, "theme", None)
+    if not theme or not isinstance(theme, dict):
+        raise HTTPException(status_code=404, detail="no theme found")
+
+    logo = theme.get("logo") or {}
+    logo["onLight"] = data_uri
+    logo["onDark"] = data_uri
+    logo["sourceUrl"] = "manual-upload"
+    logo["status"] = "confirmed"
+    logo["rightsConfirmedAt"] = _now_iso()
+    logo["reason"] = None
 
     theme["logo"] = logo
     registry.merge_club_fields(club_id, {"theme": theme})

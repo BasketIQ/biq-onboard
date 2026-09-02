@@ -242,6 +242,22 @@
   border: 1px solid var(--biq-line);
 }
 
+.onboard-logo-input-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.onboard-logo-input {
+  padding: 8px 12px;
+  border: 1px solid var(--biq-line);
+  border-radius: 8px;
+  font-size: 14px;
+  background: var(--biq-surface-1);
+  color: var(--biq-text);
+}
+
 .onboard-rights {
   display: flex;
   flex-direction: column;
@@ -320,6 +336,85 @@
 /* Revert card */
 .onboard-revert-card {
   border: 1px solid var(--biq-line);
+}
+
+/* Activation card */
+.onboard-activation-card {
+  border: 1px solid var(--biq-line);
+}
+
+.onboard-activation-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+/* On/off pill switch */
+.onboard-switch {
+  position: relative;
+  display: inline-block;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.onboard-switch input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.onboard-switch-track {
+  display: block;
+  width: 48px;
+  height: 28px;
+  border-radius: 14px;
+  background: var(--biq-line, #E4E8F0);
+  transition: background 0.2s ease;
+  position: relative;
+}
+
+.onboard-switch-thumb {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+  transition: transform 0.2s ease;
+}
+
+.onboard-switch.on .onboard-switch-track {
+  background: var(--biq-orange, #FF5A00);
+}
+
+.onboard-switch.on .onboard-switch-thumb {
+  transform: translateX(20px);
+}
+
+.onboard-switch input:disabled + .onboard-switch-track {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Logo upload */
+.onboard-logo-upload-group {
+  margin-top: 8px;
+}
+
+.onboard-file-label {
+  display: inline-block;
+  cursor: pointer;
+}
+
+.onboard-file-label input[type="file"] {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
 }
 
 /* Profile */

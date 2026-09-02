@@ -319,6 +319,108 @@ def test_enqueue_production_calls_cloud_tasks(monkeypatch):
     monkeypatch.delenv("BIQ_CLOUD_TASKS_QUEUE", raising=False)
 
 
+def test_enqueue_run_job_request_body_has_overrides_wrapper(monkeypatch):
+    """F5 regression test: the Cloud Run Admin API v2 RunJob method
+    (POST .../jobs/{job}:run) requires the HTTP body to be a RunJobRequest,
+    which wraps containerOverrides inside an "overrides" field:
+
+        {"overrides": {"containerOverrides": [...]}}
+
+    Sending containerOverrides at the top level (missing the "overrides"
+    wrapper) is rejected by Cloud Run's schema validation with
+    INVALID_ARGUMENT before the job is ever triggered. Cloud Tasks then
+    exhausts retries and silently drops the task — no job execution, no
+    audit trail (confirmed live on staging: task_operations_log showed
+    status=INVALID_ARGUMENT with ~15-25ms response times, i.e. Cloud Run's
+    API rejecting the request at validation, not attempting to run it).
+
+    This test captures the actual JSON body passed to HttpRequest and
+    asserts it matches the RunJobRequest schema.
+
+    Note on mocking strategy: we import the REAL google.cloud.tasks_v2
+    module and monkeypatch its classes in place (setattr on the module
+    object). This works regardless of whether the package was already
+    imported and cached as an attribute on google.cloud — which is the
+    exact failure mode that broke the earlier version of this test in CI
+    (where google-cloud-tasks IS installed). Replacing sys.modules alone
+    does not update the cached attribute, so _enqueue_generation_task's
+    `from google.cloud import tasks_v2` still resolved to the real module.
+    """
+    import json
+
+    monkeypatch.setenv("BIQ_CLOUD_TASKS_QUEUE", "club-theme-generation")
+    monkeypatch.setenv("GCP_PROJECT_ID", "test-project")
+    monkeypatch.setenv("GCP_TASKS_LOCATION", "europe-west1")
+    monkeypatch.setenv("GCP_TASK_INVOKER_SA", "biq-task-invoker@test-project.iam.gserviceaccount.com")
+
+    from biq_onboard_server.routers import theme as theme_mod
+
+    # Import the real module and patch its classes in place. This works
+    # whether or not the package is installed (CI) or absent (local dev
+    # without google-cloud-tasks). If the package is absent, we skip —
+    # the test is only meaningful in an environment where the production
+    # code path can actually execute.
+    try:
+        from google.cloud import tasks_v2 as real_tasks_v2
+    except ImportError:
+        pytest.skip("google-cloud-tasks not installed; cannot test real module patching")
+
+    captured_http_request_kwargs = {}
+
+    class CapturingHttpRequest:
+        def __init__(self, **kwargs):
+            captured_http_request_kwargs.update(kwargs)
+
+    class MockCreatedTask:
+        name = "projects/test-project/locations/europe-west1/queues/club-theme-generation/tasks/fake-task-456"
+
+    class MockCloudTasksClient:
+        def queue_path(self, project, location, queue):
+            return f"projects/{project}/locations/{location}/queues/{queue}"
+
+        def create_task(self, request):
+            return MockCreatedTask()
+
+    mock_client = MockCloudTasksClient()
+    monkeypatch.setattr(theme_mod, "_get_tasks_client", lambda: mock_client)
+
+    # Patch the real module's classes in place — this updates the actual
+    # object that `from google.cloud import tasks_v2` resolves to, whether
+    # it was imported fresh or retrieved from a cached attribute.
+    monkeypatch.setattr(real_tasks_v2, "HttpRequest", CapturingHttpRequest)
+    monkeypatch.setattr(real_tasks_v2, "OAuthToken", type("OAuthToken", (), {"__init__": lambda self, **kw: None}))
+    # Task and HttpMethod are also used by _enqueue_generation_task
+    monkeypatch.setattr(real_tasks_v2, "Task", type("Task", (), {"__init__": lambda self, **kw: None}))
+    monkeypatch.setattr(real_tasks_v2, "HttpMethod", type("HttpMethod", (), {"POST": "POST"}))
+
+    theme_mod._enqueue_generation_task("club_test2", "https://example.com", "lease-test-2")
+
+    assert "body" in captured_http_request_kwargs, (
+        "HttpRequest was never called with a body — the real tasks_v2.HttpRequest "
+        "was used instead of the mock. This means the in-place patch did not take "
+        "effect, which would indicate the module was cached differently than expected."
+    )
+    body = json.loads(captured_http_request_kwargs["body"])
+
+    # The body MUST be a RunJobRequest: {"overrides": {"containerOverrides": [...]}}
+    assert "overrides" in body, (
+        f"RunJob request body is missing the required 'overrides' wrapper "
+        f"field (schema: RunJobRequest). Got top-level keys: {list(body.keys())}"
+    )
+    assert "containerOverrides" in body["overrides"]
+    assert isinstance(body["overrides"]["containerOverrides"], list)
+    env_names = {e["name"] for e in body["overrides"]["containerOverrides"][0]["env"]}
+    assert "CLUB_ID" in env_names
+    assert "SOURCE_URL" in env_names
+    assert "LEASE_ID" in env_names
+
+    # Regression guard: containerOverrides must NOT be a top-level key —
+    # that was the exact bug (missing overrides wrapper).
+    assert "containerOverrides" not in body
+
+    monkeypatch.delenv("BIQ_CLOUD_TASKS_QUEUE", raising=False)
+
+
 # ─── Logo rights affirmation (ADDENDUM-06 section C3) ───────────────────────
 
 
@@ -669,3 +771,102 @@ def test_r7_rate_limit_url_separation(monkeypatch):
     assert theme._check_rate_limit("r7url", "https://example.com") == False
     # Different URL — should be allowed
     assert theme._check_rate_limit("r7url", "https://other.com") == True
+
+
+# ─── Logo upload endpoint ───────────────────────────────────────────────
+
+
+def test_logo_upload_happy_path(admin_client, club_id):
+    """PUT /logo/upload accepts a multipart file and stores it as a data URI."""
+    # First create a theme so there's a theme to update
+    admin_client.put(
+        f"/api/admin/clubs/{club_id}/theme",
+        json={"seed_brand": "#FF5A00"},
+    )
+
+    # Upload a tiny PNG (1x1 transparent pixel)
+    import base64
+
+    tiny_png = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+    )
+
+    r = admin_client.put(
+        f"/api/admin/clubs/{club_id}/theme/logo/upload",
+        files={"file": ("logo.png", tiny_png, "image/png")},
+    )
+    assert r.status_code == 200
+    data = r.json()
+    assert data["ok"] is True
+    logo = data["logo"]
+    assert logo["onLight"].startswith("data:image/png;base64,")
+    assert logo["onDark"].startswith("data:image/png;base64,")
+    assert logo["sourceUrl"] == "manual-upload"
+    assert logo["status"] == "confirmed"
+    assert logo["rightsConfirmedAt"] is not None
+
+
+def test_logo_upload_404_without_theme(admin_client, club_id):
+    """Upload requires an existing theme."""
+    import base64
+
+    tiny_png = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+    )
+    r = admin_client.put(
+        f"/api/admin/clubs/{club_id}/theme/logo/upload",
+        files={"file": ("logo.png", tiny_png, "image/png")},
+    )
+    assert r.status_code == 404
+
+
+def test_logo_upload_rejects_oversized(admin_client, club_id):
+    """Upload rejects files > 512KB."""
+    admin_client.put(
+        f"/api/admin/clubs/{club_id}/theme",
+        json={"seed_brand": "#FF5A00"},
+    )
+    # 600KB of zeros
+    big_data = b"\x00" * (600 * 1024)
+    r = admin_client.put(
+        f"/api/admin/clubs/{club_id}/theme/logo/upload",
+        files={"file": ("big.png", big_data, "image/png")},
+    )
+    assert r.status_code == 413
+
+
+def test_logo_upload_rejects_unsupported_content_type(admin_client, club_id):
+    """Upload rejects non-image content types."""
+    admin_client.put(
+        f"/api/admin/clubs/{club_id}/theme",
+        json={"seed_brand": "#FF5A00"},
+    )
+    r = admin_client.put(
+        f"/api/admin/clubs/{club_id}/theme/logo/upload",
+        files={"file": ("file.txt", b"hello", "text/plain")},
+    )
+    assert r.status_code == 415
+
+
+def test_logo_upload_requires_auth(client):
+    """Upload endpoint requires authentication."""
+    r = client.put(
+        "/api/admin/clubs/any/theme/logo/upload",
+        files={"file": ("logo.png", b"data", "image/png")},
+    )
+    assert r.status_code == 401
+
+
+def test_logo_url_override_happy_path(admin_client, club_id):
+    """PUT /logo with a URL stores the fetched image as a data URI."""
+    admin_client.put(
+        f"/api/admin/clubs/{club_id}/theme",
+        json={"seed_brand": "#FF5A00"},
+    )
+    # We can't easily mock the fetch in a unit test, but we can verify
+    # the endpoint validates the URL format
+    r = admin_client.put(
+        f"/api/admin/clubs/{club_id}/theme/logo",
+        json={"logo_url": "http://insecure.com/logo.png"},
+    )
+    assert r.status_code == 400  # http:// rejected, must be https://

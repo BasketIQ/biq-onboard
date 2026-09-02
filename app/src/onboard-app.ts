@@ -256,6 +256,19 @@ class BiqOnboardApp extends HTMLElement {
   private _pollingClubId: string | null = null;
   private _pollBackoff = 3000; // C11: starts at 3s, backs off
   private _polling = false; // C11: prevent overlap
+  // F5: Staleness timeout — if a theme_job has been pending/running for
+  // longer than this threshold without a terminal callback, treat it as
+  // stale and show the retry button. Cloud Tasks retries asynchronously
+  // and may never reach a terminal state from the caller's perspective
+  // (maxAttempts: 0 = unbounded retries). Without this, the UI hangs on
+  // "Procesando…" indefinitely with no escape except a full page reload.
+  private _pollStartedAt = 0; // timestamp (ms) when polling began
+  private _staleThresholdMs = 180_000; // 3 minutes
+  private _isStale = false;
+  // F5: When true, suppress rendering of old theme data fetched by
+  // loadThemeData() — the user triggered a new generation/retry and the
+  // backend still returns the previous theme until the new job completes.
+  private _awaitingNewJob = false;
   private _visibilityHandler: (() => void) | null = null; // C11: visibility handling
   // F12: Team catalog management
   private _teams: Array<{ id: string; name: string; category: string | null; gender: string | null; label: string | null; archived: boolean }> = [];
@@ -276,9 +289,15 @@ class BiqOnboardApp extends HTMLElement {
 
   // Shell-injected properties (ADR-009)
   set org(value: OrgContext | null) {
+    const prevClubId = this._org?.club?.id;
+    const newClubId = value?.club?.id;
     this._org = value;
     this.render();
-    if (value?.club?.id) this.loadThemeData(value.club.id);
+    // Only reload theme data when the club actually changes — prevents
+    // infinite loop when shell refreshes org context after theme state event
+    if (newClubId && newClubId !== prevClubId) {
+      this.loadThemeData(newClubId);
+    }
   }
   get org(): OrgContext | null { return this._org; }
 
@@ -297,9 +316,10 @@ class BiqOnboardApp extends HTMLElement {
   // ─── Data loading ─────────────────────────────────────────────────────
 
   private async loadThemeData(clubId: string): Promise<void> {
-    this._loading = true;
+    // Don't set _loading on data refreshes — only generateTheme/revertTheme
+    // set it. This prevents the "Generar tema" button from flashing
+    // "Generando…" on every poll or org context refresh.
     this._error = null;
-    this.render();
     try {
       const res = await fetch(`/api/clubs/${clubId}/theme`, {
         credentials: 'include',
@@ -307,16 +327,34 @@ class BiqOnboardApp extends HTMLElement {
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
-      this._theme = data.theme || null;
-      this._themeJob = data.themeJob || null;
+      const prevJobStatus = this._themeJob?.status;
+      const prevThemeStatus = this._theme?.status;
+      // F5: When a new generation/retry was triggered, the backend still
+      // returns the OLD theme until the new job completes. Suppress the
+      // stale theme while the new job is pending/running so the user
+      // doesn't see the old rejection/error card reappear.
+      const jobStatus = data.themeJob?.status || '';
+      if (this._awaitingNewJob && (jobStatus === 'pending' || jobStatus === 'running')) {
+        this._theme = null;
+        this._themeJob = data.themeJob || null;
+      } else {
+        // Job reached terminal state (or no job) — show the theme
+        this._awaitingNewJob = false;
+        this._theme = data.theme || null;
+        this._themeJob = data.themeJob || null;
+      }
       // B14: start polling if pending/running
       this._maybeStartPolling(clubId);
-      // B15: emit state event to shell
-      this._emitThemeStateEvent(clubId);
+      // B15: emit state event to shell ONLY when status actually changes
+      // (prevents infinite loop: shell refreshes org → loadThemeData → emit → shell refresh)
+      const newJobStatus = this._themeJob?.status;
+      const newThemeStatus = this._theme?.status;
+      if (prevJobStatus !== newJobStatus || prevThemeStatus !== newThemeStatus) {
+        this._emitThemeStateEvent(clubId);
+      }
     } catch (err) {
       this._error = (err as Error).message;
     } finally {
-      this._loading = false;
       this.render();
     }
   }
@@ -352,6 +390,16 @@ class BiqOnboardApp extends HTMLElement {
       this._stopPolling();
       return;
     }
+    // F5: Staleness check — if we've been polling for longer than the
+    // threshold without a terminal callback, mark as stale and stop.
+    // Cloud Tasks retries asynchronously (maxAttempts: 0 = unbounded) and
+    // the job may never reach a terminal state from the caller's side.
+    if (this._pollStartedAt > 0 && (Date.now() - this._pollStartedAt) > this._staleThresholdMs) {
+      this._isStale = true;
+      this._stopPolling();
+      this.render();
+      return;
+    }
     // C11: Clear timer before checking to avoid the "truthy timer" deadlock
     if (this._pollTimer) {
       clearTimeout(this._pollTimer);
@@ -359,10 +407,16 @@ class BiqOnboardApp extends HTMLElement {
     }
     // Prevent overlap — don't schedule if a poll is in-flight
     if (this._polling) return;
-    // Club changed — reset backoff
+    // Club changed — reset backoff and staleness
     if (this._pollingClubId !== clubId) {
       this._pollingClubId = clubId;
       this._pollBackoff = 3000;
+      this._pollStartedAt = Date.now();
+      this._isStale = false;
+    }
+    // Record start time if not yet set
+    if (this._pollStartedAt === 0) {
+      this._pollStartedAt = Date.now();
     }
     this._pollTimer = setTimeout(() => this._pollTheme(clubId), this._pollBackoff);
   }
@@ -375,6 +429,11 @@ class BiqOnboardApp extends HTMLElement {
     this._pollingClubId = null;
     this._polling = false;
     this._pollBackoff = 3000;
+    // F5: Don't reset _isStale here — it's reset when a new poll starts
+    // or when a new generation is triggered. _stopPolling is called on
+    // terminal states too, and we want to preserve the stale flag for
+    // rendering until the user explicitly retries.
+    this._pollStartedAt = 0;
   }
 
   // C11: Lifecycle — stop polling on disconnect, resume on reconnect
@@ -443,8 +502,18 @@ class BiqOnboardApp extends HTMLElement {
         return; // stale response for a different club
       }
       const prevStatus = this._themeJob?.status;
-      this._theme = data.theme || null;
-      this._themeJob = data.themeJob || null;
+      // F5: When awaiting a new job, suppress old theme data while
+      // the job is still pending/running. Only show the theme once
+      // the job reaches a terminal state.
+      const pollJobStatus = data.themeJob?.status || '';
+      if (this._awaitingNewJob && (pollJobStatus === 'pending' || pollJobStatus === 'running')) {
+        this._theme = null;
+        this._themeJob = data.themeJob || null;
+      } else {
+        this._awaitingNewJob = false;
+        this._theme = data.theme || null;
+        this._themeJob = data.themeJob || null;
+      }
       const newStatus = this._themeJob?.status;
       // B15: emit event on status change
       if (prevStatus !== newStatus) {
@@ -480,6 +549,14 @@ class BiqOnboardApp extends HTMLElement {
   private async generateTheme(clubId: string, url: string): Promise<void> {
     this._loading = true;
     this._error = null;
+    // F5: Reset staleness flag when a new generation is triggered
+    this._isStale = false;
+    this._pollStartedAt = 0;
+    // F5: Clear previous theme/job state so stale errors and branding
+    // cards from a prior generation don't persist into the new one.
+    this._theme = null;
+    this._themeJob = null;
+    this._awaitingNewJob = true;
     this.render();
     try {
       const res = await fetch(`/api/clubs/${clubId}/theme/generate`, {
@@ -543,8 +620,6 @@ class BiqOnboardApp extends HTMLElement {
 
   private async affirmLogoRights(clubId: string): Promise<void> {
     // Logo rights affirmation (ADDENDUM-06 §C3)
-    // This would call a dedicated endpoint; for now we use the theme PUT
-    // to update the logo rights status
     this._loading = true;
     this.render();
     try {
@@ -555,12 +630,60 @@ class BiqOnboardApp extends HTMLElement {
         body: JSON.stringify({ affirmed: true }),
       });
       if (!res.ok && res.status !== 404) {
-        // 404 = endpoint not implemented yet; that's OK for now
         throw new Error(`HTTP ${res.status}`);
       }
       await this.loadThemeData(clubId);
     } catch (err) {
       this._error = (err as Error).message;
+      this._loading = false;
+      this.render();
+    }
+  }
+
+  private async updateLogoUrl(clubId: string, logoUrl: string): Promise<void> {
+    this._loading = true;
+    this._error = null;
+    this.render();
+    try {
+      const res = await fetch(`/api/clubs/${clubId}/theme/logo`, {
+        method: 'PUT',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ logo_url: logoUrl }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => null);
+        throw new Error(data?.detail || `HTTP ${res.status}`);
+      }
+      await this.loadThemeData(clubId);
+    } catch (err) {
+      this._error = (err as Error).message;
+    } finally {
+      this._loading = false;
+      this.render();
+    }
+  }
+
+  private async uploadLogoFile(clubId: string, file: File): Promise<void> {
+    this._loading = true;
+    this._error = null;
+    this.render();
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      const res = await fetch(`/api/clubs/${clubId}/theme/logo/upload`, {
+        method: 'PUT',
+        credentials: 'include',
+        body: formData,
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => null);
+        throw new Error(data?.detail || `HTTP ${res.status}`);
+      }
+      await this.loadThemeData(clubId);
+    } catch (err) {
+      this._error = (err as Error).message;
+    } finally {
       this._loading = false;
       this.render();
     }
@@ -594,6 +717,14 @@ class BiqOnboardApp extends HTMLElement {
   private async retryTheme(clubId: string): Promise<void> {
     this._loading = true;
     this._error = null;
+    // F5: Reset staleness flag when retrying
+    this._isStale = false;
+    this._pollStartedAt = 0;
+    // F5: Clear previous theme/job state so stale errors and branding
+    // cards from a prior run don't persist into the retry.
+    this._theme = null;
+    this._themeJob = null;
+    this._awaitingNewJob = true;
     this.render();
     try {
       const res = await fetch(`/api/clubs/${clubId}/theme/retry`, {
@@ -657,15 +788,14 @@ class BiqOnboardApp extends HTMLElement {
     const website = club.website || '';
     const theme = this._theme;
     const job = this._themeJob;
-    const verdict = job?.verdict?.verdict || (theme?.activation?.themeStatus === 'active' ? 'club_confirmed' : 'uncertain');
-    const verdictCopy = VERDICT_COPY[verdict] || VERDICT_COPY.uncertain;
-    const statusCopy = theme ? THEME_STATUS_COPY[theme.status] || THEME_STATUS_COPY.pending : null;
     // B14: themeJob state matrix
     const jobStatus = job?.status || '';
     const jobCopy = jobStatus ? THEME_JOB_COPY[jobStatus] : null;
     const isPolling = jobStatus === 'pending' || jobStatus === 'running';
-    const canActivate = theme && (theme.status === 'draft' || theme.status === 'uncertain' || (jobStatus === 'succeeded' && theme.status !== 'active'));
-    const canRetry = jobStatus === 'failed' || jobStatus === 'unreachable' || jobStatus === 'rejected_not_a_club' || jobStatus === 'unsupported_source';
+    // F5: Allow retry when the job is in a terminal failed state OR when
+    // the staleness timeout has fired (job stuck pending/running without
+    // a terminal callback for > _staleThresholdMs).
+    const canRetry = jobStatus === 'failed' || jobStatus === 'unreachable' || jobStatus === 'rejected_not_a_club' || jobStatus === 'unsupported_source' || this._isStale;
 
     return `
       <section class="onboard-section">
@@ -678,142 +808,102 @@ class BiqOnboardApp extends HTMLElement {
           <p class="onboard-card-desc">Introduce la URL de la web del club. Extraeremos los colores del tema automáticamente.</p>
           <div class="onboard-form-row">
             <input type="url" class="onboard-input" data-website-input value="${escapeHtml(website)}" placeholder="https://www.miclub.com" />
-            <button class="onboard-btn onboard-btn-primary" data-generate-btn ${this._loading || isPolling ? 'disabled' : ''}>
-              ${isPolling ? 'Procesando…' : this._loading ? 'Generando…' : 'Generar tema'}
+            <button class="onboard-btn onboard-btn-primary" data-generate-btn ${this._loading || (isPolling && !this._isStale) ? 'disabled' : ''}>
+              ${isPolling && !this._isStale ? 'Procesando…' : this._loading ? 'Generando…' : 'Generar tema'}
             </button>
           </div>
         </div>
 
-        ${jobCopy ? `
+        ${jobCopy && !(jobStatus === 'succeeded' && theme?.status === 'rejected') ? `
           <div class="onboard-card onboard-theme-job-state" data-job-state="${jobStatus}">
-            <h3 class="onboard-card-title">${escapeHtml(jobCopy.title)}</h3>
-            <p class="onboard-card-desc">${escapeHtml(jobCopy.description)}</p>
-            ${isPolling ? '<div class="onboard-loading">Procesando…</div>' : ''}
-            ${canActivate ? `<button class="onboard-btn onboard-btn-primary" data-activate-btn ${this._loading ? 'disabled' : ''}>Sí, usarlo</button>` : ''}
+            ${isPolling && !this._isStale ? '<div class="onboard-loading">Procesando…</div>' : ''}
+            ${isPolling && this._isStale ? '<div class="onboard-error">El proceso está tardando demasiado. Puedes reintentar.</div>' : ''}
             ${canRetry ? `<button class="onboard-btn onboard-btn-primary" data-retry-btn ${this._loading ? 'disabled' : ''}>Reintentar</button>` : ''}
           </div>
         ` : ''}
 
         ${this._loading && !theme && !jobCopy ? '<div class="onboard-loading">Cargando…</div>' : ''}
 
-        ${theme ? this.renderBrandingState(theme, verdictCopy, statusCopy) : ''}
-        ${theme?.logo ? this.renderLogoSection(theme) : ''}
-        ${theme ? this.renderPreview(theme) : ''}
-        ${theme ? this.renderManualPicker(club.id, theme) : ''}
-        ${theme ? this.renderRevertButton(club.id) : ''}
+        ${theme ? this.renderLogoSection(theme) : ''}
+        ${theme ? this.renderActivationToggle(club.id, theme) : ''}
       </section>`;
   }
 
-  private renderBrandingState(theme: ClubTheme, verdictCopy: { title: string; description: string; action?: string }, statusCopy: { label: string; color: string } | null): string {
+  private renderActivationToggle(clubId: string, theme: ClubTheme): string {
+    const isActive = theme.status === 'active';
     const gateFailed = theme.gate && theme.gate.passed === false;
-    return `
-      <div class="onboard-card onboard-branding-state" data-branding-state="${theme.status}">
-        <div class="onboard-branding-header">
-          <h3 class="onboard-card-title">${escapeHtml(verdictCopy.title)}</h3>
-          ${statusCopy ? `<span class="onboard-badge" style="color: ${statusCopy.color}; border-color: ${statusCopy.color}">${escapeHtml(statusCopy.label)}</span>` : ''}
+    if (gateFailed) {
+      // Gate failed — show why + revert button, no switch
+      return `
+      <div class="onboard-card onboard-activation-card">
+        <h3 class="onboard-card-title">Activar tema</h3>
+        <div class="onboard-gate-failure">
+          <h4>El tema no superó el control de contraste</h4>
+          <p>Algunas combinaciones de color no cumplen WCAG 2.2 AA. Puedes ajustar manualmente los colores o usar el tema BasketIQ por defecto.</p>
+          <ul class="onboard-gate-failures">
+            ${(theme.gate?.failures || []).slice(0, 5).map(f => {
+              if (f.error) {
+                return `<li>${escapeHtml(f.fg || '?')} → ${escapeHtml(f.bg || '?')}: ${escapeHtml(f.error)}</li>`;
+              }
+              const ratio = f.ratio != null ? f.ratio.toFixed(2) : '?';
+              const required = f.required != null ? f.required.toFixed(1) : '?';
+              return `<li>${escapeHtml(f.fg || '?')} sobre ${escapeHtml(f.bg || '?')}: ratio ${ratio}:1 (mínimo ${required}:1)</li>`;
+            }).join('')}
+            ${(theme.gate?.failures || []).length > 5 ? `<li>… y ${(theme.gate?.failures || []).length - 5} más</li>` : ''}
+          </ul>
         </div>
-        <p class="onboard-card-desc">${escapeHtml(verdictCopy.description)}</p>
-
-        ${gateFailed ? `
-          <div class="onboard-gate-failure">
-            <h4>El tema no superó el control de contraste</h4>
-            <p>Algunas combinaciones de color no cumplen WCAG 2.2 AA. Puedes ajustar manualmente los colores o usar el tema BasketIQ por defecto.</p>
-            <ul class="onboard-gate-failures">
-              ${(theme.gate?.failures || []).map(f => `<li>${escapeHtml(f)}</li>`).join('')}
-            </ul>
-          </div>
-        ` : ''}
-
-        ${theme.status === 'active' ? `
-          <div class="onboard-active-notice">
-            <p>El tema del club está activo. Los colores se muestran en toda la aplicación.</p>
-          </div>
-        ` : ''}
-
-        ${theme.status === 'draft' ? `
-          <div class="onboard-draft-notice">
-            <p>El tema está en borrador. Revisa los colores y actívalo cuando estés conforme.</p>
-            <button class="onboard-btn onboard-btn-primary" data-activate-btn>Activar tema</button>
-          </div>
-        ` : ''}
+        <button class="onboard-btn onboard-btn-danger" data-revert-btn ${this._loading ? 'disabled' : ''}>
+          Restablecer tema BasketIQ
+        </button>
+      </div>`;
+    }
+    return `
+      <div class="onboard-card onboard-activation-card">
+        <div class="onboard-activation-row">
+          <h3 class="onboard-card-title">Activar tema</h3>
+          <label class="onboard-switch ${isActive ? 'on' : ''}">
+            <input type="checkbox" data-activate-switch ${isActive ? 'checked' : ''} ${this._loading ? 'disabled' : ''} />
+            <span class="onboard-switch-track"><span class="onboard-switch-thumb"></span></span>
+          </label>
+        </div>
+        <p class="onboard-card-desc">
+          ${isActive
+            ? 'El tema del club está activo y visible para todos los miembros.'
+            : 'Al activar, el tema del club será visible y aplicable a todos los miembros del equipo.'}
+        </p>
       </div>`;
   }
 
   private renderLogoSection(theme: ClubTheme): string {
     const logo = theme.logo;
-    if (!logo) return '';
-    const awaitingRights = logo.rightsConfirmedAt === null;
+    const hasLogo = logo && logo.onLight;
+    const awaitingRights = logo && logo.rightsConfirmedAt === null;
     return `
       <div class="onboard-card">
-        <h3 class="onboard-card-title">Escudo del club</h3>
-        ${logo.url ? `<img class="onboard-logo-preview" src="${escapeHtml(logo.url)}" alt="Escudo" />` : '<p class="onboard-card-desc">No se encontró escudo.</p>'}
-        ${awaitingRights ? `
+        <h3 class="onboard-card-title">Logo del club</h3>
+        ${hasLogo ? `<img class="onboard-logo-preview" src="${escapeHtml(logo.onLight)}" alt="Logo" />` : '<p class="onboard-card-desc">No se encontró logo automáticamente.</p>'}
+        <div class="onboard-logo-input-group">
+          <input type="url" class="onboard-logo-input" data-logo-url-input placeholder="https://www.club.com/logo.png" />
+          <button class="onboard-btn onboard-btn-primary" data-logo-url-btn ${this._loading ? 'disabled' : ''}>Actualizar logo</button>
+        </div>
+        <div class="onboard-logo-upload-group">
+          <label class="onboard-file-label">
+            <input type="file" accept="image/*" data-logo-file-input ${this._loading ? 'disabled' : ''} />
+            <span class="onboard-btn">Subir archivo</span>
+          </label>
+        </div>
+        ${hasLogo && awaitingRights ? `
           <div class="onboard-rights">
-            <p class="onboard-rights-text">Para mostrar el escudo necesitas confirmar que el club tiene derecho a usarlo.</p>
+            <p class="onboard-rights-text">Para mostrar el logo necesitas confirmar que el club tiene derecho a usarlo.</p>
             <label class="onboard-rights-label">
               <input type="checkbox" data-rights-checkbox />
-              <span>Confirmo que el club puede usar este escudo</span>
+              <span>Confirmo que el club puede usar este logo</span>
             </label>
             <button class="onboard-btn onboard-btn-primary" data-affirm-rights-btn disabled>Confirmar</button>
           </div>
-        ` : `
+        ` : (hasLogo ? `
           <p class="onboard-rights-confirmed">Derechos de uso confirmados.</p>
-        `}
-      </div>`;
-  }
-
-  private renderPreview(theme: ClubTheme): string {
-    const lightTokens = theme.tokens?.light || {};
-    const darkTokens = theme.tokens?.dark || {};
-    return `
-      <div class="onboard-card">
-        <h3 class="onboard-card-title">Vista previa</h3>
-        <div class="onboard-preview-grid">
-          <div class="onboard-preview onboard-preview-light" style="background: ${escapeHtml(lightTokens['--biq-bg'] || '#F4F6FA')}; color: ${escapeHtml(lightTokens['--biq-text'] || '#0D1735')}">
-            <span class="onboard-preview-label">Modo claro</span>
-            <div class="onboard-preview-swatch" style="background: ${escapeHtml(lightTokens['--biq-orange'] || '#FF5A00')}; color: ${escapeHtml(lightTokens['--biq-on-orange'] || '#FFFFFF')}">Acción</div>
-            <div class="onboard-preview-swatch" style="background: ${escapeHtml(lightTokens['--biq-surface-1'] || '#FFFFFF')}; border: 1px solid ${escapeHtml(lightTokens['--biq-line'] || '#E4E8F0')}">Superficie</div>
-          </div>
-          <div class="onboard-preview onboard-preview-dark" style="background: ${escapeHtml(darkTokens['--biq-bg'] || '#080D1A')}; color: ${escapeHtml(darkTokens['--biq-text'] || '#FFFFFF')}">
-            <span class="onboard-preview-label">Modo oscuro</span>
-            <div class="onboard-preview-swatch" style="background: ${escapeHtml(darkTokens['--biq-orange'] || '#FF5A00')}; color: ${escapeHtml(darkTokens['--biq-on-orange'] || '#FFFFFF')}">Acción</div>
-            <div class="onboard-preview-swatch" style="background: ${escapeHtml(darkTokens['--biq-surface-1'] || '#111A2D')}; border: 1px solid ${escapeHtml(darkTokens['--biq-line'] || '#1A2440')}">Superficie</div>
-          </div>
-        </div>
-      </div>`;
-  }
-
-  private renderManualPicker(clubId: string, theme: ClubTheme): string {
-    const brand = theme.seed?.brand || '#FF5A00';
-    const brandAlt = theme.seed?.brandAlt || '';
-    return `
-      <div class="onboard-card">
-        <h3 class="onboard-card-title">Selector manual de colores</h3>
-        <p class="onboard-card-desc">Si la extracción automática no es correcta, puedes elegir los colores manualmente.</p>
-        <div class="onboard-form-row">
-          <label class="onboard-color-label">
-            <span>Color principal</span>
-            <input type="color" class="onboard-color-input" data-manual-brand value="${escapeHtml(brand)}" />
-          </label>
-          <label class="onboard-color-label">
-            <span>Color secundario (opcional)</span>
-            <input type="color" class="onboard-color-input" data-manual-brand-alt value="${escapeHtml(brandAlt || '#0A153A')}" />
-          </label>
-        </div>
-        <button class="onboard-btn onboard-btn-secondary" data-save-manual-btn ${this._loading ? 'disabled' : ''}>
-          ${this._loading ? 'Guardando…' : 'Guardar colores manuales'}
-        </button>
-      </div>`;
-  }
-
-  private renderRevertButton(clubId: string): string {
-    return `
-      <div class="onboard-card onboard-revert-card">
-        <h3 class="onboard-card-title">Restablecer tema BasketIQ</h3>
-        <p class="onboard-card-desc">Vuelve al tema BasketIQ por defecto, eliminando los colores del club.</p>
-        <button class="onboard-btn onboard-btn-danger" data-revert-btn ${this._loading ? 'disabled' : ''}>
-          Restablecer
-        </button>
+        ` : '')}
       </div>`;
   }
 
@@ -1375,25 +1465,23 @@ class BiqOnboardApp extends HTMLElement {
       });
     }
 
-    // Save manual theme
-    const saveBtn = this.shadow.querySelector('[data-save-manual-btn]');
-    const brandInput = this.shadow.querySelector('[data-manual-brand]') as HTMLInputElement | null;
-    const brandAltInput = this.shadow.querySelector('[data-manual-brand-alt]') as HTMLInputElement | null;
-    if (saveBtn && brandInput) {
-      saveBtn.addEventListener('click', () => {
-        const brand = brandInput.value.toUpperCase();
-        const brandAlt = brandAltInput?.value.toUpperCase() || null;
-        this.saveManualTheme(clubId, brand, brandAlt);
+    // Activation switch — direct toggle, no modal
+    const activateSwitch = this.shadow.querySelector('[data-activate-switch]') as HTMLInputElement | null;
+    if (activateSwitch) {
+      activateSwitch.addEventListener('change', () => {
+        if (activateSwitch.checked) {
+          this.activateTheme(clubId);
+        } else {
+          this.revertTheme(clubId);
+        }
       });
     }
 
-    // Revert theme
+    // Revert theme (gate-failed case)
     const revertBtn = this.shadow.querySelector('[data-revert-btn]');
     if (revertBtn) {
       revertBtn.addEventListener('click', () => {
-        if (confirm('¿Restablecer al tema BasketIQ por defecto?')) {
-          this.revertTheme(clubId);
-        }
+        this.revertTheme(clubId);
       });
     }
 
@@ -1409,11 +1497,26 @@ class BiqOnboardApp extends HTMLElement {
       });
     }
 
-    // B14: Activate theme button
-    const activateBtn = this.shadow.querySelector('[data-activate-btn]');
-    if (activateBtn) {
-      activateBtn.addEventListener('click', () => this.activateTheme(clubId));
+    // Logo URL input (manual logo override)
+    const logoUrlBtn = this.shadow.querySelector('[data-logo-url-btn]') as HTMLButtonElement | null;
+    const logoUrlInput = this.shadow.querySelector('[data-logo-url-input]') as HTMLInputElement | null;
+    if (logoUrlBtn && logoUrlInput) {
+      logoUrlBtn.addEventListener('click', () => {
+        const url = logoUrlInput.value.trim();
+        if (url) this.updateLogoUrl(clubId, url);
+      });
     }
+
+    // Logo file upload (manual logo override from disk)
+    const logoFileInput = this.shadow.querySelector('[data-logo-file-input]') as HTMLInputElement | null;
+    if (logoFileInput) {
+      logoFileInput.addEventListener('change', () => {
+        const file = logoFileInput.files?.[0];
+        if (file) this.uploadLogoFile(clubId, file);
+      });
+    }
+
+    // B14: Activate theme from job-state card (Sí, usarlo) — removed, activation now via switch
 
     // B14: Retry theme button
     const retryBtn = this.shadow.querySelector('[data-retry-btn]');

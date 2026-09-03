@@ -340,6 +340,7 @@ class BiqOnboardApp extends HTMLElement {
       } else {
         // Job reached terminal state (or no job) — show the theme
         this._awaitingNewJob = false;
+        this._loading = false; // reset loading on terminal state
         this._theme = data.theme || null;
         this._themeJob = data.themeJob || null;
       }
@@ -511,6 +512,7 @@ class BiqOnboardApp extends HTMLElement {
         this._themeJob = data.themeJob || null;
       } else {
         this._awaitingNewJob = false;
+        this._loading = false; // reset loading on terminal state
         this._theme = data.theme || null;
         this._themeJob = data.themeJob || null;
       }
@@ -795,7 +797,7 @@ class BiqOnboardApp extends HTMLElement {
     // F5: Allow retry when the job is in a terminal failed state OR when
     // the staleness timeout has fired (job stuck pending/running without
     // a terminal callback for > _staleThresholdMs).
-    const canRetry = jobStatus === 'failed' || jobStatus === 'unreachable' || jobStatus === 'rejected_not_a_club' || jobStatus === 'unsupported_source' || this._isStale;
+    const canRetry = jobStatus === 'failed' || jobStatus === 'unreachable' || jobStatus === 'uncertain' || jobStatus === 'rejected_not_a_club' || jobStatus === 'unsupported_source' || this._isStale;
 
     return `
       <section class="onboard-section">
@@ -816,6 +818,9 @@ class BiqOnboardApp extends HTMLElement {
 
         ${jobCopy && !(jobStatus === 'succeeded' && theme?.status === 'rejected') ? `
           <div class="onboard-card onboard-theme-job-state" data-job-state="${jobStatus}">
+            <h3 class="onboard-card-title">${escapeHtml(jobCopy.title)}</h3>
+            <p class="onboard-card-desc">${escapeHtml(jobCopy.description)}</p>
+            ${jobCopy.action && !isPolling ? `<p class="onboard-card-action">${escapeHtml(jobCopy.action)}</p>` : ''}
             ${isPolling && !this._isStale ? '<div class="onboard-loading">Procesando…</div>' : ''}
             ${isPolling && this._isStale ? '<div class="onboard-error">El proceso está tardando demasiado. Puedes reintentar.</div>' : ''}
             ${canRetry ? `<button class="onboard-btn onboard-btn-primary" data-retry-btn ${this._loading ? 'disabled' : ''}>Reintentar</button>` : ''}

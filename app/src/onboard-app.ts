@@ -797,7 +797,10 @@ class BiqOnboardApp extends HTMLElement {
     // F5: Allow retry when the job is in a terminal failed state OR when
     // the staleness timeout has fired (job stuck pending/running without
     // a terminal callback for > _staleThresholdMs).
-    const canRetry = jobStatus === 'failed' || jobStatus === 'unreachable' || jobStatus === 'uncertain' || jobStatus === 'rejected_not_a_club' || jobStatus === 'unsupported_source' || this._isStale;
+    // Note: "uncertain" is excluded — when a theme was extracted (even with
+    // low confidence), the admin can activate/deactivate it directly via the
+    // activation toggle. No retry needed.
+    const canRetry = jobStatus === 'failed' || jobStatus === 'unreachable' || jobStatus === 'rejected_not_a_club' || jobStatus === 'unsupported_source' || this._isStale;
 
     return `
       <section class="onboard-section">
@@ -816,7 +819,7 @@ class BiqOnboardApp extends HTMLElement {
           </div>
         </div>
 
-        ${jobCopy && !(jobStatus === 'succeeded' && theme?.status === 'rejected') ? `
+        ${jobCopy && !(jobStatus === 'succeeded' && theme?.status === 'rejected') && !(jobStatus === 'uncertain' && theme) ? `
           <div class="onboard-card onboard-theme-job-state" data-job-state="${jobStatus}">
             <h3 class="onboard-card-title">${escapeHtml(jobCopy.title)}</h3>
             <p class="onboard-card-desc">${escapeHtml(jobCopy.description)}</p>
@@ -829,8 +832,8 @@ class BiqOnboardApp extends HTMLElement {
 
         ${this._loading && !theme && !jobCopy ? '<div class="onboard-loading">Cargando…</div>' : ''}
 
-        ${theme ? this.renderLogoSection(theme) : ''}
         ${theme ? this.renderActivationToggle(club.id, theme) : ''}
+        ${theme ? this.renderLogoSection(theme) : ''}
       </section>`;
   }
 

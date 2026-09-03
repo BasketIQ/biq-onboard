@@ -9,8 +9,10 @@
  *        empty container — the jobCopy title/description were never inserted
  *        into the HTML, so the user saw an empty card for non-polling states.
  *
- * Bug 3: "uncertain" was not in the canRetry list, so no retry button was
- *        shown for uncertain verdicts.
+ * Bug 3 (revised): "uncertain" with a theme should NOT show a retry button
+ *        or the "Revisión necesaria" card. The admin activates/deactivates
+ *        via the activation toggle. The job state card is suppressed when
+ *        uncertain AND a theme exists.
  *
  * These tests verify the source code patterns directly, without requiring
  * Playwright or a built dist.
@@ -27,7 +29,6 @@ const SRC = readFileSync(join(__dirname, '..', 'src', 'onboard-app.ts'), 'utf-8'
 // ─── Bug 1: _loading reset on terminal state ───────────────────────────
 
 test('_loading is reset to false in loadThemeData terminal branch', () => {
-  // Find the loadThemeData method and check the terminal branch
   const idx = SRC.indexOf('async loadThemeData');
   assert.ok(idx > 0, 'loadThemeData method should exist');
   const section = SRC.slice(idx, idx + 2000);
@@ -38,7 +39,6 @@ test('_loading is reset to false in loadThemeData terminal branch', () => {
 });
 
 test('_loading is reset to false in _pollTheme terminal branch', () => {
-  // Find the _pollTheme method definition and check the terminal branch
   const idx = SRC.indexOf('private async _pollTheme');
   assert.ok(idx > 0, '_pollTheme method should exist');
   const section = SRC.slice(idx, idx + 3000);
@@ -64,17 +64,30 @@ test('jobCopy.description is rendered in the job state card HTML', () => {
   );
 });
 
-// ─── Bug 3: uncertain in canRetry ──────────────────────────────────────
+// ─── Bug 3 (revised): uncertain NOT in canRetry ────────────────────────
 
-test('uncertain is in the canRetry list', () => {
-  const match = SRC.match(/canRetry = .*?uncertain/);
-  assert.ok(match, "'uncertain' should be in the canRetry list");
+test('uncertain is NOT in the canRetry list', () => {
+  const match = SRC.match(/canRetry = ([^;]+)/);
+  assert.ok(match, 'canRetry definition should exist');
+  assert.ok(
+    !match[1].includes('uncertain'),
+    "'uncertain' should NOT be in the canRetry list — admin activates via toggle"
+  );
 });
 
-// ─── THEME_JOB_COPY has uncertain entry ────────────────────────────────
+// ─── Bug 4: job state card suppressed for uncertain + theme ────────────
+
+test('job state card is suppressed when uncertain AND theme exists', () => {
+  // The render condition should exclude uncertain+theme from showing the card
+  assert.ok(
+    SRC.includes("!(jobStatus === 'uncertain' && theme)"),
+    'The job state card render condition should suppress uncertain+theme'
+  );
+});
+
+// ─── THEME_JOB_COPY has uncertain entry (still defined, just not shown) ─
 
 test('THEME_JOB_COPY has an entry for uncertain status', () => {
-  // Check that the uncertain entry exists in THEME_JOB_COPY
   const match = SRC.match(/uncertain:\s*\{[^}]*title:/);
   assert.ok(match, 'THEME_JOB_COPY should have an uncertain entry with a title');
 });

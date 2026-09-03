@@ -832,8 +832,8 @@ class BiqOnboardApp extends HTMLElement {
 
         ${this._loading && !theme && !jobCopy ? '<div class="onboard-loading">Cargando…</div>' : ''}
 
-        ${theme ? this.renderLogoSection(theme) : ''}
         ${theme ? this.renderActivationToggle(club.id, theme) : ''}
+        ${theme ? this.renderLogoSection(theme) : ''}
       </section>`;
   }
 

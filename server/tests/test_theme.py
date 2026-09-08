@@ -870,3 +870,179 @@ def test_logo_url_override_happy_path(admin_client, club_id):
         json={"logo_url": "http://insecure.com/logo.png"},
     )
     assert r.status_code == 400  # http:// rejected, must be https://
+
+
+# ─── Issue #30: Theme deactivation and website persistence ──────────────────
+
+
+def _seed_active_gated_theme(club_id: str):
+    """Helper to seed an active theme with valid gate and tokens in the registry."""
+    from biq_onboard_server import org
+    from biq_core.org import Club
+    import hashlib
+    import json as _json_hash
+
+    light = {"primary": "#FF5A00", "onPrimary": "#FFFFFF", "surface": "#FFFFFF"}
+    dark = {"primary": "#FF5A00", "onPrimary": "#0A153A", "surface": "#111A2D"}
+    payload_hash = hashlib.sha256(
+        _json_hash.dumps({"light": light, "dark": dark}, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()[:16]
+
+    theme = {
+        "schemaVersion": 1,
+        "clubId": club_id,
+        "status": "active",
+        "source": {"kind": "extracted", "homepageUrl": "https://miclub.es"},
+        "seed": {"brand": "#FF5A00", "brandAlt": "#0A153A", "detectedFrom": "palette"},
+        "logo": {
+            "onLight": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+            "onDark": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+            "sourceUrl": "https://miclub.es/logo.png",
+            "status": "confirmed",
+            "rightsConfirmedAt": "2026-09-08T00:00:00Z",
+        },
+        "tokens": {"light": light, "dark": dark},
+        "gate": {
+            "passed": True,
+            "checkedAt": "2026-09-08T00:00:00Z",
+            "pairsChecked": 44,
+            "failures": [],
+            "repairs": [],
+            "payloadHash": payload_hash,
+        },
+        "activation": {
+            "themeStatus": "active",
+            "reason": "admin-activated",
+            "decidedAt": "2026-09-08T00:00:00Z",
+        },
+    }
+    reg = org.get_registry()
+    club = reg.get_club(club_id)
+    if club:
+        reg.merge_club_fields(club_id, {"theme": theme})
+    else:
+        reg.upsert_club(Club(id=club_id, name=f"Club {club_id}", status="active", theme=theme))
+    return theme
+
+
+def test_theme_deactivate_endpoint_requires_auth(client):
+    """POST /deactivate requires authentication."""
+    r = client.post("/api/admin/clubs/any/theme/deactivate")
+    assert r.status_code == 401
+
+
+def test_theme_deactivate_404_for_nonexistent_club(admin_client):
+    """POST /deactivate returns 404 for nonexistent club."""
+    r = admin_client.post("/api/admin/clubs/nonexistent/theme/deactivate")
+    assert r.status_code == 404
+
+
+def test_theme_deactivate_404_when_no_theme_exists(admin_client, club_id):
+    """POST /deactivate returns 404 when club has no theme."""
+    r = admin_client.post(f"/api/admin/clubs/{club_id}/theme/deactivate")
+    assert r.status_code == 404
+
+
+def test_theme_deactivate_transitions_to_draft_and_preserves_theme_data(admin_client, club_id):
+    """Scenario: Deactivating club theme transitions status to draft without destroying theme data.
+
+    Given an authenticated club administrator for club "club-1"
+    And "club-1" has an active theme with tokens, logo, and passed gate
+    When the administrator sends POST /api/clubs/club-1/theme/deactivate
+    Then the response status code is 200
+    And the theme status in the database is "draft"
+    And the theme tokens, logo, colors, and gate records remain intact in the database
+    """
+    initial_theme = _seed_active_gated_theme(club_id)
+
+    # When the administrator sends POST /api/admin/clubs/{club_id}/theme/deactivate
+    r = admin_client.post(f"/api/admin/clubs/{club_id}/theme/deactivate")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["status"] == "draft"
+    assert body["theme"]["status"] == "draft"
+    assert body["theme"]["activation"]["themeStatus"] == "draft"
+    assert body["theme"]["activation"]["reason"] == "admin-deactivated"
+
+    # Then check database record directly
+    from biq_onboard_server import org
+    reg = org.get_registry()
+    club = reg.get_club(club_id)
+    assert club is not None
+    stored_theme = club.theme
+    assert stored_theme is not None
+    assert stored_theme["status"] == "draft"
+
+    # Verify all tokens, logo, colors (seed), and gate records remain intact
+    assert stored_theme["tokens"] == initial_theme["tokens"]
+    assert stored_theme["logo"] == initial_theme["logo"]
+    assert stored_theme["seed"] == initial_theme["seed"]
+    assert stored_theme["gate"] == initial_theme["gate"]
+
+
+def test_theme_deactivate_idempotency(admin_client, club_id):
+    """Calling POST /deactivate when theme is already draft is idempotent and succeeds with 200."""
+    _seed_active_gated_theme(club_id)
+
+    # First deactivation
+    r1 = admin_client.post(f"/api/admin/clubs/{club_id}/theme/deactivate")
+    assert r1.status_code == 200
+    assert r1.json()["status"] == "draft"
+
+    # Second deactivation (already draft)
+    r2 = admin_client.post(f"/api/admin/clubs/{club_id}/theme/deactivate")
+    assert r2.status_code == 200
+    assert r2.json()["status"] == "draft"
+
+
+def test_generate_theme_persists_website_to_club_record(admin_client, club_id):
+    """Scenario: Generating a theme persists the website URL to the club record.
+
+    Given an authenticated club administrator for club "club-1"
+    When the administrator sends POST /api/clubs/club-1/theme/generate with homepage_url "https://miclub.es"
+    Then the response status code is 202
+    And the club "website" attribute in the database equals "https://miclub.es"
+    """
+    r = admin_client.post(
+        f"/api/admin/clubs/{club_id}/theme/generate",
+        json={"homepage_url": "https://miclub.es"},
+    )
+    assert r.status_code == 202
+
+    from biq_onboard_server import org
+    reg = org.get_registry()
+    club = reg.get_club(club_id)
+    assert club is not None
+    assert club.website == "https://miclub.es"
+
+
+def test_reactivating_deactivated_draft_theme_succeeds(admin_client, club_id):
+    """Scenario: Re-activating a deactivated draft theme succeeds.
+
+    Given a club with a theme in "draft" status that previously passed gate validation
+    When the administrator sends POST /api/clubs/club-1/theme/activate with confirmed=True
+    Then the response status code is 200
+    And the theme status in the database returns to "active"
+    """
+    _seed_active_gated_theme(club_id)
+
+    # Deactivate the theme
+    r_deact = admin_client.post(f"/api/admin/clubs/{club_id}/theme/deactivate")
+    assert r_deact.status_code == 200
+    assert r_deact.json()["status"] == "draft"
+
+    # Re-activate the theme
+    r_act = admin_client.post(
+        f"/api/admin/clubs/{club_id}/theme/activate",
+        json={"confirmed": True},
+    )
+    assert r_act.status_code == 200
+    assert r_act.json()["ok"] is True
+    assert r_act.json()["status"] == "active"
+    assert r_act.json()["theme"]["status"] == "active"
+
+    from biq_onboard_server import org
+    reg = org.get_registry()
+    club = reg.get_club(club_id)
+    assert club.theme["status"] == "active"

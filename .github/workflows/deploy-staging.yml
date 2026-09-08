@@ -2,15 +2,6 @@ name: Deploy Staging
 
 run-name: deploy staging @ ${{ github.ref_name }}
 
-# ── Rule 19 exception ──────────────────────────────────────────────────
-# This workflow does NOT use the org-wide `pick-runner` pattern
-# (rule 19). The pick-runner action selects `integration2` (visible at
-# org level), but biq-onboard is not in the self-hosted runner group's
-# repository allow-list, so the `test` job sits queued indefinitely.
-# Same issue documented in ci.yml. To remove this exception: add
-# biq-onboard to the self-hosted runners' repository allow-list (org
-# settings → Actions → Runners → Default group → configure access).
-
 on:
   workflow_dispatch:
   workflow_call:
@@ -30,8 +21,31 @@ permissions:
   deployments: write
 
 jobs:
-  test:
+  # Prefer a self-hosted runner (integration2 -> integration); fall
+  # back to ubuntu-latest when both are busy/offline or no token is configured.
+  pick:
+    name: Pick runner
     runs-on: ubuntu-latest
+    outputs:
+      runner: ${{ steps.runner.outputs.runner }}
+    steps:
+      - name: Checkout (action only)
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            .github/actions/pick-runner
+          sparse-checkout-cone-mode: false
+      - id: runner
+        uses: ./.github/actions/pick-runner
+        with:
+          token: ${{ secrets.RUNNER_PICK_PAT }}
+          development_runner_name: ${{ vars.DEVELOPMENT_RUNNER_NAME }}
+          integration_runner_name: ${{ vars.INTEGRATION_RUNNER_NAME }}
+          integration2_runner_name: ${{ vars.INTEGRATION2_RUNNER_NAME }}
+
+  test:
+    needs: [pick]
+    runs-on: ${{ needs.pick.outputs.runner == 'ubuntu-latest' && fromJSON('["ubuntu-latest"]') || fromJSON(format('["self-hosted","{0}"]', needs.pick.outputs.runner)) }}
     timeout-minutes: 10
     permissions:
       contents: read
@@ -42,6 +56,8 @@ jobs:
         with:
           ref: ${{ github.event_name == 'pull_request' && github.head_ref || github.ref_name }}
           persist-credentials: false
+      - name: Setup self-hosted env (toolcache)
+        uses: ./.github/actions/setup-self-hosted-env
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
         with:

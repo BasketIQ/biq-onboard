@@ -6,13 +6,14 @@ Endpoints:
     POST   /api/clubs/{club_id}/theme/generate  — enqueue generation job (202)
     POST   /api/clubs/{club_id}/theme/retry     — retry failed generation (202)
     POST   /api/clubs/{club_id}/theme/activate  — promote draft to active
+    POST   /api/clubs/{club_id}/theme/deactivate — deactivate theme without destroying data
     GET    /api/clubs/{club_id}/theme           — current ClubTheme or null
     PUT    /api/clubs/{club_id}/theme           — manual colour override (same gate)
     DELETE /api/clubs/{club_id}/theme           — revert to BasketIQ default
     POST   /api/clubs/{club_id}/theme/logo-rights — affirm/revoke logo rights
     POST   /api/clubs/{club_id}/theme/result    — internal: job result callback
 
-Authorisation: generate/retry/activate/put/delete require club-admin scope.
+Authorisation: generate/retry/activate/deactivate/put/delete require club-admin scope.
 The result endpoint is authenticated by a dedicated job-result credential
 (B12), separate from user S2S.
 
@@ -604,7 +605,7 @@ def generate_theme(club_id: str, payload: GenerateRequest, request: Request) -> 
     }
     # C16: Record attempt in history for rate limiting
     _record_attempt(new_theme_job, url)
-    registry.merge_club_fields(club_id, {"theme_job": new_theme_job})
+    registry.merge_club_fields(club_id, {"theme_job": new_theme_job, "website": url})
 
     # Enqueue after state is persisted (B10: worker cannot race absent state)
     try:
@@ -802,6 +803,39 @@ def activate_theme(club_id: str, payload: ActivateRequest, request: Request) -> 
     return {"ok": True, "status": "active", "theme": theme}
 
 
+@router.post("/deactivate")
+def deactivate_theme(club_id: str, request: Request) -> dict:
+    """Deactivate club theme non-destructively (Issue #30).
+
+    Transitions theme status to 'draft' while preserving tokens, logo,
+    colors, and gate records in the database.
+    Authorisation: club-admin scope. Idempotent if already in draft status.
+    """
+    _require_theme_admin(request, club_id)
+
+    registry = org.get_registry()
+    club = registry.get_club(club_id)
+    if club is None:
+        raise HTTPException(status_code=404, detail="club not found")
+
+    theme = getattr(club, "theme", None)
+    if not theme or not isinstance(theme, dict):
+        raise HTTPException(status_code=404, detail="no theme found")
+
+    theme["status"] = "draft"
+    activation = theme.get("activation")
+    if not isinstance(activation, dict):
+        activation = {}
+    activation["themeStatus"] = "draft"
+    activation["reason"] = "admin-deactivated"
+    activation["decidedAt"] = _now_iso()
+    theme["activation"] = activation
+
+    registry.merge_club_fields(club_id, {"theme": theme})
+
+    return {"ok": True, "status": "draft", "theme": theme}
+
+
 @router.get("")
 def get_theme(club_id: str, request: Request) -> dict:
     """Return the current ClubTheme or null (ADDENDUM-02 §8).
@@ -890,7 +924,8 @@ def put_theme(club_id: str, payload: ManualThemeRequest, request: Request) -> di
     # V4: Enqueue the canonical JS generation job with the manual seed.
     # The worker receives MANUAL_SEED_BRAND env override and skips website
     # extraction, using the manual seed directly for ramp/gate generation.
-    source_url = getattr(club, "website", None) or ""
+    # Manual jobs are not URL-driven, so sourceUrl is always "" per callback contract.
+    source_url = ""
     lease_id = f"lease-{club_id}-manual-{int(time.time())}"
     manual_job = {
         "status": "pending",

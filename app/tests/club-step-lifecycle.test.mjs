@@ -65,7 +65,7 @@ async function stopServer() {
 
 /**
  * Scenario responses:
- *   'join-ok'     → /api/auth/register ok (component redirects to /)
+ *   'join-ok'     → /api/auth/register ok (component shows pending-confirmation, no redirect)
  *   'join-fail'   → /api/auth/register 422 {"detail": "El ID del club no existe"}
  *   'join-netfail'→ /api/auth/register aborted (network rejection)
  *   'create-ok'   → onboarding/clubs ok with club.id, select-club ok
@@ -220,18 +220,43 @@ test('repeated submit still issues exactly one request', async (t) => {
   await browser.close();
 });
 
-test('success remains locked through redirect', async (t) => {
+test('join success shows pending-confirmation and does not navigate', async (t) => {
+  // D1 fix: A successful join creates a pending JoinRequest — the user has
+  // no real club yet. The component must NOT navigate to "/" (which would
+  // loop back to #/onboard via needsClubStep()). Instead it should stay on
+  // the join panel, clear the lock/spinner, and show a confirmation message.
   const browser = await chromium.launch();
   const { page, log } = await newPage(browser, 'join-ok');
   const state = await clickJoin(page, 'club_x');
   assert.equal(state.disabled, true, 'join button disabled at submission');
   await waitFor(() => log.some((e) => e.url.includes('/api/auth/register')));
-  // The ok response drives window.location.replace('/'); the component must not
-  // re-enable or re-submit. Give the redirect a moment to commit.
+  // Give the response handler a moment to process
   await page.waitForTimeout(250);
   const joins = log.filter((e) => e.url.includes('/api/auth/register'));
-  assert.equal(joins.length, 1, 'still exactly one request through redirect');
-  assert.equal(new URL(page.url()).pathname, '/', 'redirects to home');
+  assert.equal(joins.length, 1, 'still exactly one request');
+  // D1 fix: Must NOT have navigated. In this harness all paths serve the same
+  // HTML, so we verify non-navigation by checking the success message is visible
+  // (only set in the non-navigate path) and controls are re-enabled.
+  // If window.location.replace('/') had fired, the page would reload and the
+  // success message would not be present.
+  // Check that the pending-confirmation message is shown
+  const result = await page.evaluate(() => {
+    const el = document.getElementById('app');
+    const sr = el.shadowRoot;
+    const success = sr.querySelector('#club-panel-join .onboard-success');
+    const btn = sr.querySelector('[data-join-btn]');
+    const input = sr.querySelector('[data-join-id]');
+    return {
+      hasSuccess: !!success,
+      successText: success ? success.textContent.trim() : '',
+      btnDisabled: btn.disabled,
+      inputDisabled: input.disabled,
+    };
+  });
+  assert.equal(result.hasSuccess, true, 'pending-confirmation message is shown');
+  assert.match(result.successText, /Solicitud enviada/, 'message says request was sent');
+  assert.equal(result.btnDisabled, false, 'join button re-enabled after success');
+  assert.equal(result.inputDisabled, false, 'join input re-enabled after success');
   await browser.close();
 });
 
@@ -613,5 +638,48 @@ test('stale completion cannot mutate a newer mounted instance', async (t) => {
   releaseHang();
   await page.waitForTimeout(400);
   assert.equal(new URL(page.url()).pathname, before, 'stale completion did not navigate');
+  await browser.close();
+});
+
+test('Bug A: exit button on pending-confirmation calls logout, resets state, and navigates to /login', async (t) => {
+  const browser = await chromium.launch();
+  const { page, log } = await newPage(browser, 'join-ok');
+  // Submit a join request to reach the pending-confirmation screen.
+  await clickJoin(page, 'club_x');
+  await waitFor(() => log.some((e) => e.url.includes('/api/auth/register')));
+  // Wait for the exit button to appear.
+  await page.waitForFunction(() => {
+    const el = document.getElementById('app');
+    return !!(el.shadowRoot && el.shadowRoot.querySelector('[data-exit-login]'));
+  }, { timeout: 10000 });
+  // Capture state before clicking, then click the exit button.
+  const beforeClick = await page.evaluate(() => {
+    const el = document.getElementById('app');
+    return {
+      hasMessage: !!el.shadowRoot.querySelector('.onboard-success'),
+      hasExitBtn: !!el.shadowRoot.querySelector('[data-exit-login]'),
+      formJoinId: el._clubForm.joinId,
+      stepMessage: el._stepMessage,
+    };
+  });
+  assert.equal(beforeClick.hasMessage, true, 'pending-confirmation message shown');
+  assert.equal(beforeClick.hasExitBtn, true, 'exit button rendered');
+  assert.equal(beforeClick.formJoinId, 'club_x', 'form has typed value before exit');
+  // Click the exit button — this calls logout and navigates to /login.
+  await page.evaluate(() => {
+    document.getElementById('app').shadowRoot.querySelector('[data-exit-login]').click();
+  });
+  // Verify logout was called.
+  await waitFor(() => log.some((e) => e.url.includes('/api/auth/logout') && e.method === 'POST'));
+  const logoutCalls = log.filter((e) => e.url.includes('/api/auth/logout'));
+  assert.equal(logoutCalls.length, 1, 'exactly one logout request');
+  // Verify state was reset before navigation (check synchronously right
+  // after the logout fetch resolves but before location.replace completes).
+  // Since location.replace('/login') reloads the page, we verify the URL
+  // changed to /login (the harness serves the same HTML for all paths).
+  await page.waitForFunction(() => {
+    return window.location.pathname === '/login';
+  }, { timeout: 10000 });
+  assert.equal(new URL(page.url()).pathname, '/login', 'navigated to /login');
   await browser.close();
 });

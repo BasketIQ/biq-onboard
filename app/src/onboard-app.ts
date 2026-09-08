@@ -329,13 +329,10 @@ class BiqOnboardApp extends HTMLElement {
       const data = await res.json();
       const prevJobStatus = this._themeJob?.status;
       const prevThemeStatus = this._theme?.status;
-      // F5: When a new generation/retry was triggered, the backend still
-      // returns the OLD theme until the new job completes. Suppress the
-      // stale theme while the new job is pending/running so the user
-      // doesn't see the old rejection/error card reappear.
       const jobStatus = data.themeJob?.status || '';
       if (this._awaitingNewJob && (jobStatus === 'pending' || jobStatus === 'running')) {
-        this._theme = null;
+        // Issue #31: Keep previous theme preview displayed during polling
+        this._theme = this._theme || data.theme || null;
         this._themeJob = data.themeJob || null;
       } else {
         // Job reached terminal state (or no job) — show the theme
@@ -503,12 +500,11 @@ class BiqOnboardApp extends HTMLElement {
         return; // stale response for a different club
       }
       const prevStatus = this._themeJob?.status;
-      // F5: When awaiting a new job, suppress old theme data while
-      // the job is still pending/running. Only show the theme once
-      // the job reaches a terminal state.
+      const prevThemeStatus = this._theme?.status;
       const pollJobStatus = data.themeJob?.status || '';
       if (this._awaitingNewJob && (pollJobStatus === 'pending' || pollJobStatus === 'running')) {
-        this._theme = null;
+        // Issue #31: Keep previous theme preview displayed during polling
+        this._theme = this._theme || data.theme || null;
         this._themeJob = data.themeJob || null;
       } else {
         this._awaitingNewJob = false;
@@ -517,8 +513,9 @@ class BiqOnboardApp extends HTMLElement {
         this._themeJob = data.themeJob || null;
       }
       const newStatus = this._themeJob?.status;
+      const newThemeStatus = this._theme?.status;
       // B15: emit event on status change
-      if (prevStatus !== newStatus) {
+      if (prevStatus !== newStatus || prevThemeStatus !== newThemeStatus) {
         this._emitThemeStateEvent(clubId);
       }
       this._polling = false;
@@ -715,6 +712,29 @@ class BiqOnboardApp extends HTMLElement {
     }
   }
 
+  // Issue #31: Deactivate an active theme non-destructively
+  private async deactivateTheme(clubId: string): Promise<void> {
+    this._loading = true;
+    this._error = null;
+    this.render();
+    try {
+      const res = await fetch(`/api/clubs/${clubId}/theme/deactivate`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => null);
+        throw new Error(data?.detail || `HTTP ${res.status}`);
+      }
+      await this.loadThemeData(clubId);
+    } catch (err) {
+      this._error = (err as Error).message;
+      this._loading = false;
+      this.render();
+    }
+  }
+
   // B14: Retry a failed theme generation
   private async retryTheme(clubId: string): Promise<void> {
     this._loading = true;
@@ -812,14 +832,14 @@ class BiqOnboardApp extends HTMLElement {
           <h3 class="onboard-card-title">Sitio web del club</h3>
           <p class="onboard-card-desc">Introduce la URL de la web del club. Extraeremos los colores del tema automáticamente.</p>
           <div class="onboard-form-row">
-            <input type="url" class="onboard-input" data-website-input value="${escapeHtml(website)}" placeholder="https://www.miclub.com" />
+            <input type="url" class="onboard-input" data-website-input value="${escapeHtml(website)}" placeholder="https://www.miclub.com" ${this._loading || (isPolling && !this._isStale) ? 'disabled' : ''} />
             <button class="onboard-btn onboard-btn-primary" data-generate-btn ${this._loading || (isPolling && !this._isStale) ? 'disabled' : ''}>
               ${isPolling && !this._isStale ? 'Procesando…' : this._loading ? 'Generando…' : 'Generar tema'}
             </button>
           </div>
         </div>
 
-        ${jobCopy && !(jobStatus === 'succeeded' && theme?.status === 'rejected') && !(jobStatus === 'uncertain' && theme) ? `
+        ${jobCopy && !(jobStatus === 'succeeded' && theme?.status !== 'active') && !(jobStatus === 'uncertain' && theme) ? `
           <div class="onboard-card onboard-theme-job-state" data-job-state="${jobStatus}">
             <h3 class="onboard-card-title">${escapeHtml(jobCopy.title)}</h3>
             <p class="onboard-card-desc">${escapeHtml(jobCopy.description)}</p>
@@ -832,12 +852,12 @@ class BiqOnboardApp extends HTMLElement {
 
         ${this._loading && !theme && !jobCopy ? '<div class="onboard-loading">Cargando…</div>' : ''}
 
-        ${theme ? this.renderActivationToggle(club.id, theme) : ''}
+        ${theme ? this.renderActivationToggle(club.id, theme, isPolling) : ''}
         ${theme ? this.renderLogoSection(theme) : ''}
       </section>`;
   }
 
-  private renderActivationToggle(clubId: string, theme: ClubTheme): string {
+  private renderActivationToggle(clubId: string, theme: ClubTheme, isPolling: boolean = false): string {
     const isActive = theme.status === 'active';
     const gateFailed = theme.gate && theme.gate.passed === false;
     if (gateFailed) {
@@ -870,7 +890,7 @@ class BiqOnboardApp extends HTMLElement {
         <div class="onboard-activation-row">
           <h3 class="onboard-card-title">Activar tema</h3>
           <label class="onboard-switch ${isActive ? 'on' : ''}">
-            <input type="checkbox" data-activate-switch ${isActive ? 'checked' : ''} ${this._loading ? 'disabled' : ''} />
+            <input type="checkbox" data-activate-switch ${isActive ? 'checked' : ''} ${this._loading || (isPolling && !this._isStale) ? 'disabled' : ''} />
             <span class="onboard-switch-track"><span class="onboard-switch-thumb"></span></span>
           </label>
         </div>
@@ -1480,7 +1500,7 @@ class BiqOnboardApp extends HTMLElement {
         if (activateSwitch.checked) {
           this.activateTheme(clubId);
         } else {
-          this.revertTheme(clubId);
+          this.deactivateTheme(clubId);
         }
       });
     }

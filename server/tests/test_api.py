@@ -428,6 +428,92 @@ def test_create_and_list_teams(admin_client):
     assert r.json()["total"] == 1
 
 
+# ─── Team competitive_level (Item 28 Phase 1) ────────────────────────────────
+
+
+def test_create_team_with_competitive_level_roundtrips(admin_client):
+    admin_client.post("/api/admin/clubs", json={"id": "club_lvl", "name": "Club Lvl"})
+    admin_client.post(
+        "/api/admin/clubs/club_lvl/teams",
+        json={
+            "id": "team_lvl_1",
+            "club_id": "club_lvl",
+            "name": "Senior A",
+            "competitive_level": "Liga EBA",
+        },
+    )
+    r = admin_client.get("/api/admin/clubs/club_lvl/teams")
+    assert r.status_code == 200
+    team = r.json()["teams"][0]
+    assert team["competitive_level"] == "Liga EBA"
+
+
+def test_team_competitive_level_defaults_empty(admin_client):
+    admin_client.post("/api/admin/clubs", json={"id": "club_le", "name": "Club LE"})
+    admin_client.post(
+        "/api/admin/clubs/club_le/teams",
+        json={"id": "team_le_1", "club_id": "club_le", "name": "Senior B"},
+    )
+    r = admin_client.get("/api/admin/clubs/club_le/teams")
+    assert r.json()["teams"][0]["competitive_level"] == ""
+
+
+def test_update_team_competitive_level(admin_client):
+    admin_client.post("/api/admin/clubs", json={"id": "club_lu", "name": "Club LU"})
+    admin_client.post(
+        "/api/admin/clubs/club_lu/teams",
+        json={"id": "team_lu_1", "club_id": "club_lu", "name": "Cadete A"},
+    )
+    r = admin_client.put(
+        "/api/admin/clubs/club_lu/teams/team_lu_1",
+        json={"competitive_level": "Primera Nacional"},
+    )
+    assert r.status_code == 200
+    assert r.json()["team"]["competitive_level"] == "Primera Nacional"
+
+
+def test_update_team_omitting_level_preserves_stored_value(admin_client):
+    """Partial update: a PUT that doesn't resend competitive_level must not
+    clear it (is-not-None merge in update_team)."""
+    admin_client.post("/api/admin/clubs", json={"id": "club_lp", "name": "Club LP"})
+    admin_client.post(
+        "/api/admin/clubs/club_lp/teams",
+        json={
+            "id": "team_lp_1",
+            "club_id": "club_lp",
+            "name": "Junior A",
+            "competitive_level": "Liga EBA",
+        },
+    )
+    # Rename only — no competitive_level in the body.
+    r = admin_client.put(
+        "/api/admin/clubs/club_lp/teams/team_lp_1",
+        json={"name": "Junior A Renamed"},
+    )
+    assert r.status_code == 200
+    assert r.json()["team"]["competitive_level"] == "Liga EBA"
+
+
+def test_update_team_competitive_level_can_be_cleared(admin_client):
+    """Explicit empty string clears — falsy-but-intended writes must work."""
+    admin_client.post("/api/admin/clubs", json={"id": "club_lc", "name": "Club LC"})
+    admin_client.post(
+        "/api/admin/clubs/club_lc/teams",
+        json={
+            "id": "team_lc_1",
+            "club_id": "club_lc",
+            "name": "Junior B",
+            "competitive_level": "Liga EBA",
+        },
+    )
+    r = admin_client.put(
+        "/api/admin/clubs/club_lc/teams/team_lc_1",
+        json={"competitive_level": ""},
+    )
+    assert r.status_code == 200
+    assert r.json()["team"]["competitive_level"] == ""
+
+
 # ─── Team archive / unarchive (business remediation B) ───────────────────────
 
 

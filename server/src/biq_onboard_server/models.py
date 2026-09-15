@@ -44,6 +44,7 @@ class TeamCreate(BaseModel):
     category: str | None = None
     gender: str | None = None
     label: str | None = None
+    competitive_level: str | None = None
 
 
 class TeamUpdate(BaseModel):
@@ -53,6 +54,7 @@ class TeamUpdate(BaseModel):
     label: str | None = None
     timezone: str | None = None
     staff_user_ids: list[str] | None = None
+    competitive_level: str | None = None
 
 
 # ─── User ───────────────────────────────────────────────────────────────────

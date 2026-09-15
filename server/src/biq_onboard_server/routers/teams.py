@@ -71,6 +71,12 @@ def create_team(club_id: str, payload: TeamCreate, request: Request) -> dict:
     from biq_core.org import Team
 
     registry = org.get_registry()
+    # competitive_level is only passed when the caller sent it — under the
+    # registry's partial-write contract an omitted field means "leave alone",
+    # so a create against an existing id cannot silently clear a stored level.
+    extra = {}
+    if payload.competitive_level is not None:
+        extra["competitive_level"] = payload.competitive_level
     team = Team(
         id=payload.id,
         club_id=club_id,
@@ -78,6 +84,7 @@ def create_team(club_id: str, payload: TeamCreate, request: Request) -> dict:
         category=payload.category,
         gender=payload.gender,
         label=payload.label,
+        **extra,
     )
     registry.upsert_team(team)
     return {"ok": True, "team": {"id": team.id, "name": team.name}}
@@ -100,6 +107,7 @@ def list_teams(club_id: str, request: Request) -> dict:
                 "timezone": t.timezone,
                 "staff_user_ids": t.staff_user_ids,
                 "archived": t.archived,
+                "competitive_level": t.competitive_level,
             }
             for t in teams
         ],
@@ -131,6 +139,7 @@ def update_team(club_id: str, team_id: str, payload: TeamUpdate, request: Reques
         label=payload.label if payload.label is not None else existing.label,
         timezone=payload.timezone if payload.timezone is not None else existing.timezone,
         staff_user_ids=payload.staff_user_ids if payload.staff_user_ids is not None else existing.staff_user_ids,
+        competitive_level=payload.competitive_level if payload.competitive_level is not None else existing.competitive_level,
     )
     registry.upsert_team(team)
     return {
@@ -140,6 +149,7 @@ def update_team(club_id: str, team_id: str, payload: TeamUpdate, request: Reques
             "name": team.name,
             "timezone": team.timezone,
             "staff_user_ids": team.staff_user_ids,
+            "competitive_level": team.competitive_level,
         },
     }
 
@@ -178,6 +188,7 @@ def archive_team(club_id: str, team_id: str, request: Request) -> dict:
         label=existing.label,
         timezone=existing.timezone,
         staff_user_ids=existing.staff_user_ids,
+        competitive_level=existing.competitive_level,
         archived=True,
     )
     registry.upsert_team(team)
@@ -204,6 +215,7 @@ def unarchive_team(club_id: str, team_id: str, request: Request) -> dict:
         label=existing.label,
         timezone=existing.timezone,
         staff_user_ids=existing.staff_user_ids,
+        competitive_level=existing.competitive_level,
         archived=False,
     )
     registry.upsert_team(team)

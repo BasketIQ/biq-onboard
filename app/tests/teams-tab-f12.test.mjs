@@ -57,7 +57,7 @@ async function stopServer() {
 // Seed teams returned by the mocked API.
 const SEED_TEAMS = [
   { id: 'team_club1_senior_m', club_id: 'club1', name: 'Senior Masculino', category: 'senior', gender: 'M', label: '', archived: false },
-  { id: 'team_club1_senior_f', club_id: 'club1', name: 'Senior Femenino', category: 'senior', gender: 'F', label: '', archived: false },
+  { id: 'team_club1_senior_f', club_id: 'club1', name: 'Senior Femenino', category: 'senior', gender: 'F', label: '', archived: false, competitive_level: 'Liga EBA' },
   { id: 'team_club1_cadete_m', club_id: 'club1', name: 'Cadete Masculino', category: 'cadete', gender: 'M', label: '2011', archived: false },
   { id: 'team_club1_cadete_f', club_id: 'club1', name: 'Cadete Femenino', category: 'cadete', gender: 'F', label: '', archived: true },
 ];
@@ -267,6 +267,114 @@ test('F12: Delete team opens confirmation modal and sends DELETE on confirm', as
   await page.waitForTimeout(500);
   const deleteCalls = log.filter((e) => e.method === 'DELETE');
   assert.equal(deleteCalls.length, 1, 'exactly one DELETE request after confirmation');
+
+  await browser.close();
+});
+
+test('Item 28: read-row shows the stored competition level and Sin definir when empty', async () => {
+  const browser = await chromium.launch();
+  const { page } = await newPage(browser);
+
+  await page.evaluate(() => {
+    document.getElementById('app').shadowRoot.querySelector('[data-nav="teams"]').click();
+  });
+  await page.waitForFunction(() => {
+    const el = document.getElementById('app');
+    return !!(el.shadowRoot && el.shadowRoot.querySelector('.onboard-team-table'));
+  }, { timeout: 10000 });
+
+  const cells = await page.evaluate(() => {
+    const rows = [...document.getElementById('app').shadowRoot.querySelectorAll('tr[data-team-row]')];
+    return rows.map((r) => [...r.querySelectorAll('td')].map((td) => td.textContent.trim()));
+  });
+  const femRow = cells.find((c) => c[0].includes('Senior Femenino'));
+  const mascRow = cells.find((c) => c[0].includes('Senior Masculino'));
+  assert.ok(femRow, 'Senior Femenino row rendered');
+  assert.equal(femRow[2], 'Liga EBA', 'stored competition level is displayed');
+  assert.equal(mascRow[2], 'Sin definir', 'empty level renders the placeholder');
+
+  await browser.close();
+});
+
+test('Item 28: add-team row sends competitive_level in the POST body', async () => {
+  const browser = await chromium.launch();
+  const { page, log } = await newPage(browser);
+
+  await page.evaluate(() => {
+    document.getElementById('app').shadowRoot.querySelector('[data-nav="teams"]').click();
+  });
+  await page.waitForFunction(() => {
+    const el = document.getElementById('app');
+    return !!(el.shadowRoot && el.shadowRoot.querySelector('.onboard-team-table'));
+  }, { timeout: 10000 });
+
+  // Open the add-row for the junior category
+  await page.evaluate(() => {
+    const btn = document.getElementById('app').shadowRoot.querySelector('[data-add-team-category="junior"]');
+    btn.click();
+  });
+  await page.waitForFunction(() => {
+    return !!document.getElementById('app').shadowRoot.querySelector('tr[data-adding-row]');
+  }, { timeout: 10000 });
+
+  await page.evaluate(() => {
+    const row = document.getElementById('app').shadowRoot.querySelector('tr[data-adding-row]');
+    row.querySelector('[data-new-team-name]').value = 'Junior A';
+    row.querySelector('[data-new-team-name]').dispatchEvent(new Event('input', { bubbles: true }));
+    row.querySelector('[data-new-team-level]').value = 'Primera Nacional';
+    row.querySelector('[data-new-team-level]').dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await page.evaluate(() => {
+    document.getElementById('app').shadowRoot.querySelector('[data-confirm-add-team]').click();
+  });
+  await page.waitForTimeout(500);
+
+  const posts = log.filter((e) => e.method === 'POST' && e.url.includes('/teams'));
+  assert.equal(posts.length, 1, 'exactly one create request');
+  const body = JSON.parse(posts[0].postData);
+  assert.equal(body.competitive_level, 'Primera Nacional', 'create body carries the level');
+
+  await browser.close();
+});
+
+test('Item 28: inline edit sends competitive_level in the PUT body', async () => {
+  const browser = await chromium.launch();
+  const { page, log } = await newPage(browser);
+
+  await page.evaluate(() => {
+    document.getElementById('app').shadowRoot.querySelector('[data-nav="teams"]').click();
+  });
+  await page.waitForFunction(() => {
+    const el = document.getElementById('app');
+    return !!(el.shadowRoot && el.shadowRoot.querySelector('.onboard-team-table'));
+  }, { timeout: 10000 });
+
+  // Edit the Senior Femenino row (seeded with Liga EBA)
+  await page.evaluate(() => {
+    const row = document.getElementById('app').shadowRoot.querySelector('tr[data-team-row="team_club1_senior_f"]');
+    row.querySelector('[data-edit-team]').click();
+  });
+  await page.waitForFunction(() => {
+    return !!document.getElementById('app').shadowRoot.querySelector('[data-edit-team-level]');
+  }, { timeout: 10000 });
+
+  const prefilled = await page.evaluate(() => {
+    return document.getElementById('app').shadowRoot.querySelector('[data-edit-team-level]').value;
+  });
+  assert.equal(prefilled, 'Liga EBA', 'edit input is prefilled with the stored level');
+
+  await page.evaluate(() => {
+    const input = document.getElementById('app').shadowRoot.querySelector('[data-edit-team-level]');
+    input.value = 'Liga Femenina 2';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    document.getElementById('app').shadowRoot.querySelector('[data-save-team]').click();
+  });
+  await page.waitForTimeout(500);
+
+  const puts = log.filter((e) => e.method === 'PUT' && e.url.match(/\/teams\/[^/]+$/) && !e.url.includes('archive'));
+  assert.equal(puts.length, 1, 'exactly one update request');
+  const body = JSON.parse(puts[0].postData);
+  assert.equal(body.competitive_level, 'Liga Femenina 2', 'update body carries the edited level');
 
   await browser.close();
 });

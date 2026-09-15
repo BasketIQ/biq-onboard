@@ -271,7 +271,7 @@ class BiqOnboardApp extends HTMLElement {
   private _awaitingNewJob = false;
   private _visibilityHandler: (() => void) | null = null; // C11: visibility handling
   // F12: Team catalog management
-  private _teams: Array<{ id: string; name: string; category: string | null; gender: string | null; label: string | null; archived: boolean }> = [];
+  private _teams: Array<{ id: string; name: string; category: string | null; gender: string | null; label: string | null; archived: boolean; competitive_level?: string }> = [];
   private _teamsLoading = false;
   private _teamsError: string | null = null;
   private _editingTeamId: string | null = null;
@@ -1345,10 +1345,11 @@ class BiqOnboardApp extends HTMLElement {
         const genderLabel = GENDER_LABELS[t.gender || ''] || t.gender || '';
         const archivedBadge = t.archived ? '<span class="onboard-badge onboard-badge-muted">Archivado</span>' : '';
         if (this._editingTeamId === t.id) {
-          // Edit: only name is editable (pen icon → inline name field)
+          // Edit: name + competition level are editable inline
           return `<tr data-team-row="${escapeHtml(t.id)}" data-editing="true">
             <td><input type="text" class="onboard-input onboard-input-sm" data-edit-team-name value="${escapeHtml(t.name)}" /></td>
             <td>${escapeHtml(genderLabel)}</td>
+            <td><input type="text" class="onboard-input onboard-input-sm" data-edit-team-level placeholder="Nivel de competición" value="${escapeHtml(t.competitive_level || '')}" /></td>
             <td class="onboard-team-actions">
               <button class="onboard-icon-btn" data-save-team="${escapeHtml(t.id)}" title="Guardar" aria-label="Guardar">${ICON_CHECK}</button>
               <button class="onboard-icon-btn" data-cancel-edit title="Cancelar" aria-label="Cancelar">${ICON_CANCEL}</button>
@@ -1370,6 +1371,7 @@ class BiqOnboardApp extends HTMLElement {
         return `<tr data-team-row="${escapeHtml(t.id)}">
           <td>${escapeHtml(t.name)} ${archivedBadge}</td>
           <td>${escapeHtml(genderLabel)}</td>
+          <td>${escapeHtml(t.competitive_level || 'Sin definir')}</td>
           <td class="onboard-team-actions">${actions.join('')}</td>
         </tr>`;
       }).join('');
@@ -1382,6 +1384,7 @@ class BiqOnboardApp extends HTMLElement {
           <option value="F">Fem</option>
           <option value="X">Mix</option>
         </select></td>
+        <td><input type="text" class="onboard-input onboard-input-sm" data-new-team-level placeholder="Nivel de competición" /></td>
         <td class="onboard-team-actions">
           <button class="onboard-icon-btn" data-confirm-add-team="${escapeHtml(cat)}" title="Confirmar" aria-label="Confirmar">${ICON_CHECK}</button>
           <button class="onboard-icon-btn" data-cancel-add-team title="Cancelar" aria-label="Cancelar">${ICON_CANCEL}</button>
@@ -1404,7 +1407,7 @@ class BiqOnboardApp extends HTMLElement {
           <button class="onboard-icon-btn" data-add-team-category="${escapeHtml(cat)}" title="Añadir equipo" aria-label="Añadir equipo a ${escapeHtml(catLabel)}">${ICON_PLUS}</button>
         </div>
         <table class="onboard-team-table">
-          <thead><tr><th>Nombre</th><th>Género</th><th></th></tr></thead>
+          <thead><tr><th>Nombre</th><th>Género</th><th>Nivel de competición</th><th></th></tr></thead>
           <tbody>${rows}${addRow}</tbody>
         </table>
       </div>`;
@@ -1602,13 +1605,14 @@ class BiqOnboardApp extends HTMLElement {
       });
     }
 
-    // Save team edit (only name is sent)
+    // Save team edit (name + competition level are sent)
     this.shadow.querySelectorAll('[data-save-team]').forEach(btn => {
       btn.addEventListener('click', async () => {
         const teamId = (btn as HTMLElement).dataset.saveTeam || '';
         const row = this.shadow.querySelector(`tr[data-team-row="${CSS.escape(teamId)}"][data-editing="true"]`);
         if (!row) return;
         const name = (row.querySelector('[data-edit-team-name]') as HTMLInputElement)?.value.trim() || '';
+        const competitive_level = (row.querySelector('[data-edit-team-level]') as HTMLInputElement)?.value.trim() || '';
         if (!name) {
           this._teamsError = 'El nombre es obligatorio.';
           this.render();
@@ -1619,7 +1623,7 @@ class BiqOnboardApp extends HTMLElement {
             method: 'PUT',
             credentials: 'include',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name }),
+            body: JSON.stringify({ name, competitive_level }),
           });
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
           this._editingTeamId = null;
@@ -1733,6 +1737,7 @@ class BiqOnboardApp extends HTMLElement {
         if (!addRow) return;
         const name = (addRow.querySelector('[data-new-team-name]') as HTMLInputElement)?.value.trim() || '';
         const gender = (addRow.querySelector('[data-new-team-gender]') as HTMLSelectElement)?.value || 'M';
+        const competitive_level = (addRow.querySelector('[data-new-team-level]') as HTMLInputElement)?.value.trim() || '';
         if (!name) {
           this._teamsError = 'El nombre es obligatorio.';
           this.render();
@@ -1746,7 +1751,7 @@ class BiqOnboardApp extends HTMLElement {
             method: 'POST',
             credentials: 'include',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ id, club_id: clubId, name, category, gender }),
+            body: JSON.stringify({ id, club_id: clubId, name, category, gender, competitive_level }),
           });
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
           this._addingTeamCategory = null;

@@ -188,6 +188,7 @@ def archive_team(club_id: str, team_id: str, request: Request) -> dict:
         label=existing.label,
         timezone=existing.timezone,
         staff_user_ids=existing.staff_user_ids,
+        competitive_level=existing.competitive_level,
         archived=True,
     )
     registry.upsert_team(team)
@@ -214,6 +215,7 @@ def unarchive_team(club_id: str, team_id: str, request: Request) -> dict:
         label=existing.label,
         timezone=existing.timezone,
         staff_user_ids=existing.staff_user_ids,
+        competitive_level=existing.competitive_level,
         archived=False,
     )
     registry.upsert_team(team)

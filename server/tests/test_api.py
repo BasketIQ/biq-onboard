@@ -554,6 +554,28 @@ def test_unarchive_team_sets_archived_false(admin_client):
     assert team.archived is False
 
 
+def test_archive_unarchive_preserves_competitive_level(admin_client):
+    """Archive→unarchive rebuilds Team(...) explicitly — the stored
+    competitive_level must survive the round-trip."""
+    from biq_onboard_server import org
+
+    club_id, team_id = _make_team(admin_client, club_id="club_cl", team_id="team_cl_1")
+    admin_client.put(
+        f"/api/admin/clubs/{club_id}/teams/{team_id}",
+        json={"competitive_level": "Liga EBA"},
+    )
+
+    r = admin_client.put(f"/api/admin/clubs/{club_id}/teams/{team_id}/archive")
+    assert r.status_code == 200
+    team = org.get_registry().get_team(club_id, team_id)
+    assert team.competitive_level == "Liga EBA"
+
+    r = admin_client.put(f"/api/admin/clubs/{club_id}/teams/{team_id}/unarchive")
+    assert r.status_code == 200
+    team = org.get_registry().get_team(club_id, team_id)
+    assert team.competitive_level == "Liga EBA"
+
+
 def test_archive_nonexistent_team_404(admin_client):
     admin_client.post("/api/admin/clubs", json={"id": "club_404", "name": "Club 404"})
     r = admin_client.put("/api/admin/clubs/club_404/teams/no_such_team/archive")

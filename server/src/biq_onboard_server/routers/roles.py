@@ -13,7 +13,7 @@ from biq_core.roles.models import ROLES
 from fastapi import APIRouter, HTTPException, Request
 
 from .. import org
-from ..auth import _is_break_glass_admin, require_admin, session_user
+from ..auth import _is_break_glass_admin, require_roles_admin, session_user
 from ..models import RoleAssign
 
 router = APIRouter(prefix="/clubs/{club_id}/roles")
@@ -33,7 +33,7 @@ def _audit_log():
 
 @router.post("")
 def assign_role(club_id: str, payload: RoleAssign, request: Request) -> dict:
-    require_admin(request, club_id)
+    require_roles_admin(request, club_id)
     if payload.role not in ROLES:
         raise HTTPException(status_code=400, detail=f"Unknown role: {payload.role}")
 
@@ -91,7 +91,7 @@ def assign_role(club_id: str, payload: RoleAssign, request: Request) -> dict:
 
 @router.get("")
 def list_roles(club_id: str, request: Request) -> dict:
-    require_admin(request, club_id)
+    require_roles_admin(request, club_id)
     roles = org.get_roles()
     scope = f"club:{club_id}"
     assignments = roles.list_assignments_for_scope(scope)
@@ -107,7 +107,7 @@ def list_roles(club_id: str, request: Request) -> dict:
 
 @router.delete("/{assignment_id}")
 def remove_role(club_id: str, assignment_id: str, request: Request) -> dict:
-    require_admin(request, club_id)
+    require_roles_admin(request, club_id)
     roles = org.get_roles()
     scope = f"club:{club_id}"
     # Verify the assignment belongs to this club scope
@@ -116,26 +116,37 @@ def remove_role(club_id: str, assignment_id: str, request: Request) -> dict:
             status_code=403, detail="assignment does not belong to this club"
         )
 
-    # F9: Find the assignment before removing so we can audit it.
+    # F9: Find the assignment before removing so we can audit it — and so the
+    # same tiered rule that gates granting also gates revoking (a Sports
+    # Director must not remove an administrator assignment).
     assignments = roles.list_assignments_for_scope(scope)
     removed_assignment = next((a for a in assignments if a.id == assignment_id), None)
+    if removed_assignment is None:
+        raise HTTPException(status_code=404, detail="assignment not found")
+
+    actor = session_user(request)
+    if not _is_break_glass_admin(actor):
+        caps = _actor_caps(request, club_id)
+        if not can_assign_role(caps, removed_assignment.role):
+            raise HTTPException(
+                status_code=403,
+                detail=f"insufficient privileges to remove role: {removed_assignment.role}",
+            )
 
     roles.remove_assignment(assignment_id)
 
     # F9: Audit log.
-    if removed_assignment is not None:
-        from biq_core.roles import RoleChangeAudit
+    from biq_core.roles import RoleChangeAudit
 
-        actor = session_user(request)
-        _audit_log().record(
-            RoleChangeAudit(
-                action="remove",
-                actor_id=actor,
-                target_user_id=removed_assignment.user_id,
-                role=removed_assignment.role,
-                scope=scope,
-                assignment_id=assignment_id,
-            )
+    _audit_log().record(
+        RoleChangeAudit(
+            action="remove",
+            actor_id=actor,
+            target_user_id=removed_assignment.user_id,
+            role=removed_assignment.role,
+            scope=scope,
+            assignment_id=assignment_id,
         )
+    )
 
     return {"ok": True, "assignment_id": assignment_id}

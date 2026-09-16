@@ -75,6 +75,26 @@ def require_admin(request: Request, club_id: str | None = None) -> str:
     return user
 
 
+def require_roles_admin(request: Request, club_id: str) -> str:
+    """Return the session user or 403 if they hold no role-management cap.
+
+    F9 tiered gate: admits ``club.admin``/``roles.manage`` (administrator) and
+    ``roles.manage.sporting`` (sports_director). What each caller may then do
+    is still enforced per-role by ``can_assign_role`` at the endpoint.
+    """
+    user = session_user(request)
+    if _is_break_glass_admin(user):
+        return user
+    scope = f"club:{club_id}"
+    caps = effective_capabilities(user, scope, org.get_roles())
+    if not ({"club.admin", "roles.manage", "roles.manage.sporting"} & set(caps)):
+        raise HTTPException(
+            status_code=403,
+            detail=f"role-management capability required for club {club_id}",
+        )
+    return user
+
+
 @router.post("/login")
 def login(payload: LoginRequest, request: Request) -> dict:
     if not _authenticate(payload.username, payload.password):

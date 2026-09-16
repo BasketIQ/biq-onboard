@@ -66,6 +66,9 @@ class UserCreate(BaseModel):
     display_name: str | None = None
     email: str | None = None
     role: str = "coach"
+    # F9 multi-role: additional roles granted via RoleAssignments at the club
+    # scope. ``role`` stays the single primary role on the User record.
+    roles: list[str] | None = None
     default_team_id: str | None = None
     password: str | None = None
 
@@ -74,6 +77,10 @@ class UserUpdate(BaseModel):
     display_name: str | None = None
     email: str | None = None
     role: str | None = None
+    # F9 multi-role: when provided, the user's secondary club-scope roles are
+    # synced to this set (adds/removes RoleAssignments, audited). The primary
+    # ``role`` is always kept assigned and is never removed by the sync.
+    roles: list[str] | None = None
     default_team_id: str | None = None
 
 

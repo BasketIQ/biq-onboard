@@ -160,3 +160,164 @@ def test_assign_administrator_requires_roles_manage(app_and_client):
     # Here we verify the endpoint works for the break-glass admin.
     r = _assign_role(client, "club_tier", "admin_club_tier", "administrator")
     assert r.status_code == 200
+
+
+# ─── 4. Multi-role: secondary roles via assignments (Mi Club Phase 2) ───
+
+
+def _login_as(client, user_id, password):
+    """Switch the test client's session to a real registry user."""
+    client.post("/api/auth/logout")
+    r = client.post(
+        "/api/auth/login", json={"username": user_id, "password": password}
+    )
+    assert r.status_code == 200
+
+
+def _create_member(client, club_id, user_id, role="coach", password="pw-1234"):
+    return client.post(
+        f"/api/admin/clubs/{club_id}/users",
+        json={
+            "id": user_id,
+            "club_id": club_id,
+            "display_name": user_id,
+            "role": role,
+            "password": password,
+        },
+    )
+
+
+def test_sd_session_can_assign_sporting_role_but_not_admin(app_and_client):
+    """A non-break-glass sports_director reaches the endpoint (relaxed gate)
+    and can_assign_role still enforces the tier inside it."""
+    _, client = app_and_client
+    _create_club(client, "club_sd2")
+    _create_member(client, "club_sd2", "sd2", role="sports_director")
+    _create_member(client, "club_sd2", "member1", role="coach")
+
+    _login_as(client, "sd2", "pw-1234")
+
+    # Sporting role grant succeeds through the real endpoint.
+    r = _assign_role(client, "club_sd2", "member1", "coordinator")
+    assert r.status_code == 200
+
+    # Administrator grant is refused by can_assign_role.
+    r = _assign_role(client, "club_sd2", "member1", "administrator")
+    assert r.status_code == 403
+
+
+def test_sd_cannot_remove_administrator_assignment(app_and_client):
+    """Removal applies the same tiered rule as granting."""
+    _, client = app_and_client
+    _create_club(client, "club_rm")
+    _create_member(client, "club_rm", "sd_rm", role="sports_director")
+    _create_member(client, "club_rm", "admin_rm", role="administrator")
+
+    roles = org.get_roles()
+    scope = "club:club_rm"
+    admin_assignment = next(
+        a for a in roles.list_assignments("admin_rm", scope)
+        if a.role == "administrator"
+    )
+
+    _login_as(client, "sd_rm", "pw-1234")
+
+    # SD may not revoke an administrator assignment.
+    r = client.delete(f"/api/admin/clubs/club_rm/roles/{admin_assignment.id}")
+    assert r.status_code == 403
+
+    # But may revoke a sporting assignment it could have granted.
+    r = _assign_role(client, "club_rm", "sd_rm", "coach")
+    coach_aid = r.json()["assignment_id"]
+    r = client.delete(f"/api/admin/clubs/club_rm/roles/{coach_aid}")
+    assert r.status_code == 200
+
+
+def test_list_users_exposes_roles_including_secondaries(app_and_client):
+    """list_users returns primary role plus every active secondary."""
+    _, client = app_and_client
+    _create_club(client, "club_multi")
+    _create_member(client, "club_multi", "multi1", role="coach")
+    _assign_role(client, "club_multi", "multi1", "coordinator")
+
+    r = client.get("/api/admin/clubs/club_multi/users")
+    assert r.status_code == 200
+    user = next(u for u in r.json()["users"] if u["id"] == "multi1")
+    assert user["role"] == "coach"  # primary unchanged
+    assert sorted(user["roles"]) == ["coach", "coordinator"]
+
+
+def test_update_user_roles_syncs_secondary_assignments(app_and_client):
+    """PUT with roles adds/removes secondary assignments, keeps primary,
+    and writes an audit entry per mutation."""
+    _, client = app_and_client
+    _create_club(client, "club_sync")
+    _create_member(client, "club_sync", "sync1", role="coach")
+
+    r = client.put(
+        "/api/admin/clubs/club_sync/users/sync1",
+        json={"roles": ["coordinator", "sports_director"]},
+    )
+    assert r.status_code == 200
+    roles = org.get_roles()
+    active = {
+        a.role
+        for a in roles.list_assignments("sync1", "club:club_sync")
+        if a.is_active()
+    }
+    assert active == {"coach", "coordinator", "sports_director"}
+
+    # Narrow the set: coordinator removed, primary coach kept.
+    r = client.put(
+        "/api/admin/clubs/club_sync/users/sync1",
+        json={"roles": ["sports_director"]},
+    )
+    assert r.status_code == 200
+    active = {
+        a.role
+        for a in roles.list_assignments("sync1", "club:club_sync")
+        if a.is_active()
+    }
+    assert active == {"coach", "sports_director"}
+
+    entries = org.get_audit_log().list_for_scope("club:club_sync")
+    assigns = [e.role for e in entries if e.action == "assign"]
+    removes = [e.role for e in entries if e.action == "remove"]
+    assert "coordinator" in assigns and "sports_director" in assigns
+    assert "coordinator" in removes
+
+
+def test_create_user_with_secondary_roles(app_and_client):
+    """POST users accepts roles for simultaneous secondary assignments."""
+    _, client = app_and_client
+    _create_club(client, "club_cr")
+    r = client.post(
+        "/api/admin/clubs/club_cr/users",
+        json={
+            "id": "both1",
+            "club_id": "club_cr",
+            "display_name": "Both",
+            "role": "coach",
+            "roles": ["sports_director"],
+            "password": "pw-1234",
+        },
+    )
+    assert r.status_code == 200
+    roles = org.get_roles()
+    active = {
+        a.role
+        for a in roles.list_assignments("both1", "club:club_cr")
+        if a.is_active()
+    }
+    assert active == {"coach", "sports_director"}
+
+
+def test_update_user_roles_rejects_unknown_role(app_and_client):
+    _, client = app_and_client
+    _create_club(client, "club_bad")
+    _create_member(client, "club_bad", "bad1", role="coach")
+    r = client.put(
+        "/api/admin/clubs/club_bad/users/bad1",
+        json={"roles": ["not-a-role"]},
+    )
+    assert r.status_code == 400

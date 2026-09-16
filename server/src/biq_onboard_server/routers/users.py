@@ -206,6 +206,7 @@ def list_users(club_id: str, request: Request) -> dict:
                 "display_name": m.display_name,
                 "role": m.role,
                 "roles": _member_roles(m, assigned),
+                "status": m.status,
                 "default_team_id": m.default_team_id,
             }
             for m in members

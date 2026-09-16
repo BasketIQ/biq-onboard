@@ -57,6 +57,7 @@ def create_app() -> FastAPI:
     # Admin routes
     app.include_router(clubs.router, prefix="/api/admin", tags=["admin-clubs"])
     app.include_router(teams.router, prefix="/api/admin", tags=["admin-teams"])
+    app.include_router(teams.club_router, prefix="/api/admin", tags=["admin-teams"])
     app.include_router(users.router, prefix="/api/admin", tags=["admin-users"])
     app.include_router(roles.router, prefix="/api/admin", tags=["admin-roles"])
     app.include_router(onboarding.router, prefix="/api/admin", tags=["admin-onboarding"])

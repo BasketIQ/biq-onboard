@@ -558,3 +558,50 @@ def test_f12_idempotent_replay_reseeds_without_duplicates(client, monkeypatch):
 
     teams_after_second = reg.list_teams(club_id)
     assert len(teams_after_second) == 28, "no duplicate teams on replay"
+
+
+def test_f12_seeding_job_done_after_create(client, monkeypatch):
+    """Seeding tracks Club.team_seeding_job pending→done — durable, queryable
+    state instead of a log-only outcome."""
+    reg = org.get_registry()
+    _seed_user(reg, "u_f12j", "f12j@basketiq.io")
+    _as_session(monkeypatch, "u_f12j")
+
+    resp = client.post("/api/onboarding/clubs", json={"name": "CB F12 Job"})
+    assert resp.status_code == 200
+    club_id = resp.json()["club"]["id"]
+
+    job = reg.get_club(club_id).team_seeding_job
+    assert job is not None
+    assert job["status"] == "done"
+    assert job["teams_expected"] == 28
+    assert job["teams_written"] == 28
+    assert job["reason"] is None
+    assert job["catalog_slug"] == club_id
+    assert job["requestedAt"]
+    assert job["finishedAt"]
+
+
+def test_f12_seeding_failure_persists_failed_job(client, monkeypatch):
+    """A seeding write failure leaves a durable 'failed' job — and club
+    creation still succeeds (unchanged never-fails guarantee)."""
+    reg = org.get_registry()
+    _seed_user(reg, "u_f12f", "f12f@basketiq.io")
+    _as_session(monkeypatch, "u_f12f")
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("simulated write failure")
+
+    monkeypatch.setattr(reg, "bulk_upsert_teams", _boom)
+
+    resp = client.post("/api/onboarding/clubs", json={"name": "CB F12 Fail"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["teams_seeded"] == 0
+
+    job = reg.get_club(data["club"]["id"]).team_seeding_job
+    assert job is not None
+    assert job["status"] == "failed"
+    assert "simulated write failure" in job["reason"]
+    assert job["teams_written"] == 0
+    assert job["finishedAt"] is not None

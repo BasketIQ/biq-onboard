@@ -19,7 +19,7 @@ from fastapi.responses import FileResponse
 from starlette.middleware.sessions import SessionMiddleware
 
 from . import auth
-from .routers import clubs, onboarding, onboarding_flow, roles, season, teams, theme, users
+from .routers import clubs, club_profile, onboarding, onboarding_flow, roles, season, teams, theme, users
 
 
 def create_app() -> FastAPI:
@@ -56,6 +56,7 @@ def create_app() -> FastAPI:
 
     # Admin routes
     app.include_router(clubs.router, prefix="/api/admin", tags=["admin-clubs"])
+    app.include_router(club_profile.router, prefix="/api/admin", tags=["admin-club-profile"])
     app.include_router(teams.router, prefix="/api/admin", tags=["admin-teams"])
     app.include_router(teams.club_router, prefix="/api/admin", tags=["admin-teams"])
     app.include_router(users.router, prefix="/api/admin", tags=["admin-users"])

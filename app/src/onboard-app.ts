@@ -298,6 +298,17 @@ class BiqOnboardApp extends HTMLElement {
   private _seedingPollBackoff = 3000;
   private _seedingPollStartedAt = 0;
   private _seedingPollingClubId: string | null = null;
+  // Mi Club Phase 3: club profile summary (Perfil tab).
+  private _clubSummary: {
+    club: { id: string; name: string; status: string };
+    team_count: number;
+    member_count: number;
+    methodology_present: boolean | null;
+    season_plan_present: boolean | null;
+  } | null = null;
+  private _clubSummaryLoading = false;
+  private _clubSummaryError: string | null = null;
+  private _clubSummaryClubId: string | null = null;
 
   constructor() {
     super();
@@ -321,11 +332,19 @@ class BiqOnboardApp extends HTMLElement {
       this._teamSeedingJob = null;
       this._seedingStale = false;
       this._stopSeedingPolling();
+      // Phase 3: club summary belongs to the previous club — drop it.
+      this._clubSummary = null;
+      this._clubSummaryClubId = null;
+      this._clubSummaryError = null;
     }
     // F12: If the shell deep-linked straight to the Equipos route, the tab
     // renders before any nav click — load the catalog on org arrival too.
     if (newClubId && this._subRoute === 'teams' && this._teams.length === 0 && !this._teamsLoading) {
       this.loadTeams(newClubId);
+    }
+    // Phase 3: same for the Perfil club summary.
+    if (newClubId && this._subRoute === 'profile' && !this._clubSummary && !this._clubSummaryLoading) {
+      this.loadClubSummary(newClubId);
     }
   }
   get org(): OrgContext | null { return this._org; }
@@ -344,6 +363,10 @@ class BiqOnboardApp extends HTMLElement {
     const clubId = this._org?.club?.id;
     if (this._subRoute === 'teams' && clubId && this._teams.length === 0 && !this._teamsLoading) {
       this.loadTeams(clubId);
+    }
+    // Phase 3: same for the Perfil club summary.
+    if (this._subRoute === 'profile' && clubId && !this._clubSummary && !this._clubSummaryLoading) {
+      this.loadClubSummary(clubId);
     }
   }
   get route(): string { return this._subRoute; }
@@ -388,6 +411,27 @@ class BiqOnboardApp extends HTMLElement {
     } catch (err) {
       this._error = (err as Error).message;
     } finally {
+      this.render();
+    }
+  }
+
+  // Mi Club Phase 3: load the club profile summary (id, counts, presence).
+  private async loadClubSummary(clubId: string): Promise<void> {
+    this._clubSummaryLoading = true;
+    this._clubSummaryError = null;
+    this.render();
+    try {
+      const res = await fetch(`/api/clubs/${clubId}/summary`, {
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      this._clubSummary = await res.json();
+      this._clubSummaryClubId = clubId;
+    } catch (err) {
+      this._clubSummaryError = (err as Error).message;
+    } finally {
+      this._clubSummaryLoading = false;
       this.render();
     }
   }
@@ -1626,6 +1670,32 @@ class BiqOnboardApp extends HTMLElement {
       administrator: 'Administrador',
       super_administrator: 'Super administrador',
     };
+
+    // Phase 3: club summary card — real reads from the summary endpoint.
+    // Presence is tri-state: Sí / No / Desconocido (upstream unreachable).
+    const presence = (v: boolean | null | undefined) =>
+      v === true ? 'Sí' : v === false ? 'No' : 'Desconocido';
+    const s = this._clubSummary;
+    let summaryCard: string;
+    if (this._clubSummaryLoading && !s) {
+      summaryCard = '<div class="onboard-loading" role="status" aria-live="polite"><span class="onboard-spinner" aria-hidden="true"></span> Cargando datos del club…</div>';
+    } else if (this._clubSummaryError && !s) {
+      summaryCard = `<div class="onboard-error" role="alert">${escapeHtml(this._clubSummaryError)}</div>`;
+    } else if (s) {
+      summaryCard = `<div class="onboard-card" data-club-summary>
+        <h3 class="onboard-card-title">Tu club</h3>
+        <dl class="onboard-summary-list">
+          <div class="onboard-summary-row"><dt>ID del club</dt><dd><code class="onboard-club-id" data-club-id>${escapeHtml(s.club.id)}</code></dd></div>
+          <div class="onboard-summary-row"><dt>Equipos</dt><dd data-team-count>${s.team_count}</dd></div>
+          <div class="onboard-summary-row"><dt>Miembros</dt><dd data-member-count>${s.member_count}</dd></div>
+          <div class="onboard-summary-row"><dt>Metodología</dt><dd data-methodology-present>${presence(s.methodology_present)}</dd></div>
+          <div class="onboard-summary-row"><dt>Plan de temporada</dt><dd data-season-plan-present>${presence(s.season_plan_present)}</dd></div>
+        </dl>
+      </div>`;
+    } else {
+      summaryCard = '';
+    }
+
     return `
       <section class="onboard-section">
         <div class="onboard-profile-card">
@@ -1634,6 +1704,7 @@ class BiqOnboardApp extends HTMLElement {
           ${club ? `<p class="onboard-profile-club">${escapeHtml(club.name || club.id)}</p>` : ''}
           <span class="onboard-profile-role">${escapeHtml(roleLabels[role] || role)}</span>
         </div>
+        ${summaryCard}
       </section>`;
   }
 
@@ -1648,6 +1719,8 @@ class BiqOnboardApp extends HTMLElement {
         // F12: Load teams when navigating to the Equipos tab.
         if (nav === 'teams' && this._teams.length === 0 && !this._teamsLoading) {
           this.loadTeams(clubId);
+        } else if (nav === 'profile' && !this._clubSummary && !this._clubSummaryLoading) {
+          this.loadClubSummary(clubId);
         } else {
           this.render();
         }

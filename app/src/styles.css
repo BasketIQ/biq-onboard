@@ -464,6 +464,42 @@
   color: var(--biq-text);
 }
 
+/* Mi Club Phase 3: club summary rows on the Perfil tab */
+.onboard-summary-list {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.onboard-summary-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.onboard-summary-row dt {
+  font-size: 13px;
+  color: var(--biq-muted);
+}
+
+.onboard-summary-row dd {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--biq-text);
+  text-align: right;
+}
+
+.onboard-club-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+  background: var(--biq-surface-3);
+  padding: 2px 8px;
+  border-radius: 6px;
+}
+
 /* ─── Club step (ADDENDUM-07 §6) ─────────────────────────────────────── */
 
 .onboard-clubstep {

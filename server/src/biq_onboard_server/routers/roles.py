@@ -13,7 +13,11 @@ from biq_core.roles.models import ROLES
 from fastapi import APIRouter, HTTPException, Request
 
 from .. import org
-from ..auth import _is_break_glass_admin, require_roles_admin, session_user
+from ..auth import (
+    _is_break_glass_admin,
+    _resolve_acting_identity,
+    require_roles_admin_acting,
+)
 from ..models import RoleAssign
 
 router = APIRouter(prefix="/clubs/{club_id}/roles")
@@ -21,7 +25,7 @@ router = APIRouter(prefix="/clubs/{club_id}/roles")
 
 def _actor_caps(request: Request, club_id: str) -> list[str]:
     """Resolve the caller's effective capabilities for the club scope."""
-    user = session_user(request)
+    user, _email = _resolve_acting_identity(request)
     scope = f"club:{club_id}"
     return effective_capabilities(user, scope, org.get_roles())
 
@@ -33,7 +37,7 @@ def _audit_log():
 
 @router.post("")
 def assign_role(club_id: str, payload: RoleAssign, request: Request) -> dict:
-    require_roles_admin(request, club_id)
+    actor = require_roles_admin_acting(request, club_id)
     if payload.role not in ROLES:
         raise HTTPException(status_code=400, detail=f"Unknown role: {payload.role}")
 
@@ -48,7 +52,6 @@ def assign_role(club_id: str, payload: RoleAssign, request: Request) -> dict:
 
     # F9: Tiered authorization — break-glass admin bypasses; otherwise
     # check can_assign_role with caller's effective capabilities.
-    actor = session_user(request)
     if not _is_break_glass_admin(actor):
         caps = _actor_caps(request, club_id)
         if not can_assign_role(caps, payload.role):
@@ -91,7 +94,7 @@ def assign_role(club_id: str, payload: RoleAssign, request: Request) -> dict:
 
 @router.get("")
 def list_roles(club_id: str, request: Request) -> dict:
-    require_roles_admin(request, club_id)
+    actor = require_roles_admin_acting(request, club_id)
     roles = org.get_roles()
     scope = f"club:{club_id}"
     assignments = roles.list_assignments_for_scope(scope)
@@ -107,7 +110,7 @@ def list_roles(club_id: str, request: Request) -> dict:
 
 @router.delete("/{assignment_id}")
 def remove_role(club_id: str, assignment_id: str, request: Request) -> dict:
-    require_roles_admin(request, club_id)
+    actor = require_roles_admin_acting(request, club_id)
     roles = org.get_roles()
     scope = f"club:{club_id}"
     # Verify the assignment belongs to this club scope
@@ -124,7 +127,6 @@ def remove_role(club_id: str, assignment_id: str, request: Request) -> dict:
     if removed_assignment is None:
         raise HTTPException(status_code=404, detail="assignment not found")
 
-    actor = session_user(request)
     if not _is_break_glass_admin(actor):
         caps = _actor_caps(request, club_id)
         if not can_assign_role(caps, removed_assignment.role):

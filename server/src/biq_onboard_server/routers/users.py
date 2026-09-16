@@ -3,9 +3,20 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel
+
+from biq_core.roles import can_assign_role, effective_capabilities
 
 from .. import org
-from ..auth import _is_break_glass_admin, require_admin, require_roles_admin, session_user
+from ..auth import (
+    _is_break_glass_admin,
+    _resolve_acting_identity,
+    require_admin,
+    require_admin_acting,
+    require_roles_admin,
+    require_roles_admin_acting,
+    session_user,
+)
 from ..models import PasswordReset, UserCreate, UserUpdate
 
 router = APIRouter()
@@ -182,7 +193,7 @@ def create_user(club_id: str, payload: UserCreate, request: Request) -> dict:
 @router.get("/clubs/{club_id}/users")
 def list_users(club_id: str, request: Request) -> dict:
     # F9: sports_directors need the member list to manage sporting roles.
-    require_roles_admin(request, club_id)
+    require_roles_admin_acting(request, club_id)
     registry = org.get_registry()
     members = registry.list_members(club_id)
     assigned = _active_roles_by_user(club_id)
@@ -195,6 +206,7 @@ def list_users(club_id: str, request: Request) -> dict:
                 "display_name": m.display_name,
                 "role": m.role,
                 "roles": _member_roles(m, assigned),
+                "status": m.status,
                 "default_team_id": m.default_team_id,
             }
             for m in members
@@ -205,7 +217,7 @@ def list_users(club_id: str, request: Request) -> dict:
 
 @router.put("/clubs/{club_id}/users/{user_id}")
 def update_user(club_id: str, user_id: str, payload: UserUpdate, request: Request) -> dict:
-    require_admin(request, club_id)
+    actor = require_admin_acting(request, club_id)
     from biq_core.org import User
     from biq_core.roles import RoleAssignment
     from biq_core.roles.models import ROLES
@@ -252,7 +264,7 @@ def update_user(club_id: str, user_id: str, payload: UserUpdate, request: Reques
     if payload.roles is not None:
         _sync_secondary_roles(
             club_id=club_id, user_id=user_id, primary_role=new_role,
-            target_roles=payload.roles, actor=session_user(request),
+            target_roles=payload.roles, actor=actor,
         )
 
     return {"ok": True, "user": {"id": user_id}}
@@ -260,7 +272,7 @@ def update_user(club_id: str, user_id: str, payload: UserUpdate, request: Reques
 
 @router.delete("/clubs/{club_id}/users/{user_id}")
 def delete_user(club_id: str, user_id: str, request: Request) -> dict:
-    require_admin(request, club_id)
+    require_admin_acting(request, club_id)
     from ..onboarding import _delete_user_safe
 
     registry = org.get_registry()
@@ -269,6 +281,70 @@ def delete_user(club_id: str, user_id: str, request: Request) -> dict:
         raise HTTPException(status_code=404, detail="user not found")
     _delete_user_safe(registry, user_id)
     return {"ok": True, "user_id": user_id}
+
+
+class UserStatusUpdate(BaseModel):
+    status: str  # "active" | "deactivated"
+
+
+@router.patch("/clubs/{club_id}/users/{user_id}/status")
+def set_user_status(club_id: str, user_id: str, payload: UserStatusUpdate,
+                    request: Request) -> dict:
+    """Deactivate/reactivate a member (Mi Club Phase 4, F11 enabler).
+
+    F9-tiered like role removal: the actor must hold a role-management cap
+    AND ``can_assign_role`` on the target's primary role — a Sports Director
+    can deactivate a coach but never an administrator. Audited via
+    ``RoleChangeAudit`` with action ``deactivate``/``reactivate``.
+    """
+    actor = require_roles_admin_acting(request, club_id)
+
+    if payload.status not in ("active", "deactivated"):
+        raise HTTPException(
+            status_code=400, detail="status must be 'active' or 'deactivated'")
+
+    registry = org.get_registry()
+    existing = registry.get_user(user_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="user not found")
+    if existing.club_id != club_id:
+        raise HTTPException(status_code=403, detail="user does not belong to this club")
+    if existing.status == payload.status:
+        return {"ok": True, "user_id": user_id, "status": payload.status}
+
+    # F9: the target's primary role bounds who may deactivate/reactivate them.
+    if not _is_break_glass_admin(actor):
+        caps = effective_capabilities(actor, f"club:{club_id}", org.get_roles())
+        if not can_assign_role(caps, existing.role):
+            raise HTTPException(
+                status_code=403,
+                detail=f"insufficient privileges to change status for role: {existing.role}",
+            )
+    if user_id == actor:
+        raise HTTPException(status_code=400, detail="cannot change own status")
+
+    from biq_core.org import User
+    from biq_core.roles import RoleChangeAudit
+
+    updated = User(
+        id=user_id,
+        club_id=club_id,
+        role=existing.role,
+        display_name=existing.display_name,
+        email=existing.email,
+        default_team_id=existing.default_team_id,
+        password_hash=existing.password_hash,
+        status=payload.status,
+    )
+    registry.upsert_user(updated)
+    org.get_audit_log().record(RoleChangeAudit(
+        action="deactivate" if payload.status == "deactivated" else "reactivate",
+        actor_id=actor,
+        target_user_id=user_id,
+        role=existing.role,
+        scope=f"club:{club_id}",
+    ))
+    return {"ok": True, "user_id": user_id, "status": payload.status}
 
 
 @router.post("/users/{user_id}/reset-password")

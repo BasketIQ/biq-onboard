@@ -40,6 +40,11 @@ def _as_session(monkeypatch: pytest.MonkeyPatch, user_id: str) -> None:
         "biq_onboard_server.routers.onboarding_flow.session_user",
         lambda request: user_id,
     )
+    # _resolve_acting_identity lives in auth.py — patch its session_user too.
+    monkeypatch.setattr(
+        "biq_onboard_server.auth.session_user",
+        lambda request: user_id,
+    )
 
 
 def _seed_user(

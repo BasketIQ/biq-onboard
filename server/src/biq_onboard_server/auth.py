@@ -9,6 +9,7 @@ Auth flow:
 
 from __future__ import annotations
 
+import hmac
 import os
 
 from fastapi import APIRouter, HTTPException, Request
@@ -72,6 +73,87 @@ def require_admin(request: Request, club_id: str | None = None) -> str:
                 status_code=403,
                 detail=f"administrator role required for club {club_id}",
             )
+    return user
+
+
+# ─── S2S acting identity (BFF proxy path) ────────────────────────────────
+#
+# The browser reaches this service through the biq-app proxy, which
+# authenticates with the S2S bearer and asserts identity via
+# ``X-BIQ-Acting-User-Id`` / ``X-BIQ-Acting-Email`` headers. When the secret
+# is configured these endpoints fail closed on a bad/missing token — the
+# local session is not consulted, so a stolen session cookie cannot be
+# replayed against an S2S-served deployment. Standalone deployments (no
+# secret configured) fall back to the session cookie.
+
+
+def _s2s_secret() -> str | None:
+    """Return the configured S2S secret, or None when S2S is disabled."""
+    return os.environ.get("BIQ_ONBOARD_S2S_SECRET") or None
+
+
+def _resolve_acting_identity(request: Request) -> tuple[str, str]:
+    """Resolve the acting user_id and email for the request.
+
+    S2S path: when ``Authorization: Bearer <secret>`` matches the configured
+    secret, the identity comes from ``X-BIQ-Acting-User-Id`` and
+    ``X-BIQ-Acting-Email`` headers. Fail-closed: bad/missing token ⇒ 401
+    even if a local session exists.
+
+    Standalone path: when no secret is configured, falls back to
+    ``session_user(request)`` with an empty email (the caller resolves it
+    from the registry).
+    """
+    secret = _s2s_secret()
+    if secret:
+        auth_header = request.headers.get("authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+            if hmac.compare_digest(token, secret):
+                user_id = request.headers.get("x-biq-acting-user-id", "")
+                email = request.headers.get("x-biq-acting-email", "")
+                if not user_id:
+                    raise HTTPException(
+                        status_code=403,
+                        detail="S2S request missing acting user identity",
+                    )
+                return user_id, email
+            # Bad token: fail-closed even if a session exists.
+            raise HTTPException(status_code=401, detail="invalid service token")
+        # Secret configured but no bearer header: fail-closed.
+        raise HTTPException(status_code=401, detail="invalid service token")
+
+    # Standalone mode — no S2S secret configured.
+    return session_user(request), ""
+
+
+def require_admin_acting(request: Request, club_id: str) -> str:
+    """``require_admin`` over the acting identity (S2S-aware)."""
+    user, _email = _resolve_acting_identity(request)
+    if _is_break_glass_admin(user):
+        return user
+    scope = f"club:{club_id}"
+    caps = effective_capabilities(user, scope, org.get_roles())
+    if "club.admin" not in caps and "roles.manage" not in caps:
+        raise HTTPException(
+            status_code=403,
+            detail=f"administrator role required for club {club_id}",
+        )
+    return user
+
+
+def require_roles_admin_acting(request: Request, club_id: str) -> str:
+    """``require_roles_admin`` over the acting identity (S2S-aware)."""
+    user, _email = _resolve_acting_identity(request)
+    if _is_break_glass_admin(user):
+        return user
+    scope = f"club:{club_id}"
+    caps = effective_capabilities(user, scope, org.get_roles())
+    if not ({"club.admin", "roles.manage", "roles.manage.sporting"} & set(caps)):
+        raise HTTPException(
+            status_code=403,
+            detail=f"role-management capability required for club {club_id}",
+        )
     return user
 
 

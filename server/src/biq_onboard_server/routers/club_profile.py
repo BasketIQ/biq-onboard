@@ -14,7 +14,7 @@ from biq_core.roles import effective_capabilities
 
 from .. import clients, org
 from ..auth import _is_break_glass_admin
-from ..routers.onboarding_flow import _resolve_acting_identity
+from ..auth import _resolve_acting_identity
 
 router = APIRouter()
 

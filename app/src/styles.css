@@ -601,47 +601,66 @@
   font-size: 14px;
 }
 
-/* F12: Equipos tab — team table, filter, modal */
+/* F12: Equipos tab — team list, filter, modal.
+   Two-line row layout (name full-width, meta+actions below) so real team
+   names never truncate on the 360px-class viewports this app targets —
+   the old fixed 4-column table left the name column ~80px. */
 
-.onboard-team-table {
-  width: 100%;
-  table-layout: fixed;
-  border-collapse: collapse;
+.onboard-team-list {
   margin-top: 8px;
 }
 
-/* Column widths: name flexible, gender narrow, actions fixed for 3 icons */
-.onboard-team-table th:nth-child(1),
-.onboard-team-table td:nth-child(1) { width: auto; }
-.onboard-team-table th:nth-child(2),
-.onboard-team-table td:nth-child(2) { width: 70px; }
-.onboard-team-table th:nth-child(3),
-.onboard-team-table td:nth-child(3) { width: 112px; }
-
-.onboard-team-table th {
-  text-align: left;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--biq-muted);
-  padding: 6px 8px;
-  border-bottom: 1px solid var(--biq-border, #e0e0e0);
-}
-
-.onboard-team-table td {
-  padding: 8px;
-  font-size: 14px;
+.onboard-team-row {
+  padding: 8px 0;
   border-bottom: 1px solid var(--biq-border, #f0f0f0);
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
-/* Inputs inside the team table must fill the cell, not expand it */
-.onboard-team-table .onboard-input {
+.onboard-team-row-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  /* Name wraps to a second visual line rather than clipping — a real name
+     ("Prebenjamín Femenino 2020") always renders in full. */
+  overflow-wrap: anywhere;
+}
+
+.onboard-team-name {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.onboard-team-row-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--biq-muted);
+}
+
+.onboard-team-level {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* Inputs inside a team row fill their line without expanding it */
+.onboard-team-row .onboard-input {
   width: 100%;
   min-width: 0;
-  flex: none;
+  flex: 1 1 auto;
   padding: 6px 8px;
   font-size: 14px;
+}
+
+.onboard-team-row-meta .onboard-input {
+  flex: 1 1 120px;
+  width: auto;
+}
+
+.onboard-team-row-meta select.onboard-input {
+  flex: 0 0 auto;
 }
 
 .onboard-team-actions {

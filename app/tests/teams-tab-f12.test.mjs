@@ -145,7 +145,7 @@ test('F12: Equipos tab lists active teams, filter shows archived, archive works'
   // Wait for teams to load and render
   await page.waitForFunction(() => {
     const el = document.getElementById('app');
-    return !!(el.shadowRoot && el.shadowRoot.querySelector('.onboard-team-table'));
+    return !!(el.shadowRoot && el.shadowRoot.querySelector('.onboard-team-list'));
   }, { timeout: 10000 });
 
   // Verify teams were fetched
@@ -153,7 +153,7 @@ test('F12: Equipos tab lists active teams, filter shows archived, archive works'
 
   // Default filter is "active" — only 3 active teams should be visible (1 archived hidden)
   const rowCount = await page.evaluate(() => {
-    return document.getElementById('app').shadowRoot.querySelectorAll('tr[data-team-row]').length;
+    return document.getElementById('app').shadowRoot.querySelectorAll('[data-team-row]').length;
   });
   assert.equal(rowCount, 3, '3 active teams rendered (archived hidden by default)');
 
@@ -164,7 +164,7 @@ test('F12: Equipos tab lists active teams, filter shows archived, archive works'
     select.dispatchEvent(new Event('change', { bubbles: true }));
   });
   await page.waitForFunction(() => {
-    return document.getElementById('app').shadowRoot.querySelectorAll('tr[data-team-row]').length === 4;
+    return document.getElementById('app').shadowRoot.querySelectorAll('[data-team-row]').length === 4;
   }, { timeout: 10000 });
 
   // Verify the unarchive button is visible for archived teams
@@ -197,7 +197,7 @@ test('F12: Edit team opens inline form and saves via PUT', async () => {
   });
   await page.waitForFunction(() => {
     const el = document.getElementById('app');
-    return !!(el.shadowRoot && el.shadowRoot.querySelector('.onboard-team-table'));
+    return !!(el.shadowRoot && el.shadowRoot.querySelector('.onboard-team-list'));
   }, { timeout: 10000 });
 
   // Click edit on the first team
@@ -240,7 +240,7 @@ test('F12: Delete team opens confirmation modal and sends DELETE on confirm', as
   });
   await page.waitForFunction(() => {
     const el = document.getElementById('app');
-    return !!(el.shadowRoot && el.shadowRoot.querySelector('.onboard-team-table'));
+    return !!(el.shadowRoot && el.shadowRoot.querySelector('.onboard-team-list'));
   }, { timeout: 10000 });
 
   // Click delete (🗑️) on the first team
@@ -280,18 +280,21 @@ test('Item 28: read-row shows the stored competition level and Sin definir when 
   });
   await page.waitForFunction(() => {
     const el = document.getElementById('app');
-    return !!(el.shadowRoot && el.shadowRoot.querySelector('.onboard-team-table'));
+    return !!(el.shadowRoot && el.shadowRoot.querySelector('.onboard-team-list'));
   }, { timeout: 10000 });
 
   const cells = await page.evaluate(() => {
-    const rows = [...document.getElementById('app').shadowRoot.querySelectorAll('tr[data-team-row]')];
-    return rows.map((r) => [...r.querySelectorAll('td')].map((td) => td.textContent.trim()));
+    const rows = [...document.getElementById('app').shadowRoot.querySelectorAll('[data-team-row]')];
+    return rows.map((r) => [
+      r.querySelector('.onboard-team-name')?.textContent.trim() || '',
+      r.querySelector('.onboard-team-level')?.textContent.trim() || '',
+    ]);
   });
   const femRow = cells.find((c) => c[0].includes('Senior Femenino'));
   const mascRow = cells.find((c) => c[0].includes('Senior Masculino'));
   assert.ok(femRow, 'Senior Femenino row rendered');
-  assert.equal(femRow[2], 'Liga EBA', 'stored competition level is displayed');
-  assert.equal(mascRow[2], 'Sin definir', 'empty level renders the placeholder');
+  assert.equal(femRow[1], 'Liga EBA', 'stored competition level is displayed');
+  assert.equal(mascRow[1], 'Sin definir', 'empty level renders the placeholder');
 
   await browser.close();
 });
@@ -305,7 +308,7 @@ test('Item 28: add-team row sends competitive_level in the POST body', async () 
   });
   await page.waitForFunction(() => {
     const el = document.getElementById('app');
-    return !!(el.shadowRoot && el.shadowRoot.querySelector('.onboard-team-table'));
+    return !!(el.shadowRoot && el.shadowRoot.querySelector('.onboard-team-list'));
   }, { timeout: 10000 });
 
   // Open the add-row for the junior category
@@ -314,11 +317,11 @@ test('Item 28: add-team row sends competitive_level in the POST body', async () 
     btn.click();
   });
   await page.waitForFunction(() => {
-    return !!document.getElementById('app').shadowRoot.querySelector('tr[data-adding-row]');
+    return !!document.getElementById('app').shadowRoot.querySelector('[data-adding-row]');
   }, { timeout: 10000 });
 
   await page.evaluate(() => {
-    const row = document.getElementById('app').shadowRoot.querySelector('tr[data-adding-row]');
+    const row = document.getElementById('app').shadowRoot.querySelector('[data-adding-row]');
     row.querySelector('[data-new-team-name]').value = 'Junior A';
     row.querySelector('[data-new-team-name]').dispatchEvent(new Event('input', { bubbles: true }));
     row.querySelector('[data-new-team-level]').value = 'Primera Nacional';
@@ -346,12 +349,12 @@ test('Item 28: inline edit sends competitive_level in the PUT body', async () =>
   });
   await page.waitForFunction(() => {
     const el = document.getElementById('app');
-    return !!(el.shadowRoot && el.shadowRoot.querySelector('.onboard-team-table'));
+    return !!(el.shadowRoot && el.shadowRoot.querySelector('.onboard-team-list'));
   }, { timeout: 10000 });
 
   // Edit the Senior Femenino row (seeded with Liga EBA)
   await page.evaluate(() => {
-    const row = document.getElementById('app').shadowRoot.querySelector('tr[data-team-row="team_club1_senior_f"]');
+    const row = document.getElementById('app').shadowRoot.querySelector('[data-team-row="team_club1_senior_f"]');
     row.querySelector('[data-edit-team]').click();
   });
   await page.waitForFunction(() => {
@@ -375,6 +378,58 @@ test('Item 28: inline edit sends competitive_level in the PUT body', async () =>
   assert.equal(puts.length, 1, 'exactly one update request');
   const body = JSON.parse(puts[0].postData);
   assert.equal(body.competitive_level, 'Liga Femenina 2', 'update body carries the edited level');
+
+  await browser.close();
+});
+
+test('Mi Club redesign: long team name never truncates at 360px', async () => {
+  const browser = await chromium.launch();
+  const LONG_NAME = 'Prebenjamín Femenino 2020';
+  const { page } = await newPage(browser);
+  await page.setViewportSize({ width: 360, height: 800 });
+
+  // Re-route the teams endpoint (Playwright routes are LIFO — this wins) so a
+  // real-world long name is what actually renders.
+  await page.route('**/api/clubs/*/teams**', async (route) => {
+    if (route.request().method() === 'GET') {
+      await route.fulfill({
+        status: 200, contentType: 'application/json',
+        body: JSON.stringify({
+          teams: [{
+            id: 'team_long', club_id: 'club1', name: LONG_NAME,
+            category: 'prebenjamin', gender: 'F', label: '2020', archived: false,
+            competitive_level: 'Liga Premini',
+          }],
+          total: 1,
+        }),
+      });
+      return;
+    }
+    await route.fulfill({ status: 200, contentType: 'application/json', body: '{"ok":true}' });
+  });
+
+  await page.evaluate(() => {
+    document.getElementById('app').shadowRoot.querySelector('[data-nav="teams"]').click();
+  });
+  await page.waitForFunction(() => {
+    const el = document.getElementById('app');
+    return !!(el.shadowRoot && el.shadowRoot.querySelector('[data-team-row="team_long"]'));
+  }, { timeout: 10000 });
+
+  const m = await page.evaluate(() => {
+    const name = document.getElementById('app').shadowRoot
+      .querySelector('[data-team-row="team_long"] .onboard-team-name');
+    const cs = getComputedStyle(name);
+    return {
+      text: name.textContent.trim(),
+      clipped: name.scrollWidth > name.clientWidth + 1,
+      ellipsis: cs.textOverflow === 'ellipsis' && cs.overflow === 'hidden',
+      wrap: cs.overflowWrap,
+    };
+  });
+  assert.equal(m.text, LONG_NAME, 'full name in the DOM');
+  assert.ok(!m.clipped, `name clipped: scrollWidth overflow at 360px`);
+  assert.ok(!m.ellipsis, 'name must not be ellipsis-truncated');
 
   await browser.close();
 });

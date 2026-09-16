@@ -322,6 +322,11 @@ class BiqOnboardApp extends HTMLElement {
       this._seedingStale = false;
       this._stopSeedingPolling();
     }
+    // F12: If the shell deep-linked straight to the Equipos route, the tab
+    // renders before any nav click — load the catalog on org arrival too.
+    if (newClubId && this._subRoute === 'teams' && this._teams.length === 0 && !this._teamsLoading) {
+      this.loadTeams(newClubId);
+    }
   }
   get org(): OrgContext | null { return this._org; }
 
@@ -334,6 +339,12 @@ class BiqOnboardApp extends HTMLElement {
   set route(value: string) {
     this._subRoute = value || '';
     this.render();
+    // F12: Deep-linking to #/onboard/teams bypasses the nav click that loads
+    // the catalog — trigger the load here when club context is already set.
+    const clubId = this._org?.club?.id;
+    if (this._subRoute === 'teams' && clubId && this._teams.length === 0 && !this._teamsLoading) {
+      this.loadTeams(clubId);
+    }
   }
   get route(): string { return this._subRoute; }
 

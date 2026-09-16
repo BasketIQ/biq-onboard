@@ -12,7 +12,7 @@ from biq_core.roles import effective_capabilities
 from .. import org
 from ..auth import _is_break_glass_admin, require_admin, session_user
 from ..models import TeamCreate, TeamUpdate
-from ..routers.onboarding_flow import _resolve_acting_identity
+from ..auth import _resolve_acting_identity
 
 router = APIRouter(prefix="/clubs/{club_id}/teams")
 # Mounted alongside `router` at /api/admin — club-scoped endpoints that are

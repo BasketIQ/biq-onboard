@@ -32,7 +32,7 @@ import os
 from fastapi import APIRouter, HTTPException, Request
 
 from .. import org
-from ..auth import _is_break_glass_admin, session_user
+from ..auth import _is_break_glass_admin, _resolve_acting_identity, _s2s_secret, session_user
 from ..models import ClubSelfCreate
 
 logger = logging.getLogger(__name__)
@@ -43,51 +43,11 @@ router = APIRouter()  # mounted at /api/onboarding by app.py
 ADMIN_ROLES = ("administrator", "sports_director", "super_administrator")
 
 
-def _s2s_secret() -> str | None:
-    """Return the configured S2S secret, or None when S2S is disabled."""
-    return os.environ.get("BIQ_ONBOARD_S2S_SECRET") or None
-
-
 def _current_season_year() -> int:
     """Return the current calendar year as a sensible season fallback."""
     from datetime import datetime, timezone
 
     return datetime.now(timezone.utc).year
-
-
-def _resolve_acting_identity(request: Request) -> tuple[str, str]:
-    """Resolve the acting user_id and email for the request.
-
-    S2S path: when ``Authorization: Bearer <secret>`` matches the configured
-    secret, the identity comes from ``X-BIQ-Acting-User-Id`` and
-    ``X-BIQ-Acting-Email`` headers. Fail-closed: bad/missing token ⇒ 401
-    even if a local session exists.
-
-    Standalone path: when no secret is configured, falls back to
-    ``session_user(request)`` with an empty email (the caller resolves it
-    from the registry).
-    """
-    secret = _s2s_secret()
-    if secret:
-        auth_header = request.headers.get("authorization", "")
-        if auth_header.startswith("Bearer "):
-            token = auth_header[7:]
-            if hmac.compare_digest(token, secret):
-                user_id = request.headers.get("x-biq-acting-user-id", "")
-                email = request.headers.get("x-biq-acting-email", "")
-                if not user_id:
-                    raise HTTPException(
-                        status_code=403,
-                        detail="S2S request missing acting user identity",
-                    )
-                return user_id, email
-            # Bad token: fail-closed even if a session exists.
-            raise HTTPException(status_code=401, detail="invalid service token")
-        # Secret configured but no bearer header: fail-closed.
-        raise HTTPException(status_code=401, detail="invalid service token")
-
-    # Standalone mode — no S2S secret configured.
-    return session_user(request), ""
 
 
 def _caller_memberships(registry, email: str) -> list:

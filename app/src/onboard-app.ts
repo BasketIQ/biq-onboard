@@ -211,6 +211,38 @@ interface TeamRow {
   competitive_level?: string;
 }
 
+// Mi Club Phase 4 (Miembros tab): member roster row from
+// GET /api/clubs/{id}/users — `roles` carries secondary RoleAssignments.
+interface MemberRow {
+  id: string;
+  display_name: string | null;
+  email: string | null;
+  role: string;
+  roles: string[];
+  status: string;
+}
+
+interface MemberAssignment {
+  id: string;
+  user_id: string;
+  role: string;
+  club_id: string;
+}
+
+const ROLE_LABELS: Record<string, string> = {
+  administrator: 'Administrador',
+  sports_director: 'Director deportivo',
+  coordinator: 'Coordinador',
+  coach: 'Entrenador',
+  player: 'Jugador',
+  super_administrator: 'Super administrador',
+};
+
+// Assignable club-scope roles for administrators (server enforces F9).
+const ASSIGNABLE_ROLES = ['administrator', 'sports_director', 'coordinator', 'coach', 'player'];
+// Sports directors are bounded to sporting roles only (server enforces).
+const SPORTING_ASSIGNABLE_ROLES = ['coordinator', 'coach', 'player'];
+
 function clubTabsForMembershipState(memberships: MembershipInfo[] | undefined): ClubTab[] {
   const ms = memberships || [];
   const showCreate = canCreateClub(ms);
@@ -298,6 +330,16 @@ class BiqOnboardApp extends HTMLElement {
   private _seedingPollBackoff = 3000;
   private _seedingPollStartedAt = 0;
   private _seedingPollingClubId: string | null = null;
+  // Mi Club Phase 4: Miembros tab — member roster + role assignments.
+  private _members: MemberRow[] | null = null;
+  private _memberAssignments: MemberAssignment[] | null = null;
+  private _membersLoading = false;
+  private _membersError: string | null = null;
+  private _editingMemberId: string | null = null;
+  private _deleteConfirmUserId: string | null = null;
+  private _inviteState: { sending: boolean; error: string | null; sent: string | null } = {
+    sending: false, error: null, sent: null,
+  };
   // Mi Club Phase 3: club profile summary (Perfil tab).
   private _clubSummary: {
     club: { id: string; name: string; status: string };
@@ -336,6 +378,12 @@ class BiqOnboardApp extends HTMLElement {
       this._clubSummary = null;
       this._clubSummaryClubId = null;
       this._clubSummaryError = null;
+      // Phase 4: same for the member roster.
+      this._members = null;
+      this._memberAssignments = null;
+      this._membersError = null;
+      this._editingMemberId = null;
+      this._deleteConfirmUserId = null;
     }
     // F12: If the shell deep-linked straight to the Equipos route, the tab
     // renders before any nav click — load the catalog on org arrival too.
@@ -345,6 +393,10 @@ class BiqOnboardApp extends HTMLElement {
     // Phase 3: same for the Perfil club summary.
     if (newClubId && this._subRoute === 'profile' && !this._clubSummary && !this._clubSummaryLoading) {
       this.loadClubSummary(newClubId);
+    }
+    // Phase 4: same for the Miembros roster.
+    if (newClubId && this._subRoute === 'members' && !this._members && !this._membersLoading) {
+      this.loadMembers(newClubId);
     }
   }
   get org(): OrgContext | null { return this._org; }
@@ -367,6 +419,10 @@ class BiqOnboardApp extends HTMLElement {
     // Phase 3: same for the Perfil club summary.
     if (this._subRoute === 'profile' && clubId && !this._clubSummary && !this._clubSummaryLoading) {
       this.loadClubSummary(clubId);
+    }
+    // Phase 4: same for the Miembros roster.
+    if (this._subRoute === 'members' && clubId && !this._members && !this._membersLoading) {
+      this.loadMembers(clubId);
     }
   }
   get route(): string { return this._subRoute; }
@@ -432,6 +488,32 @@ class BiqOnboardApp extends HTMLElement {
       this._clubSummaryError = (err as Error).message;
     } finally {
       this._clubSummaryLoading = false;
+      this.render();
+    }
+  }
+
+  // Mi Club Phase 4: Load the member roster + role assignments together —
+  // assignments are needed to resolve a removable role to its id.
+  private async loadMembers(clubId: string): Promise<void> {
+    this._membersLoading = true;
+    this._membersError = null;
+    this.render();
+    try {
+      const headers = { 'Content-Type': 'application/json' };
+      const [usersRes, rolesRes] = await Promise.all([
+        fetch(`/api/clubs/${clubId}/users`, { credentials: 'include', headers }),
+        fetch(`/api/clubs/${clubId}/roles`, { credentials: 'include', headers }),
+      ]);
+      if (!usersRes.ok) throw new Error(`HTTP ${usersRes.status}`);
+      const data = await usersRes.json();
+      this._members = (data.users || data || []) as MemberRow[];
+      this._memberAssignments = rolesRes.ok
+        ? ((await rolesRes.json()).assignments || []) as MemberAssignment[]
+        : [];
+    } catch (err) {
+      this._membersError = (err as Error).message;
+    } finally {
+      this._membersLoading = false;
       this.render();
     }
   }
@@ -959,11 +1041,14 @@ class BiqOnboardApp extends HTMLElement {
 
     // Route determines which view to show
     const section = this._subRoute || 'club-details';
+    const canManageMembers = ADMIN_ROLES.includes(this._org?.role || '');
     let content = '';
     if (section === 'profile') {
       content = this.renderProfile();
     } else if (section === 'teams') {
       content = this.renderTeamsTab(club.id);
+    } else if (section === 'members' && canManageMembers) {
+      content = this.renderMembers(club.id);
     } else {
       content = this.renderClubDetails(club);
     }
@@ -973,12 +1058,15 @@ class BiqOnboardApp extends HTMLElement {
         <nav class="onboard-nav">
           <button class="onboard-nav-item ${section === 'club-details' ? 'active' : ''}" data-nav="club-details">Estilo</button>
           <button class="onboard-nav-item ${section === 'teams' ? 'active' : ''}" data-nav="teams">Equipos</button>
+          ${canManageMembers ? `<button class="onboard-nav-item ${section === 'members' ? 'active' : ''}" data-nav="members">Miembros</button>` : ''}
           <button class="onboard-nav-item ${section === 'profile' ? 'active' : ''}" data-nav="profile">Perfil</button>
         </nav>
         ${content}
       </div>`;
     if (section === 'teams') {
       this.wireTeamsEvents(club.id);
+    } else if (section === 'members' && canManageMembers) {
+      this.wireMembersEvents(club.id);
     } else {
       this.wireEvents(club.id);
     }
@@ -1706,6 +1794,285 @@ class BiqOnboardApp extends HTMLElement {
         </div>
         ${summaryCard}
       </section>`;
+  }
+
+  // ─── Mi Club Phase 4: Miembros tab ─────────────────────────────────────
+
+  // Role management surface for a member row. Administrators can edit
+  // identity + all assignable roles; sports directors can only manage
+  // sporting roles on sporting-role members (server enforces the same).
+  private _memberCanEdit(member: MemberRow): boolean {
+    const role = this._org?.role || '';
+    if (role === 'administrator' || role === 'super_administrator') return true;
+    if (role === 'sports_director') {
+      return SPORTING_ASSIGNABLE_ROLES.includes(member.role);
+    }
+    return false;
+  }
+
+  private _memberAssignableRoles(): string[] {
+    const role = this._org?.role || '';
+    return role === 'sports_director' ? SPORTING_ASSIGNABLE_ROLES : ASSIGNABLE_ROLES;
+  }
+
+  private renderMembers(clubId: string): string {
+    const members = this._members || [];
+    const inv = this._inviteState;
+    const myRole = this._org?.role || '';
+    const isAdminTier = myRole === 'administrator' || myRole === 'super_administrator';
+    const roleOptions = this._memberAssignableRoles();
+
+    let body: string;
+    if (this._membersLoading && !this._members) {
+      body = '<p class="onboard-muted">Cargando miembros…</p>';
+    } else if (this._membersError) {
+      body = `<p class="onboard-error">No se pudo cargar la lista de miembros (${escapeHtml(this._membersError)}).</p>`;
+    } else if (members.length === 0) {
+      body = '<p class="onboard-muted">Aún no hay miembros en este club.</p>';
+    } else {
+      body = `<div class="onboard-member-list">${members.map((m) => this._renderMemberRow(m, isAdminTier, roleOptions)).join('')}</div>`;
+    }
+
+    return `<section class="onboard-section" data-testid="members-tab">
+      <div class="onboard-invite-card">
+        <h3 class="onboard-invite-title">Invitar a un miembro</h3>
+        <p class="onboard-muted">Recibirá un email con instrucciones para unirse al club.</p>
+        <form class="onboard-invite-form" data-invite-form data-club-id="${escapeHtml(clubId)}">
+          <input type="email" class="onboard-input" data-invite-email placeholder="email@ejemplo.com"
+            required ${inv.sending ? 'disabled' : ''} />
+          <button type="submit" class="onboard-btn" ${inv.sending ? 'disabled' : ''}>
+            ${inv.sending ? 'Enviando…' : 'Invitar'}</button>
+        </form>
+        ${inv.error ? `<p class="onboard-error" data-invite-error>${escapeHtml(inv.error)}</p>` : ''}
+        ${inv.sent ? `<p class="onboard-success" data-invite-sent>Invitación enviada a ${escapeHtml(inv.sent)}.</p>` : ''}
+      </div>
+      ${body}
+    </section>`;
+  }
+
+  private _renderMemberRow(m: MemberRow, isAdminTier: boolean, roleOptions: string[]): string {
+    const editing = this._editingMemberId === m.id;
+    const deactivated = m.status === 'deactivated';
+    const canEdit = this._memberCanEdit(m);
+    const secondary = (m.roles || []).filter((r) => r !== m.role);
+    const roleBadges = [m.role, ...secondary]
+      .map((r) => `<span class="onboard-role-badge">${escapeHtml(ROLE_LABELS[r] || r)}</span>`)
+      .join('');
+
+    if (!editing) {
+      const statusBadge = deactivated
+        ? '<span class="onboard-status-badge off">Desactivado</span>' : '';
+      const actions = canEdit ? `
+        <button class="onboard-btn onboard-btn-sm" data-member-edit="${escapeHtml(m.id)}">Editar</button>
+        <button class="onboard-btn onboard-btn-sm" data-member-status="${escapeHtml(m.id)}"
+          data-status="${deactivated ? 'active' : 'deactivated'}">
+          ${deactivated ? 'Reactivar' : 'Desactivar'}</button>
+        ${isAdminTier ? (this._deleteConfirmUserId === m.id
+          ? `<button class="onboard-btn onboard-btn-sm onboard-btn-danger" data-member-delete="${escapeHtml(m.id)}">Confirmar</button>`
+          : `<button class="onboard-btn onboard-btn-sm onboard-btn-danger" data-member-delete="${escapeHtml(m.id)}">Eliminar</button>`)
+        : ''}` : '';
+      return `<div class="onboard-member-row${deactivated ? ' off' : ''}" data-member-row="${escapeHtml(m.id)}">
+        <div class="onboard-member-line1">
+          <span class="onboard-member-name">${escapeHtml(m.display_name || m.email || m.id)}</span>
+          ${statusBadge}
+        </div>
+        <div class="onboard-member-line2">
+          <span class="onboard-member-email">${escapeHtml(m.email || '')}</span>
+          <span class="onboard-member-roles">${roleBadges}</span>
+          <span class="onboard-member-actions">${actions}</span>
+        </div>
+      </div>`;
+    }
+
+    // Edit mode: identity fields are admin-only; role chips for everyone who
+    // passed _memberCanEdit.
+    const identityFields = isAdminTier ? `
+      <input class="onboard-input" data-edit-name="${escapeHtml(m.id)}"
+        value="${escapeHtml(m.display_name || '')}" placeholder="Nombre" />
+      <input class="onboard-input" data-edit-email="${escapeHtml(m.id)}"
+        value="${escapeHtml(m.email || '')}" placeholder="Email" type="email" />` : '';
+    const primarySelect = isAdminTier ? `
+      <label class="onboard-member-field">Rol principal
+        <select class="onboard-input" data-edit-primary="${escapeHtml(m.id)}">
+          ${roleOptions.map((r) => `<option value="${r}" ${r === m.role ? 'selected' : ''}>${escapeHtml(ROLE_LABELS[r] || r)}</option>`).join('')}
+        </select>
+      </label>` : '';
+    const secondaryChips = secondary.map((r) => `
+      <span class="onboard-role-badge removable">${escapeHtml(ROLE_LABELS[r] || r)}
+        <button class="onboard-chip-x" data-member-role-remove="${escapeHtml(m.id)}" data-role="${escapeHtml(r)}"
+          title="Quitar rol">×</button>
+      </span>`).join('');
+    const addable = roleOptions.filter((r) => r !== m.role && !secondary.includes(r));
+    const addSelect = addable.length ? `
+      <select class="onboard-input onboard-input-sm" data-member-role-add="${escapeHtml(m.id)}">
+        <option value="">Añadir rol…</option>
+        ${addable.map((r) => `<option value="${r}">${escapeHtml(ROLE_LABELS[r] || r)}</option>`).join('')}
+      </select>` : '';
+
+    return `<div class="onboard-member-row editing" data-member-row="${escapeHtml(m.id)}">
+      <div class="onboard-member-edit">
+        ${identityFields}
+        ${primarySelect}
+        <div class="onboard-member-roles-edit">${secondaryChips}${addSelect}</div>
+        <div class="onboard-member-edit-actions">
+          <button class="onboard-btn onboard-btn-sm onboard-btn-primary" data-member-save="${escapeHtml(m.id)}">Guardar</button>
+          <button class="onboard-btn onboard-btn-sm" data-member-cancel>Cancelar</button>
+        </div>
+      </div>
+    </div>`;
+  }
+
+  private wireMembersEvents(clubId: string): void {
+    // Navigation (same as wireEvents — duplicated wiring is idempotent).
+    this.shadow.querySelectorAll('[data-nav]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const nav = (btn as HTMLElement).dataset.nav || 'club-details';
+        this._subRoute = nav;
+        if (nav === 'teams' && this._teams.length === 0 && !this._teamsLoading) {
+          this.loadTeams(clubId);
+        } else if (nav === 'profile' && !this._clubSummary && !this._clubSummaryLoading) {
+          this.loadClubSummary(clubId);
+        } else {
+          this.render();
+        }
+      });
+    });
+
+    // Invite form → Phase 5 endpoint.
+    this.shadow.querySelector('[data-invite-form]')?.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const input = this.shadow.querySelector('[data-invite-email]') as HTMLInputElement | null;
+      const email = (input?.value || '').trim();
+      if (!email) return;
+      this._inviteState = { sending: true, error: null, sent: null };
+      this.render();
+      try {
+        const res = await fetch(`/api/clubs/${clubId}/invite`, {
+          method: 'POST', credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        this._inviteState = { sending: false, error: null, sent: email };
+      } catch (err) {
+        this._inviteState = { sending: false, error: (err as Error).message, sent: null };
+      }
+      this.render();
+    });
+
+    const mutate = async (fn: () => Promise<Response>) => {
+      try {
+        const res = await fn();
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        this._membersError = null;
+      } catch (err) {
+        this._membersError = (err as Error).message;
+      } finally {
+        this._members = null; // force refetch
+        this.render();
+        this.loadMembers(clubId);
+      }
+    };
+
+    this.shadow.querySelectorAll('[data-member-edit]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        this._editingMemberId = (btn as HTMLElement).dataset.memberEdit || null;
+        this.render();
+      });
+    });
+    this.shadow.querySelector('[data-member-cancel]')?.addEventListener('click', () => {
+      this._editingMemberId = null;
+      this.render();
+    });
+
+    this.shadow.querySelectorAll('[data-member-status]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const el = btn as HTMLElement;
+        const userId = el.dataset.memberStatus!;
+        const status = el.dataset.status!;
+        mutate(() => fetch(`/api/clubs/${clubId}/users/${userId}/status`, {
+          method: 'PATCH', credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status }),
+        }));
+      });
+    });
+
+    this.shadow.querySelectorAll('[data-member-delete]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const userId = (btn as HTMLElement).dataset.memberDelete!;
+        if (this._deleteConfirmUserId === userId) {
+          this._deleteConfirmUserId = null;
+          mutate(() => fetch(`/api/clubs/${clubId}/users/${userId}`, {
+            method: 'DELETE', credentials: 'include',
+          }));
+        } else {
+          this._deleteConfirmUserId = userId;
+          this.render();
+        }
+      });
+    });
+
+    this.shadow.querySelectorAll('[data-member-role-remove]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const el = btn as HTMLElement;
+        const userId = el.dataset.memberRoleRemove!;
+        const role = el.dataset.role!;
+        const assignment = (this._memberAssignments || []).find(
+          (a) => a.user_id === userId && a.role === role && a.club_id === clubId);
+        if (!assignment) { this._membersError = 'Asignación no encontrada'; this.render(); return; }
+        mutate(() => fetch(`/api/clubs/${clubId}/roles/${encodeURIComponent(assignment.id)}`, {
+          method: 'DELETE', credentials: 'include',
+        }));
+      });
+    });
+
+    this.shadow.querySelectorAll('[data-member-role-add]').forEach(sel => {
+      sel.addEventListener('change', () => {
+        const el = sel as HTMLSelectElement;
+        const userId = el.dataset.memberRoleAdd!;
+        const role = el.value;
+        if (!role) return;
+        mutate(() => fetch(`/api/clubs/${clubId}/roles`, {
+          method: 'POST', credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ user_id: userId, role }),
+        }));
+      });
+    });
+
+    this.shadow.querySelectorAll('[data-member-save]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const userId = (btn as HTMLElement).dataset.memberSave!;
+        const nameEl = this.shadow.querySelector(`[data-edit-name="${userId}"]`) as HTMLInputElement | null;
+        const emailEl = this.shadow.querySelector(`[data-edit-email="${userId}"]`) as HTMLInputElement | null;
+        const primaryEl = this.shadow.querySelector(`[data-edit-primary="${userId}"]`) as HTMLSelectElement | null;
+        const payload: Record<string, string> = {};
+        const member = (this._members || []).find((m) => m.id === userId);
+        if (nameEl && nameEl.value.trim() !== (member?.display_name || '')) {
+          payload.display_name = nameEl.value.trim();
+        }
+        if (emailEl && emailEl.value.trim() !== (member?.email || '')) {
+          payload.email = emailEl.value.trim();
+        }
+        if (primaryEl && primaryEl.value !== member?.role) {
+          payload.role = primaryEl.value;
+        }
+        if (Object.keys(payload).length === 0) {
+          this._editingMemberId = null;
+          this.render();
+          return;
+        }
+        this._editingMemberId = null;
+        mutate(() => fetch(`/api/clubs/${clubId}/users/${userId}`, {
+          method: 'PUT', credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        }));
+      });
+    });
   }
 
   // ─── Event wiring ──────────────────────────────────────────────────────

@@ -800,3 +800,153 @@
   margin-top: 16px;
   justify-content: flex-end;
 }
+
+/* Mi Club Phase 4: Miembros tab */
+.onboard-invite-card {
+  padding: 16px;
+  border: 1px solid var(--biq-border, #e5e5e5);
+  border-radius: 12px;
+  margin-bottom: 16px;
+  background: var(--biq-surface, #fff);
+}
+
+.onboard-invite-title {
+  margin: 0 0 4px 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.onboard-invite-form {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.onboard-invite-form .onboard-input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.onboard-member-row {
+  padding: 10px 0;
+  border-bottom: 1px solid var(--biq-border, #f0f0f0);
+}
+
+.onboard-member-row.off {
+  opacity: 0.55;
+}
+
+.onboard-member-line1 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.onboard-member-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-weight: 500;
+}
+
+.onboard-member-line2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--biq-muted);
+  flex-wrap: wrap;
+}
+
+.onboard-member-email {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.onboard-member-roles {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.onboard-role-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--biq-chip, #f0f0f0);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.onboard-role-badge.removable {
+  padding-right: 4px;
+}
+
+.onboard-chip-x {
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  padding: 0 2px;
+  color: var(--biq-muted);
+}
+
+.onboard-status-badge.off {
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: #fde8e8;
+  color: #b91c1c;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.onboard-member-actions {
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.onboard-member-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 0;
+}
+
+.onboard-member-edit .onboard-input {
+  width: 100%;
+  padding: 6px 8px;
+  font-size: 14px;
+}
+
+.onboard-member-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--biq-muted);
+}
+
+.onboard-member-roles-edit {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.onboard-input-sm {
+  width: auto;
+  padding: 4px 8px;
+  font-size: 12px;
+}
+
+.onboard-member-edit-actions {
+  display: flex;
+  gap: 8px;
+}

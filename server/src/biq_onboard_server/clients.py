@@ -16,6 +16,10 @@ import httpx
 logger = logging.getLogger(__name__)
 
 
+class UpstreamServiceError(Exception):
+    """An outbound S2S call failed or the upstream reported failure."""
+
+
 def _internal_token() -> str:
     return os.environ.get("BIQ_INTERNAL_TOKEN", "")
 
@@ -85,3 +89,31 @@ def season_plan_present(team_ids: list[str]) -> bool | None:
     except Exception as exc:
         logger.warning("season-plan presence check: malformed body: %s", exc)
         return None
+
+
+def send_invite(to: str, club_name: str, club_id: str) -> dict:
+    """Ask biq-app to send a club invite email (Mi Club Phase 5).
+
+    ``POST {BIQ_APP_URL}/internal/email/invite`` with the canonical
+    ``X-Internal-Token``. Raises ``UpstreamServiceError`` when the app URL is
+    unconfigured, the call fails, or the send did not succeed — the endpoint
+    maps that to 502 rather than pretending the email went out.
+    """
+    base = os.environ.get("BIQ_APP_URL", "").rstrip("/")
+    if not base:
+        raise UpstreamServiceError("BIQ_APP_URL not configured")
+    try:
+        resp = httpx.post(
+            f"{base}/internal/email/invite",
+            json={"to": to, "club_name": club_name, "club_id": club_id},
+            headers={"X-Internal-Token": _internal_token()},
+            timeout=10.0,
+        )
+    except Exception as exc:
+        raise UpstreamServiceError(f"invite request failed: {exc}") from exc
+    if resp.status_code != 200:
+        raise UpstreamServiceError(f"invite endpoint returned {resp.status_code}")
+    data = resp.json()
+    if not data.get("ok"):
+        raise UpstreamServiceError(f"invite send failed: {data.get('error', 'unknown')}")
+    return data

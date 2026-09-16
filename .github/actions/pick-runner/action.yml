@@ -1,7 +1,7 @@
 name: Pick self-hosted runner
 description: >-
-  Pick a BasketIQ self-hosted runner (integration2 -> integration, or development
-  when prefer_development: true) and fall back to ubuntu-latest when none is
+  Pick a BasketIQ self-hosted runner (development -> integration2 -> integration)
+  and fall back to ubuntu-latest when none is
   free/online, no runner-read token is set, or the chosen host is critically
   loaded per Netdata Cloud CPU. The BasketIQ self-hosted runners live at org
   level (BasketIQ org, Default group, visibility=all) since 2026-05-21, so this
@@ -31,9 +31,17 @@ inputs:
     required: false
     default: ''
   prefer_development:
-    description: If true, try the development runner first. Ordinary jobs should leave false.
+    description: Deprecated — development is always tried first since 2026-09-16. Kept for call-site compatibility; ignored.
     required: false
     default: 'false'
+  staging_runner_name:
+    description: Reserved/legacy — accepted for call-site compatibility; not part of the selection chain.
+    required: false
+    default: ''
+  netdata_node_staging:
+    description: Reserved/legacy — accepted for call-site compatibility; not consulted.
+    required: false
+    default: ''
   netdata_token:
     description: Netdata Cloud Bearer token (read scope on the space). Empty disables the CPU circuit-breaker.
     required: false
@@ -207,10 +215,8 @@ runs:
         fi
 
         # ----- Final decision -----
-        if [ "${PREFER_DEVELOPMENT:-false}" = "true" ] && [ "$DEV" = free ]; then
-          emit development "development free"
-          exit 0
-        fi
-        if [ "$INT2" = "free" ]; then emit integration2 "integration2 free"; exit 0; fi
-        if [ "$INT" = "free" ]; then emit integration "integration2=$INT2, integration free"; exit 0; fi
+        # Chain: development -> integration2 -> integration -> ubuntu-latest
+        if [ "$DEV" = free ]; then emit development "development free"; exit 0; fi
+        if [ "$INT2" = free ]; then emit integration2 "development=$DEV, integration2 free"; exit 0; fi
+        if [ "$INT" = free ]; then emit integration "development=$DEV integration2=$INT2, integration free"; exit 0; fi
         emit ubuntu-latest "development=$DEV integration2=$INT2 integration=$INT"

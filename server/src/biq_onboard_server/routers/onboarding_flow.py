@@ -212,35 +212,27 @@ def create_my_club(payload: ClubSelfCreate, request: Request) -> dict:
             detail="No se pudo crear el club",
         ) from exc
 
-    # F12: Seed the default team catalog for the new club. This mirrors
-    # what onboard_club() does — build_team_catalog() generates every
-    # category × gender combination (with birth-year cohorts) for a season.
+    # F12: Seed the default team catalog for the new club — one bulk write via
+    # seed_club_team_catalog (was: 28 sequential upsert_team calls inside a
+    # request with a tight upstream proxy timeout). The helper persists
+    # Club.team_seeding_job pending→done/failed so a seeding failure is a
+    # durable, queryable state — not just a log line.
     # Club creation never fails or rolls back because team seeding fails:
-    # the club/creator are already persisted atomically above. If a team
-    # write fails, log it clearly (same discipline as the theme-job enqueue
-    # failure below — visible, not swallowed).
+    # the club/creator are already persisted atomically above. If the write
+    # fails, the persisted "failed" job + this log make it visible (same
+    # discipline as the theme-job enqueue failure below — visible, not
+    # swallowed).
     #
-    # upsert_team() uses merge semantics (Firestore set(merge=True) /
-    # Memory _merge_partial), so re-seeding with the same IDs on an
-    # idempotent replay is safe — it relabels docs in place.
+    # bulk_upsert_teams uses the same merge semantics as upsert_team
+    # (Firestore set(merge=True) / Memory _merge_partial), so re-seeding with
+    # the same IDs on an idempotent replay is safe — it relabels docs in place.
     teams_seeded = 0
     try:
-        from biq_core.org.catalog import build_team_catalog
-        from biq_core.org import Team
+        from ..onboarding import seed_club_team_catalog
 
         season_str = registry.get_season()
         season_year = int((season_str or "").split("/")[0]) if season_str else _current_season_year()
-        catalog_dicts = build_team_catalog(club_id, season_year)
-        for t in catalog_dicts:
-            registry.upsert_team(Team(
-                id=t["id"],
-                club_id=club_id,
-                name=t["name"],
-                category=t.get("category"),
-                gender=t.get("gender"),
-                label=t.get("label"),
-            ))
-        teams_seeded = len(catalog_dicts)
+        teams_seeded = seed_club_team_catalog(registry, club_id, club_id, season_year)
     except Exception as exc:
         logger.error(
             "F12 team-catalog seeding failed for club %s: %s (club creation succeeded)",

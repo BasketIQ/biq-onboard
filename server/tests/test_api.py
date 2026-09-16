@@ -729,3 +729,122 @@ def test_f12_s2s_bad_token_returns_401(f12_client, monkeypatch):
         },
     )
     assert r.status_code == 401
+
+
+# ─── Team seeding status + reseed ──────────────────────────────────────────────
+
+
+def test_team_seeding_job_done_after_onboard(admin_client):
+    admin_client.post(
+        "/api/admin/clubs/club_seed/onboard",
+        json={"club_id": "club_seed", "name": "Club Seed", "slug": "seed", "season": "2026/27"},
+    )
+    r = admin_client.get("/api/admin/clubs/club_seed/team-seeding")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["ok"] is True
+    job = data["team_seeding_job"]
+    assert job["status"] == "done"
+    assert job["teams_expected"] == 28
+    assert job["teams_written"] == 28
+    assert job["catalog_slug"] == "seed"
+
+
+def test_team_seeding_null_before_any_seed(admin_client):
+    admin_client.post("/api/admin/clubs", json={"id": "club_noseed", "name": "No Seed"})
+    r = admin_client.get("/api/admin/clubs/club_noseed/team-seeding")
+    assert r.status_code == 200
+    assert r.json()["team_seeding_job"] is None
+
+
+def test_team_seeding_404_missing_club(admin_client):
+    assert admin_client.get("/api/admin/clubs/ghost/team-seeding").status_code == 404
+
+
+def test_team_seeding_requires_auth(client):
+    assert client.get("/api/admin/clubs/x/team-seeding").status_code == 401
+
+
+def test_reseed_recovers_zero_team_club(admin_client):
+    """The reported incident shape: a club at zero teams reseeds back to the
+    full catalog in place — under the ORIGINAL slug namespace, recovered from
+    the recorded job even with no teams left to parse."""
+    admin_client.post(
+        "/api/admin/clubs/club_zero/onboard",
+        json={"club_id": "club_zero", "name": "Club Zero", "slug": "zero", "season": "2026/27"},
+    )
+    from biq_onboard_server import org
+
+    reg = org.get_registry()
+    # Drive the club to the zero-team failure state (memory backend).
+    reg._teams["club_zero"] = {}
+    assert reg.list_teams("club_zero") == []
+
+    r = admin_client.post("/api/admin/clubs/club_zero/teams/reseed")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["ok"] is True
+    assert data["teams_written"] == 28
+    assert data["team_seeding_job"]["status"] == "done"
+    teams = reg.list_teams("club_zero")
+    assert len(teams) == 28
+    assert all(t.id.startswith("team_zero_") for t in teams)
+
+
+def test_reseed_recovers_zero_team_pretracking_club(admin_client):
+    """A club seeded before job tracking (no team_seeding_job) with zero teams
+    falls back to the club_id namespace — the create_my_club convention."""
+    admin_client.post("/api/admin/clubs", json={"id": "club_pre", "name": "Club Pre"})
+    r = admin_client.post("/api/admin/clubs/club_pre/teams/reseed")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["teams_written"] == 28
+    from biq_onboard_server import org
+
+    teams = org.get_registry().list_teams("club_pre")
+    assert len(teams) == 28
+    assert all(t.id.startswith("team_club_pre_") for t in teams)
+
+
+def test_reseed_twice_is_idempotent(admin_client):
+    """Reseeding a fully-seeded club relabels in place — no duplicates."""
+    admin_client.post(
+        "/api/admin/clubs/club_r2/onboard",
+        json={"club_id": "club_r2", "name": "Club R2", "slug": "r2", "season": "2026/27"},
+    )
+    from biq_onboard_server import org
+
+    for _ in range(2):
+        r = admin_client.post("/api/admin/clubs/club_r2/teams/reseed")
+        assert r.status_code == 200
+        assert r.json()["teams_written"] == 28
+    assert len(org.get_registry().list_teams("club_r2")) == 28
+
+
+def test_reseed_failure_persists_failed_job(admin_client, monkeypatch):
+    admin_client.post(
+        "/api/admin/clubs/club_rf/onboard",
+        json={"club_id": "club_rf", "name": "Club RF", "slug": "rf", "season": "2026/27"},
+    )
+    from biq_onboard_server import org
+
+    reg = org.get_registry()
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("simulated write failure")
+
+    monkeypatch.setattr(reg, "bulk_upsert_teams", _boom)
+
+    r = admin_client.post("/api/admin/clubs/club_rf/teams/reseed")
+    assert r.status_code == 500
+    job = reg.get_club("club_rf").team_seeding_job
+    assert job["status"] == "failed"
+    assert "simulated write failure" in job["reason"]
+
+
+def test_reseed_404_missing_club(admin_client):
+    assert admin_client.post("/api/admin/clubs/ghost/teams/reseed").status_code == 404
+
+
+def test_reseed_requires_auth(client):
+    assert client.post("/api/admin/clubs/x/teams/reseed").status_code == 401

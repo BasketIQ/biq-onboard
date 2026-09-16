@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 
 from fastapi import APIRouter, HTTPException, Request
 
@@ -14,6 +15,9 @@ from ..models import TeamCreate, TeamUpdate
 from ..routers.onboarding_flow import _resolve_acting_identity
 
 router = APIRouter(prefix="/clubs/{club_id}/teams")
+# Mounted alongside `router` at /api/admin — club-scoped endpoints that are
+# about the team catalog but not under the /teams path itself.
+club_router = APIRouter(prefix="/clubs/{club_id}")
 
 
 def _s2s_secret() -> str | None:
@@ -112,6 +116,87 @@ def list_teams(club_id: str, request: Request) -> dict:
             for t in teams
         ],
         "total": len(teams),
+    }
+
+
+# team_<slug>_<category>[_<cohort>]_<gender> — category slugs from
+# biq_core.org.catalog.CATEGORIES; cohort only for cohorted categories.
+_CATALOG_TEAM_ID_RE = re.compile(
+    r"^team_(.+)_(babybasket|prebenjamin|benjamin|alevin|infantil|cadete|junior|senior)"
+    r"(?:_\d+)?_[mfx]$"
+)
+
+
+def _catalog_slug(club_id: str, teams: list, job: dict | None) -> str:
+    """Recover the catalog slug (team-id namespace) the club was seeded under.
+
+    Self-service clubs seed under ``club_id``; admin-onboarded clubs may use a
+    distinct slug (``onboard_club``'s ``slug`` param). Order of recovery: the
+    recorded ``catalog_slug`` on the last seeding job (survives a zero-team
+    state), then an existing team id — the greedy ``(.+)`` keeps working when
+    the slug itself contains a category word (``team_mi_senior_club_senior_m``
+    → ``mi_senior_club``) — then ``club_id`` (the self-service convention,
+    covering pre-tracking clubs like the reported zero-team incident).
+    """
+    if job and job.get("catalog_slug"):
+        return job["catalog_slug"]
+    for t in teams:
+        m = _CATALOG_TEAM_ID_RE.match(t.id)
+        if m:
+            return m.group(1)
+    return club_id
+
+
+@club_router.get("/team-seeding")
+def get_team_seeding(club_id: str, request: Request) -> dict:
+    """Return the club's team-seeding job status, ``null`` if it never ran.
+
+    Same response-shape convention as ``GET /clubs/{club_id}/theme``; same
+    capability gate as team CRUD (``club.admin`` or ``club.teams.manage``).
+    """
+    _require_teams_manage(request, club_id)
+    club = org.get_registry().get_club(club_id)
+    if club is None:
+        raise HTTPException(status_code=404, detail="club not found")
+    return {"ok": True, "team_seeding_job": club.team_seeding_job}
+
+
+@router.post("/reseed")
+def reseed_teams(club_id: str, request: Request) -> dict:
+    """Regenerate the default team catalog in place (idempotent).
+
+    ``bulk_upsert_teams`` merge semantics relabel existing docs rather than
+    duplicating, so this is safe to call any number of times — including from
+    a zero-team state, which is the recovery path for clubs whose creation-time
+    seeding failed silently (the Equipos tab's "Reintentar" action).
+    """
+    _require_teams_manage(request, club_id)
+    registry = org.get_registry()
+    club = registry.get_club(club_id)
+    if club is None:
+        raise HTTPException(status_code=404, detail="club not found")
+
+    from ..onboarding import seed_club_team_catalog
+    from .onboarding_flow import _current_season_year
+
+    slug = _catalog_slug(club_id, registry.list_teams(club_id), club.team_seeding_job)
+    season_str = registry.get_season()
+    season_year = (
+        int(season_str.split("/")[0]) if season_str else _current_season_year()
+    )
+    try:
+        written = seed_club_team_catalog(registry, club_id, slug, season_year)
+    except Exception as exc:
+        # The helper already persisted the failed job — surface it as a hard
+        # error so the caller knows the retry did not succeed; the durable
+        # state stays queryable via GET .../team-seeding.
+        raise HTTPException(
+            status_code=500, detail=f"team reseed failed: {exc}"
+        ) from exc
+    return {
+        "ok": True,
+        "teams_written": written,
+        "team_seeding_job": registry.get_club(club_id).team_seeding_job,
     }
 
 

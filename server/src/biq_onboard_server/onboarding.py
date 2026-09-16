@@ -7,6 +7,7 @@ server-side. biq-mcp will call the HTTP API instead of running this directly.
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 
 from biq_core.org import Club, Team, User
 from biq_core.org.catalog import build_team_catalog
@@ -66,6 +67,68 @@ def _resolve_staff(staff: list[dict] | None) -> list[dict]:
     return resolved
 
 
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def seed_club_team_catalog(
+    registry, club_id: str, catalog_slug: str, season_year: int
+) -> int:
+    """Seed the default team catalog as one bulk write, tracked on the club.
+
+    ``Club.team_seeding_job`` is an opaque map owned here (biq_core stores it
+    unvalidated): ``pending`` is persisted BEFORE the write (same ordering
+    discipline as the theme job — a crash mid-seed must never look like "no
+    seeding ran"), then ``done``/``failed`` after. ``catalog_slug`` is the
+    team-id namespace (``team_<slug>_...``) — ``club_id`` for self-service
+    clubs, a distinct slug for admin-onboarded ones. Raises on write failure
+    after persisting ``failed`` so callers keep today's failure semantics.
+    """
+    catalog_dicts = build_team_catalog(catalog_slug, season_year)
+    job = {
+        "status": "pending",
+        "requestedAt": _now_iso(),
+        "finishedAt": None,
+        "teams_expected": len(catalog_dicts),
+        "teams_written": 0,
+        "reason": None,
+        # Recorded so a reseed can rebuild the same team-id namespace even
+        # when the club has zero teams left to parse the slug from.
+        "catalog_slug": catalog_slug,
+    }
+    registry.merge_club_fields(club_id, {"team_seeding_job": job})
+    try:
+        registry.bulk_upsert_teams(
+            club_id,
+            [
+                Team(
+                    id=t["id"],
+                    club_id=club_id,
+                    name=t["name"],
+                    category=t.get("category"),
+                    gender=t.get("gender"),
+                    label=t.get("label"),
+                )
+                for t in catalog_dicts
+            ],
+        )
+    except Exception as exc:
+        job.update(
+            {"status": "failed", "finishedAt": _now_iso(), "reason": str(exc)}
+        )
+        registry.merge_club_fields(club_id, {"team_seeding_job": job})
+        raise
+    job.update(
+        {
+            "status": "done",
+            "finishedAt": _now_iso(),
+            "teams_written": len(catalog_dicts),
+        }
+    )
+    registry.merge_club_fields(club_id, {"team_seeding_job": job})
+    return len(catalog_dicts)
+
+
 def _find_senior_team(teams: list[Team], slug: str) -> str | None:
     for t in teams:
         if t.id == f"team_{slug}_senior_m":
@@ -94,25 +157,13 @@ def onboard_club(
     club = Club(id=club_id, name=name, short_name=short_name)
     registry.upsert_club(club)
 
-    # 2. Teams
+    # 2. Teams — one bulk write (was: 28 sequential upsert_team calls)
     season_year_str = season.split("/")[0] if season else "2026"
     season_year = int(season_year_str)
-    catalog_dicts = build_team_catalog(slug, season_year)
-    catalog = [
-        Team(
-            id=t["id"],
-            club_id=club_id,
-            name=t["name"],
-            category=t.get("category"),
-            gender=t.get("gender"),
-            label=t.get("label"),
-        )
-        for t in catalog_dicts
-    ]
-    for team in catalog:
-        registry.upsert_team(team)
-    teams_verified = len(registry.list_teams(club_id))
-    default_team_id = _find_senior_team(catalog, slug)
+    teams_created = seed_club_team_catalog(registry, club_id, slug, season_year)
+    teams = registry.list_teams(club_id)
+    teams_verified = len(teams)
+    default_team_id = _find_senior_team(teams, slug)
 
     # 3. Users + roles
     resolved = _resolve_staff(staff)
@@ -164,7 +215,7 @@ def onboard_club(
     return {
         "ok": True,
         "club": {"id": club_id, "name": name},
-        "teams_created": len(catalog),
+        "teams_created": teams_created,
         "teams_verified": teams_verified,
         "users_created": users_created,
         "users_verified": len(registry.list_members(club_id)),

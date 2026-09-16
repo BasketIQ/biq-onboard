@@ -200,6 +200,17 @@ interface ClubTab {
   label: string;
 }
 
+// F12: A club team-catalog row as returned by GET /api/clubs/{id}/teams.
+interface TeamRow {
+  id: string;
+  name: string;
+  category: string | null;
+  gender: string | null;
+  label: string | null;
+  archived: boolean;
+  competitive_level?: string;
+}
+
 function clubTabsForMembershipState(memberships: MembershipInfo[] | undefined): ClubTab[] {
   const ms = memberships || [];
   const showCreate = canCreateClub(ms);
@@ -271,13 +282,22 @@ class BiqOnboardApp extends HTMLElement {
   private _awaitingNewJob = false;
   private _visibilityHandler: (() => void) | null = null; // C11: visibility handling
   // F12: Team catalog management
-  private _teams: Array<{ id: string; name: string; category: string | null; gender: string | null; label: string | null; archived: boolean; competitive_level?: string }> = [];
+  private _teams: TeamRow[] = [];
   private _teamsLoading = false;
   private _teamsError: string | null = null;
   private _editingTeamId: string | null = null;
   private _addingTeamCategory: string | null = null;
   private _teamsFilter: 'active' | 'all' = 'active';
   private _deleteConfirmTeamId: string | null = null;
+  // F12: Team-catalog seeding job state (Club.team_seeding_job, Phase 1).
+  private _teamSeedingJob: { status?: string; reason?: string | null } | null = null;
+  private _seedingLoading = false; // reseed POST in-flight
+  private _seedingStale = false; // polled past _staleThresholdMs without terminal state
+  private _seedingPollTimer: ReturnType<typeof setTimeout> | null = null;
+  private _seedingPolling = false; // prevent overlap
+  private _seedingPollBackoff = 3000;
+  private _seedingPollStartedAt = 0;
+  private _seedingPollingClubId: string | null = null;
 
   constructor() {
     super();
@@ -297,6 +317,10 @@ class BiqOnboardApp extends HTMLElement {
     // infinite loop when shell refreshes org context after theme state event
     if (newClubId && newClubId !== prevClubId) {
       this.loadThemeData(newClubId);
+      // Reset seeding state — the previous club's job must not leak across.
+      this._teamSeedingJob = null;
+      this._seedingStale = false;
+      this._stopSeedingPolling();
     }
   }
   get org(): OrgContext | null { return this._org; }
@@ -363,18 +387,105 @@ class BiqOnboardApp extends HTMLElement {
     this._teamsError = null;
     this.render();
     try {
-      const res = await fetch(`/api/clubs/${clubId}/teams`, {
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-      });
+      const [res] = await Promise.all([
+        fetch(`/api/clubs/${clubId}/teams`, {
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+        }),
+        // Degrade to null on failure — the tab must still work if the
+        // seeding endpoint is unreachable.
+        this._loadTeamSeeding(clubId).catch(() => {
+          this._teamSeedingJob = null;
+        }),
+      ]);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       this._teams = data.teams || [];
+      this._maybeStartSeedingPolling(clubId);
     } catch (err) {
       this._teamsError = (err as Error).message;
     } finally {
       this._teamsLoading = false;
       this.render();
+    }
+  }
+
+  // F12: Fetch the club's team_seeding_job status (null job = pre-tracking club).
+  private async _loadTeamSeeding(clubId: string): Promise<void> {
+    const res = await fetch(`/api/clubs/${clubId}/team-seeding`, {
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    this._teamSeedingJob = data.team_seeding_job ?? null;
+  }
+
+  // F12: Mirror of _maybeStartPolling for the seeding job — same 3s initial
+  // backoff, ×1.5 bounded at 30s, and the same staleness threshold.
+  private _maybeStartSeedingPolling(clubId: string): void {
+    if (this._teamSeedingJob?.status !== 'pending') {
+      this._stopSeedingPolling();
+      return;
+    }
+    if (this._seedingPollStartedAt > 0 && (Date.now() - this._seedingPollStartedAt) > this._staleThresholdMs) {
+      this._seedingStale = true;
+      this._stopSeedingPolling();
+      this.render();
+      return;
+    }
+    if (this._seedingPollTimer) {
+      clearTimeout(this._seedingPollTimer);
+      this._seedingPollTimer = null;
+    }
+    if (this._seedingPolling) return;
+    if (this._seedingPollingClubId !== clubId) {
+      this._seedingPollingClubId = clubId;
+      this._seedingPollBackoff = 3000;
+      this._seedingPollStartedAt = Date.now();
+      this._seedingStale = false;
+    }
+    if (this._seedingPollStartedAt === 0) {
+      this._seedingPollStartedAt = Date.now();
+    }
+    this._seedingPollTimer = setTimeout(() => this._pollTeamSeeding(clubId), this._seedingPollBackoff);
+  }
+
+  private _stopSeedingPolling(): void {
+    if (this._seedingPollTimer) {
+      clearTimeout(this._seedingPollTimer);
+      this._seedingPollTimer = null;
+    }
+    this._seedingPollingClubId = null;
+    this._seedingPolling = false;
+    this._seedingPollBackoff = 3000;
+    this._seedingPollStartedAt = 0;
+  }
+
+  private async _pollTeamSeeding(clubId: string): Promise<void> {
+    if (!this.isConnected || this._seedingPollingClubId !== clubId) {
+      this._seedingPollTimer = null;
+      return;
+    }
+    this._seedingPollTimer = null;
+    this._seedingPolling = true;
+    try {
+      await this._loadTeamSeeding(clubId);
+      if (this._teamSeedingJob?.status !== 'pending') {
+        this._seedingPolling = false;
+        this._stopSeedingPolling();
+        // Terminal state — reload the team list so 'done' shows the catalog.
+        await this.loadTeams(clubId);
+        return;
+      }
+      this._seedingPolling = false;
+      this._seedingPollBackoff = 3000;
+      this._maybeStartSeedingPolling(clubId);
+      this.render();
+    } catch {
+      this._seedingPolling = false;
+      this._seedingPollBackoff = Math.min(this._seedingPollBackoff * 1.5, 30000);
+      this._maybeStartSeedingPolling(clubId);
     }
   }
 
@@ -438,6 +549,7 @@ class BiqOnboardApp extends HTMLElement {
   disconnectedCallback(): void {
     super.disconnectedCallback?.();
     this._stopPolling();
+    this._stopSeedingPolling();
     // D20: invalidate in-flight submissions and abort stale responses.
     this._clubSubmitSeq += 1;
     if (this._clubSubmitAbort) {
@@ -455,15 +567,26 @@ class BiqOnboardApp extends HTMLElement {
     super.connectedCallback?.();
     // C11: Resume polling on visibility/entry if theme job is pending/running
     this._visibilityHandler = () => {
-      if (document.visibilityState === 'visible' && this._pollingClubId) {
-        const clubId = this._pollingClubId;
-        this._pollingClubId = null; // force reschedule
-        this._maybeStartPolling(clubId);
+      if (document.visibilityState === 'visible') {
+        if (this._pollingClubId) {
+          const clubId = this._pollingClubId;
+          this._pollingClubId = null; // force reschedule
+          this._maybeStartPolling(clubId);
+        }
+        if (this._seedingPollingClubId) {
+          const clubId = this._seedingPollingClubId;
+          this._seedingPollingClubId = null; // force reschedule
+          this._maybeStartSeedingPolling(clubId);
+        }
       } else if (document.visibilityState === 'hidden') {
         // C11: Stop polling when page is hidden
         if (this._pollTimer) {
           clearTimeout(this._pollTimer);
           this._pollTimer = null;
+        }
+        if (this._seedingPollTimer) {
+          clearTimeout(this._seedingPollTimer);
+          this._seedingPollTimer = null;
         }
       }
     };
@@ -1293,6 +1416,23 @@ class BiqOnboardApp extends HTMLElement {
 
   // F12: Render the Equipos tab — club team catalog management.
   private renderTeamsTab(clubId: string): string {
+    // Team-seeding job states — pending shows "generating", failed (or a
+    // stale pending) shows an explicit error + Reintentar. The category
+    // sections still render below so manual add stays available.
+    const seeding = this._teamSeedingJob;
+    let seedingBanner = '';
+    if (seeding?.status === 'pending' && !this._seedingStale) {
+      seedingBanner = '<div class="onboard-loading" role="status" aria-live="polite"><span class="onboard-spinner" aria-hidden="true"></span> Generando el catálogo de equipos del club… Esto puede tardar unos segundos.</div>';
+    } else if (seeding?.status === 'failed' || (seeding?.status === 'pending' && this._seedingStale)) {
+      const reason = seeding.reason ? `<p class="onboard-card-desc">${escapeHtml(seeding.reason)}</p>` : '';
+      const staleNote = this._seedingStale ? '<p class="onboard-card-desc">El proceso está tardando demasiado.</p>' : '';
+      seedingBanner = `<div class="onboard-card">
+        <p class="onboard-error" role="alert">No se pudieron generar los equipos automáticamente.</p>
+        ${reason}${staleNote}
+        <p class="onboard-card-desc">Puedes reintentar la generación o añadir equipos manualmente desde cada categoría.</p>
+        <button class="onboard-btn onboard-btn-primary" data-reseed-teams ${this._seedingLoading ? 'disabled' : ''}>${this._seedingLoading ? 'Generando…' : 'Reintentar'}</button>
+      </div>`;
+    }
     if (this._teamsLoading) {
       return '<div class="onboard-loading" role="status" aria-live="polite"><span class="onboard-spinner" aria-hidden="true"></span> Cargando equipos…</div>';
     }
@@ -1306,13 +1446,13 @@ class BiqOnboardApp extends HTMLElement {
       : this._teams.filter(t => !t.archived);
 
     // Group teams by category using the canonical order.
-    const groups = new Map<string, typeof this._teams>();
+    const groups = new Map<string, TeamRow[]>();
     for (const t of visibleTeams) {
       const cat = t.category || 'senior';
       if (!groups.has(cat)) groups.set(cat, []);
       groups.get(cat)!.push(t);
     }
-    const ordered: [string, typeof this._teams][] = [];
+    const ordered: [string, TeamRow[]][] = [];
     for (const cat of CATEGORY_ORDER) {
       if (groups.has(cat)) ordered.push([cat, groups.get(cat)!]);
     }
@@ -1442,6 +1582,7 @@ class BiqOnboardApp extends HTMLElement {
           </select>
         </label>
       </div>
+      ${seedingBanner}
       ${this._teamsError ? `<div class="onboard-error" role="alert">${escapeHtml(this._teamsError)}</div>` : ''}
       ${sections || '<p class="onboard-card-desc">No hay equipos.</p>'}
       ${deleteModal}
@@ -1583,6 +1724,36 @@ class BiqOnboardApp extends HTMLElement {
         this._addingTeamCategory = null;
         this._deleteConfirmTeamId = null;
         this.render();
+      });
+    }
+
+    // Reseed the team catalog after a failed/stalled seeding job.
+    const reseedBtn = this.shadow.querySelector('[data-reseed-teams]');
+    if (reseedBtn) {
+      reseedBtn.addEventListener('click', async () => {
+        this._seedingLoading = true;
+        this._teamsError = null;
+        this.render();
+        try {
+          const res = await fetch(`/api/clubs/${clubId}/teams/reseed`, {
+            method: 'POST',
+            credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+          });
+          if (!res.ok) {
+            const data = await res.json().catch(() => ({}));
+            throw new Error(data.detail || `HTTP ${res.status}`);
+          }
+          this._seedingLoading = false;
+          // Reseed sets the job to done — reload refreshes both job and list.
+          await this.loadTeams(clubId);
+        } catch (err) {
+          this._seedingLoading = false;
+          this._teamsError = (err as Error).message;
+          // Refresh the job so the banner re-renders with the latest reason.
+          await this._loadTeamSeeding(clubId).catch(() => {});
+          this.render();
+        }
       });
     }
 

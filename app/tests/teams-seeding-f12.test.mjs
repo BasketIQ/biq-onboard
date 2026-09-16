@@ -147,7 +147,7 @@ test('F12: pending job shows generating banner, polls until done, then renders t
   state.teams = SEED_TEAMS;
   await page.waitForFunction(() => {
     const el = document.getElementById('app');
-    return !!(el.shadowRoot && el.shadowRoot.querySelector('.onboard-team-table'));
+    return !!(el.shadowRoot && el.shadowRoot.querySelector('.onboard-team-list'));
   }, { timeout: 10000 });
   const bannerGone = await page.evaluate(() => {
     const el = document.getElementById('app');
@@ -196,7 +196,7 @@ test('F12: failed job shows error + Reintentar, which POSTs reseed and recovers'
   });
   await page.waitForFunction(() => {
     const el = document.getElementById('app');
-    return !!(el.shadowRoot && el.shadowRoot.querySelector('.onboard-team-table'));
+    return !!(el.shadowRoot && el.shadowRoot.querySelector('.onboard-team-list'));
   }, { timeout: 10000 });
   const reseedCalls = log.filter((e) => e.url.includes('/teams/reseed') && e.method === 'POST');
   assert.equal(reseedCalls.length, 1, 'exactly one reseed POST');
@@ -235,7 +235,7 @@ test('F12: no job + zero teams keeps the genuine empty state (no banner, add wor
     document.getElementById('app').shadowRoot.querySelector('[data-add-team-category="senior"]').click();
   });
   await page.waitForFunction(() => {
-    return !!document.getElementById('app').shadowRoot.querySelector('tr[data-adding-row]');
+    return !!document.getElementById('app').shadowRoot.querySelector('[data-adding-row]');
   }, { timeout: 10000 });
 
   await browser.close();

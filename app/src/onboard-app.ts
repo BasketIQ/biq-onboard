@@ -86,7 +86,7 @@ interface ThemeJob {
 const VERDICT_COPY: Record<string, { title: string; description: string; action?: string }> = {
   club_confirmed: {
     title: 'Club confirmado',
-    description: 'Hemos detectado la web de tu club y generado los colores del tema.',
+    description: 'Hemos detectado la web de tu club y generado los colores del estilo.',
   },
   uncertain: {
     title: 'No estamos seguros',
@@ -118,15 +118,15 @@ const THEME_STATUS_COPY: Record<string, { label: string; color: string }> = {
 const THEME_JOB_COPY: Record<string, { title: string; description: string; action?: string }> = {
   pending: {
     title: 'Personalización en cola',
-    description: 'Tu tema se generará automáticamente en unos segundos.',
+    description: 'Tu estilo se generará automáticamente en unos segundos.',
   },
   running: {
     title: 'Analizando la web del club',
-    description: 'Extrayendo colores y generando el tema.',
+    description: 'Extrayendo colores y generando el estilo.',
   },
   succeeded: {
-    title: 'Tema disponible y activo',
-    description: 'El tema del club está activo. Puedes ajustarlo, regenerarlo o revertirlo.',
+    title: 'Estilo disponible y activo',
+    description: 'El estilo del club está activo. Puedes ajustarlo, regenerarlo o revertirlo.',
     action: 'adjust/regenerate/revert',
   },
   uncertain: {
@@ -137,12 +137,12 @@ const THEME_JOB_COPY: Record<string, { title: string; description: string; actio
   rejected_not_a_club: {
     title: 'No parece un club',
     description: 'La URL indicada no corresponde a un club de baloncesto.',
-    action: 'Corregir URL / tema manual',
+    action: 'Corregir URL / estilo manual',
   },
   unsupported_source: {
     title: 'Fuente no soportada',
     description: 'No podemos extraer colores de este tipo de página.',
-    action: 'Añadir web / tema manual',
+    action: 'Añadir web / estilo manual',
   },
   unreachable: {
     title: 'No se pudo acceder',
@@ -151,12 +151,12 @@ const THEME_JOB_COPY: Record<string, { title: string; description: string; actio
   },
   failed: {
     title: 'Error técnico',
-    description: 'Se produjo un error al generar el tema.',
-    action: 'Reintentar / tema manual',
+    description: 'Se produjo un error al generar el estilo.',
+    action: 'Reintentar / estilo manual',
   },
   reverted: {
-    title: 'Tema BasketIQ por defecto',
-    description: 'El tema se ha revertido al BasketIQ por defecto.',
+    title: 'Estilo BasketIQ por defecto',
+    description: 'El estilo se ha revertido al BasketIQ por defecto.',
     action: 'Generar de nuevo',
   },
 };
@@ -168,7 +168,7 @@ const CATEGORY_LABELS: Record<string, string> = {
   alevin: 'Alevín', infantil: 'Infantil', cadete: 'Cadete',
   junior: 'Junior', senior: 'Senior',
 };
-const GENDER_LABELS: Record<string, string> = { M: 'Masc', F: 'Fem', X: 'Mix' };
+
 
 // F12: Inline SVG icons (stroke currentColor, same style as biq-methodology / STT).
 const ICON_EDIT = '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 20h9" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>';
@@ -322,6 +322,11 @@ class BiqOnboardApp extends HTMLElement {
       this._seedingStale = false;
       this._stopSeedingPolling();
     }
+    // F12: If the shell deep-linked straight to the Equipos route, the tab
+    // renders before any nav click — load the catalog on org arrival too.
+    if (newClubId && this._subRoute === 'teams' && this._teams.length === 0 && !this._teamsLoading) {
+      this.loadTeams(newClubId);
+    }
   }
   get org(): OrgContext | null { return this._org; }
 
@@ -334,6 +339,12 @@ class BiqOnboardApp extends HTMLElement {
   set route(value: string) {
     this._subRoute = value || '';
     this.render();
+    // F12: Deep-linking to #/onboard/teams bypasses the nav click that loads
+    // the catalog — trigger the load here when club context is already set.
+    const clubId = this._org?.club?.id;
+    if (this._subRoute === 'teams' && clubId && this._teams.length === 0 && !this._teamsLoading) {
+      this.loadTeams(clubId);
+    }
   }
   get route(): string { return this._subRoute; }
 
@@ -341,7 +352,7 @@ class BiqOnboardApp extends HTMLElement {
 
   private async loadThemeData(clubId: string): Promise<void> {
     // Don't set _loading on data refreshes — only generateTheme/revertTheme
-    // set it. This prevents the "Generar tema" button from flashing
+    // set it. This prevents the "Generar estilo" button from flashing
     // "Generando…" on every poll or org context refresh.
     this._error = null;
     try {
@@ -916,7 +927,7 @@ class BiqOnboardApp extends HTMLElement {
     this.shadow.innerHTML = `<style>${styles}</style>
       <div class="onboard-app">
         <nav class="onboard-nav">
-          <button class="onboard-nav-item ${section === 'club-details' ? 'active' : ''}" data-nav="club-details">Club</button>
+          <button class="onboard-nav-item ${section === 'club-details' ? 'active' : ''}" data-nav="club-details">Estilo</button>
           <button class="onboard-nav-item ${section === 'teams' ? 'active' : ''}" data-nav="teams">Equipos</button>
           <button class="onboard-nav-item ${section === 'profile' ? 'active' : ''}" data-nav="profile">Perfil</button>
         </nav>
@@ -952,12 +963,12 @@ class BiqOnboardApp extends HTMLElement {
         ${this._error ? `<div class="onboard-error">${escapeHtml(this._error)}</div>` : ''}
 
         <div class="onboard-card">
-          <h3 class="onboard-card-title">Sitio web del club</h3>
-          <p class="onboard-card-desc">Introduce la URL de la web del club. Extraeremos los colores del tema automáticamente.</p>
+          <h3 class="onboard-card-title">Estilo de la app</h3>
+          <p class="onboard-card-desc">Introduce la URL de la web de tu club. Crearemos un estilo propio en esta app para vosotros.</p>
           <div class="onboard-form-row">
             <input type="url" class="onboard-input" data-website-input value="${escapeHtml(website)}" placeholder="https://www.miclub.com" ${this._loading || (isPolling && !this._isStale) ? 'disabled' : ''} />
             <button class="onboard-btn onboard-btn-primary" data-generate-btn ${this._loading || (isPolling && !this._isStale) ? 'disabled' : ''}>
-              ${isPolling && !this._isStale ? 'Procesando…' : this._loading ? 'Generando…' : 'Generar tema'}
+              ${isPolling && !this._isStale ? 'Procesando…' : this._loading ? 'Generando…' : 'Generar estilo'}
             </button>
           </div>
         </div>
@@ -987,10 +998,10 @@ class BiqOnboardApp extends HTMLElement {
       // Gate failed — show why + revert button, no switch
       return `
       <div class="onboard-card onboard-activation-card">
-        <h3 class="onboard-card-title">Activar tema</h3>
+        <h3 class="onboard-card-title">Activar estilo</h3>
         <div class="onboard-gate-failure">
-          <h4>El tema no superó el control de contraste</h4>
-          <p>Algunas combinaciones de color no cumplen WCAG 2.2 AA. Puedes ajustar manualmente los colores o usar el tema BasketIQ por defecto.</p>
+          <h4>El estilo no superó el control de contraste</h4>
+          <p>Algunas combinaciones de color no cumplen WCAG 2.2 AA. Puedes ajustar manualmente los colores o usar el estilo BasketIQ por defecto.</p>
           <ul class="onboard-gate-failures">
             ${(theme.gate?.failures || []).slice(0, 5).map(f => {
               if (f.error) {
@@ -1004,14 +1015,14 @@ class BiqOnboardApp extends HTMLElement {
           </ul>
         </div>
         <button class="onboard-btn onboard-btn-danger" data-revert-btn ${this._loading ? 'disabled' : ''}>
-          Restablecer tema BasketIQ
+          Restablecer estilo BasketIQ
         </button>
       </div>`;
     }
     return `
       <div class="onboard-card onboard-activation-card">
         <div class="onboard-activation-row">
-          <h3 class="onboard-card-title">Activar tema</h3>
+          <h3 class="onboard-card-title">Activar estilo</h3>
           <label class="onboard-switch ${isActive ? 'on' : ''}">
             <input type="checkbox" data-activate-switch ${isActive ? 'checked' : ''} ${this._loading || (isPolling && !this._isStale) ? 'disabled' : ''} />
             <span class="onboard-switch-track"><span class="onboard-switch-thumb"></span></span>
@@ -1019,8 +1030,8 @@ class BiqOnboardApp extends HTMLElement {
         </div>
         <p class="onboard-card-desc">
           ${isActive
-            ? 'El tema del club está activo y visible para todos los miembros.'
-            : 'Al activar, el tema del club será visible y aplicable a todos los miembros del equipo.'}
+            ? 'El estilo del club está activo y visible para todos los miembros.'
+            : 'Al activar, el estilo del club será visible y aplicable a todos los miembros del equipo.'}
         </p>
       </div>`;
   }
@@ -1482,19 +1493,26 @@ class BiqOnboardApp extends HTMLElement {
       const catLabel = CATEGORY_LABELS[cat] || cat;
       const teams = groups.get(cat) || [];
       const rows = teams.map((t) => {
-        const genderLabel = GENDER_LABELS[t.gender || ''] || t.gender || '';
+        // Gender shows the stored single-letter code (M/F/X) — no Fem/Masc/Mix
+        // mapping, so the badge stays one character wide on narrow screens.
+        const genderBadge = t.gender ? `<span class="onboard-badge">${escapeHtml(t.gender)}</span>` : '';
         const archivedBadge = t.archived ? '<span class="onboard-badge onboard-badge-muted">Archivado</span>' : '';
+        const level = t.competitive_level || 'Sin definir';
         if (this._editingTeamId === t.id) {
-          // Edit: name + competition level are editable inline
-          return `<tr data-team-row="${escapeHtml(t.id)}" data-editing="true">
-            <td><input type="text" class="onboard-input onboard-input-sm" data-edit-team-name value="${escapeHtml(t.name)}" /></td>
-            <td>${escapeHtml(genderLabel)}</td>
-            <td><input type="text" class="onboard-input onboard-input-sm" data-edit-team-level placeholder="Nivel de competición" value="${escapeHtml(t.competitive_level || '')}" /></td>
-            <td class="onboard-team-actions">
-              <button class="onboard-icon-btn" data-save-team="${escapeHtml(t.id)}" title="Guardar" aria-label="Guardar">${ICON_CHECK}</button>
-              <button class="onboard-icon-btn" data-cancel-edit title="Cancelar" aria-label="Cancelar">${ICON_CANCEL}</button>
-            </td>
-          </tr>`;
+          // Edit: name on its own line; level + save/cancel on the second.
+          return `<div class="onboard-team-row" data-team-row="${escapeHtml(t.id)}" data-editing="true">
+            <div class="onboard-team-row-main">
+              <input type="text" class="onboard-input onboard-input-sm" data-edit-team-name value="${escapeHtml(t.name)}" />
+            </div>
+            <div class="onboard-team-row-meta">
+              ${genderBadge}
+              <input type="text" class="onboard-input onboard-input-sm" data-edit-team-level placeholder="Nivel de competición" value="${escapeHtml(t.competitive_level || '')}" />
+              <div class="onboard-team-actions">
+                <button class="onboard-icon-btn" data-save-team="${escapeHtml(t.id)}" title="Guardar" aria-label="Guardar">${ICON_CHECK}</button>
+                <button class="onboard-icon-btn" data-cancel-edit title="Cancelar" aria-label="Cancelar">${ICON_CANCEL}</button>
+              </div>
+            </div>
+          </div>`;
         }
         const actions = [
           `<button class="onboard-icon-btn" data-edit-team="${escapeHtml(t.id)}" title="Editar nombre" aria-label="Editar nombre">${ICON_EDIT}</button>`,
@@ -1508,28 +1526,38 @@ class BiqOnboardApp extends HTMLElement {
           actions.push(`<button class="onboard-icon-btn" data-archive-team="${escapeHtml(t.id)}" title="Archivar" aria-label="Archivar">${ICON_ARCHIVE}</button>`);
           actions.push(`<button class="onboard-icon-btn onboard-icon-btn-danger" data-delete-team="${escapeHtml(t.id)}" title="Eliminar" aria-label="Eliminar">${ICON_TRASH}</button>`);
         }
-        return `<tr data-team-row="${escapeHtml(t.id)}">
-          <td>${escapeHtml(t.name)} ${archivedBadge}</td>
-          <td>${escapeHtml(genderLabel)}</td>
-          <td>${escapeHtml(t.competitive_level || 'Sin definir')}</td>
-          <td class="onboard-team-actions">${actions.join('')}</td>
-        </tr>`;
+        // Name gets the full row width (never truncates); gender/level/actions
+        // share the compact second line.
+        return `<div class="onboard-team-row" data-team-row="${escapeHtml(t.id)}">
+          <div class="onboard-team-row-main">
+            <span class="onboard-team-name">${escapeHtml(t.name)}</span> ${archivedBadge}
+          </div>
+          <div class="onboard-team-row-meta">
+            ${genderBadge}
+            <span class="onboard-team-level">${escapeHtml(level)}</span>
+            <div class="onboard-team-actions">${actions.join('')}</div>
+          </div>
+        </div>`;
       }).join('');
 
       // Category-level add row (when _addingTeamCategory === cat)
-      const addRow = this._addingTeamCategory === cat ? `<tr data-adding-row="true">
-        <td><input type="text" class="onboard-input onboard-input-sm" data-new-team-name placeholder="Nombre del equipo" /></td>
-        <td><select class="onboard-input onboard-input-sm" data-new-team-gender>
-          <option value="M">Masc</option>
-          <option value="F">Fem</option>
-          <option value="X">Mix</option>
-        </select></td>
-        <td><input type="text" class="onboard-input onboard-input-sm" data-new-team-level placeholder="Nivel de competición" /></td>
-        <td class="onboard-team-actions">
-          <button class="onboard-icon-btn" data-confirm-add-team="${escapeHtml(cat)}" title="Confirmar" aria-label="Confirmar">${ICON_CHECK}</button>
-          <button class="onboard-icon-btn" data-cancel-add-team title="Cancelar" aria-label="Cancelar">${ICON_CANCEL}</button>
-        </td>
-      </tr>` : '';
+      const addRow = this._addingTeamCategory === cat ? `<div class="onboard-team-row" data-adding-row="true">
+        <div class="onboard-team-row-main">
+          <input type="text" class="onboard-input onboard-input-sm" data-new-team-name placeholder="Nombre del equipo" />
+        </div>
+        <div class="onboard-team-row-meta">
+          <select class="onboard-input onboard-input-sm" data-new-team-gender>
+            <option value="M">M</option>
+            <option value="F">F</option>
+            <option value="X">X</option>
+          </select>
+          <input type="text" class="onboard-input onboard-input-sm" data-new-team-level placeholder="Nivel de competición" />
+          <div class="onboard-team-actions">
+            <button class="onboard-icon-btn" data-confirm-add-team="${escapeHtml(cat)}" title="Confirmar" aria-label="Confirmar">${ICON_CHECK}</button>
+            <button class="onboard-icon-btn" data-cancel-add-team title="Cancelar" aria-label="Cancelar">${ICON_CANCEL}</button>
+          </div>
+        </div>
+      </div>` : '';
 
       const hasTeams = teams.length > 0 || this._addingTeamCategory === cat;
       if (!hasTeams) {
@@ -1546,10 +1574,9 @@ class BiqOnboardApp extends HTMLElement {
           <h3 class="onboard-card-title">${escapeHtml(catLabel)}</h3>
           <button class="onboard-icon-btn" data-add-team-category="${escapeHtml(cat)}" title="Añadir equipo" aria-label="Añadir equipo a ${escapeHtml(catLabel)}">${ICON_PLUS}</button>
         </div>
-        <table class="onboard-team-table">
-          <thead><tr><th>Nombre</th><th>Género</th><th>Nivel de competición</th><th></th></tr></thead>
-          <tbody>${rows}${addRow}</tbody>
-        </table>
+        <div class="onboard-team-list" role="table" aria-label="Equipos">
+          ${rows}${addRow}
+        </div>
       </div>`;
     }).join('');
 
@@ -1780,7 +1807,7 @@ class BiqOnboardApp extends HTMLElement {
     this.shadow.querySelectorAll('[data-save-team]').forEach(btn => {
       btn.addEventListener('click', async () => {
         const teamId = (btn as HTMLElement).dataset.saveTeam || '';
-        const row = this.shadow.querySelector(`tr[data-team-row="${CSS.escape(teamId)}"][data-editing="true"]`);
+        const row = this.shadow.querySelector(`[data-team-row="${CSS.escape(teamId)}"][data-editing="true"]`);
         if (!row) return;
         const name = (row.querySelector('[data-edit-team-name]') as HTMLInputElement)?.value.trim() || '';
         const competitive_level = (row.querySelector('[data-edit-team-level]') as HTMLInputElement)?.value.trim() || '';
@@ -1904,7 +1931,7 @@ class BiqOnboardApp extends HTMLElement {
     this.shadow.querySelectorAll('[data-confirm-add-team]').forEach(btn => {
       btn.addEventListener('click', async () => {
         const category = (btn as HTMLElement).dataset.confirmAddTeam || '';
-        const addRow = this.shadow.querySelector('tr[data-adding-row="true"]');
+        const addRow = this.shadow.querySelector('[data-adding-row="true"]');
         if (!addRow) return;
         const name = (addRow.querySelector('[data-new-team-name]') as HTMLInputElement)?.value.trim() || '';
         const gender = (addRow.querySelector('[data-new-team-gender]') as HTMLSelectElement)?.value || 'M';

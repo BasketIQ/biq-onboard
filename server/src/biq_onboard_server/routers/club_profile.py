@@ -13,14 +13,20 @@ from fastapi import APIRouter, HTTPException, Request
 from biq_core.roles import effective_capabilities
 
 from .. import clients, org
-from ..auth import _is_break_glass_admin, session_user
+from ..auth import _is_break_glass_admin
+from ..routers.onboarding_flow import _resolve_acting_identity
 
 router = APIRouter()
 
 
 def _require_member(request: Request, club_id: str) -> str:
-    """Return the session user or 403 if they don't belong to the club."""
-    user = session_user(request)
+    """Return the acting user or 403 if they don't belong to the club.
+
+    S2S-aware: the browser reaches this endpoint through the biq-app proxy
+    (Bearer S2S secret + asserted identity headers); standalone deployments
+    (no secret configured) fall back to the local session cookie.
+    """
+    user, _email = _resolve_acting_identity(request)
     if _is_break_glass_admin(user):
         return user
     registry = org.get_registry()

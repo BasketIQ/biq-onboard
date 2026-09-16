@@ -129,3 +129,36 @@ def test_summary_missing_club_404(app_and_client):
     _, client = app_and_client
     r = client.get("/api/admin/clubs/club_nope/summary")
     assert r.status_code == 404
+
+
+def test_summary_s2s_acting_identity(app_and_client, monkeypatch):
+    """The BFF proxy path: Bearer S2S secret + asserted identity headers.
+
+    When BIQ_ONBOARD_S2S_SECRET is configured the endpoint resolves identity
+    from X-BIQ-Acting-User-Id, not the session — matching the teams router.
+    """
+    _, client = app_and_client
+    _create_club(client, "club_p3e")
+    _create_member(client, "club_p3e", "member_via_s2s")
+
+    from biq_onboard_server.routers import club_profile
+    monkeypatch.setattr(club_profile.clients, "methodology_present", lambda cid: True)
+    monkeypatch.setattr(club_profile.clients, "season_plan_present", lambda ids: True)
+
+    monkeypatch.setenv("BIQ_ONBOARD_S2S_SECRET", "test-s2s")
+    headers = {
+        "Authorization": "Bearer test-s2s",
+        "X-BIQ-Acting-User-Id": "member_via_s2s",
+        "X-BIQ-Acting-Email": "m@example.com",
+    }
+    # A logged-in admin session must NOT leak identity into the S2S path.
+    r = client.get("/api/admin/clubs/club_p3e/summary", headers=headers)
+    assert r.status_code == 200
+    assert r.json()["club"]["id"] == "club_p3e"
+
+    # Bad token fails closed even though the session cookie is still valid.
+    r = client.get(
+        "/api/admin/clubs/club_p3e/summary",
+        headers={**headers, "Authorization": "Bearer wrong"},
+    )
+    assert r.status_code == 401

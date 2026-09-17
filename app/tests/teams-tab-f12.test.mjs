@@ -324,8 +324,9 @@ test('Item 28: add-team row sends competitive_level in the POST body', async () 
     const row = document.getElementById('app').shadowRoot.querySelector('[data-adding-row]');
     row.querySelector('[data-new-team-name]').value = 'Junior A';
     row.querySelector('[data-new-team-name]').dispatchEvent(new Event('input', { bubbles: true }));
-    row.querySelector('[data-new-team-level]').value = 'Primera Nacional';
-    row.querySelector('[data-new-team-level]').dispatchEvent(new Event('input', { bubbles: true }));
+    const sel = row.querySelector('[data-new-team-level]');
+    sel.value = 'regional';
+    sel.dispatchEvent(new Event('change', { bubbles: true }));
   });
   await page.evaluate(() => {
     document.getElementById('app').shadowRoot.querySelector('[data-confirm-add-team]').click();
@@ -335,7 +336,7 @@ test('Item 28: add-team row sends competitive_level in the POST body', async () 
   const posts = log.filter((e) => e.method === 'POST' && e.url.includes('/teams'));
   assert.equal(posts.length, 1, 'exactly one create request');
   const body = JSON.parse(posts[0].postData);
-  assert.equal(body.competitive_level, 'Primera Nacional', 'create body carries the level');
+  assert.equal(body.competitive_level, 'regional', 'create body carries the option value, not the label');
 
   await browser.close();
 });
@@ -364,12 +365,12 @@ test('Item 28: inline edit sends competitive_level in the PUT body', async () =>
   const prefilled = await page.evaluate(() => {
     return document.getElementById('app').shadowRoot.querySelector('[data-edit-team-level]').value;
   });
-  assert.equal(prefilled, 'Liga EBA', 'edit input is prefilled with the stored level');
+  assert.equal(prefilled, 'Liga EBA', 'edit select preserves the stored legacy value as selected');
 
   await page.evaluate(() => {
-    const input = document.getElementById('app').shadowRoot.querySelector('[data-edit-team-level]');
-    input.value = 'Liga Femenina 2';
-    input.dispatchEvent(new Event('input', { bubbles: true }));
+    const sel = document.getElementById('app').shadowRoot.querySelector('[data-edit-team-level]');
+    sel.value = 'national';
+    sel.dispatchEvent(new Event('change', { bubbles: true }));
     document.getElementById('app').shadowRoot.querySelector('[data-save-team]').click();
   });
   await page.waitForTimeout(500);
@@ -377,7 +378,60 @@ test('Item 28: inline edit sends competitive_level in the PUT body', async () =>
   const puts = log.filter((e) => e.method === 'PUT' && e.url.match(/\/teams\/[^/]+$/) && !e.url.includes('archive'));
   assert.equal(puts.length, 1, 'exactly one update request');
   const body = JSON.parse(puts[0].postData);
-  assert.equal(body.competitive_level, 'Liga Femenina 2', 'update body carries the edited level');
+  assert.equal(body.competitive_level, 'national', 'update body carries the option value, not the label');
+
+  await browser.close();
+});
+
+test('Competitive level: both edit and add rows render a <select> with the canonical 7-option list + placeholder', async () => {
+  const browser = await chromium.launch();
+  const { page } = await newPage(browser);
+
+  await page.evaluate(() => {
+    document.getElementById('app').shadowRoot.querySelector('[data-nav="teams"]').click();
+  });
+  await page.waitForFunction(() => {
+    const el = document.getElementById('app');
+    return !!(el.shadowRoot && el.shadowRoot.querySelector('.onboard-team-list'));
+  }, { timeout: 10000 });
+
+  const EXPECTED = [
+    ['', 'Selecciona…'], ['none', 'No compite'], ['local', 'Local'],
+    ['provincial', 'Provincial'], ['regional', 'Regional'],
+    ['regional_top', 'Regional máximo'], ['autonomic', 'Autonómico'],
+    ['national', 'Nacional'],
+  ];
+
+  // Add-row: placeholder selected, exactly the canonical options.
+  await page.evaluate(() => {
+    document.getElementById('app').shadowRoot.querySelector('[data-add-team-category="junior"]').click();
+  });
+  await page.waitForFunction(() => {
+    return !!document.getElementById('app').shadowRoot.querySelector('[data-adding-row]');
+  }, { timeout: 10000 });
+  const addSel = await page.evaluate(() => {
+    const s = document.getElementById('app').shadowRoot.querySelector('[data-new-team-level]');
+    return { tag: s.tagName, value: s.value, options: [...s.options].map((o) => [o.value, o.textContent]) };
+  });
+  assert.equal(addSel.tag, 'SELECT', 'add-row level field is a select');
+  assert.equal(addSel.value, '', 'placeholder selected when adding');
+  assert.deepEqual(addSel.options, EXPECTED, 'canonical 7-option list + placeholder verbatim');
+
+  // Cancel add, then edit the team with no stored level → placeholder selected.
+  await page.evaluate(() => {
+    document.getElementById('app').shadowRoot.querySelector('[data-cancel-add-team]').click();
+    document.getElementById('app').shadowRoot
+      .querySelector('[data-team-row="team_club1_senior_m"] [data-edit-team]').click();
+  });
+  await page.waitForFunction(() => {
+    return !!document.getElementById('app').shadowRoot.querySelector('[data-edit-team-level]');
+  }, { timeout: 10000 });
+  const editSel = await page.evaluate(() => {
+    const s = document.getElementById('app').shadowRoot.querySelector('[data-edit-team-level]');
+    return { tag: s.tagName, value: s.value };
+  });
+  assert.equal(editSel.tag, 'SELECT', 'edit-row level field is a select');
+  assert.equal(editSel.value, '', 'unset level shows the placeholder, no silent default');
 
   await browser.close();
 });

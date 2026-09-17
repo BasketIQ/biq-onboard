@@ -169,6 +169,21 @@ const CATEGORY_LABELS: Record<string, string> = {
   junior: 'Junior', senior: 'Senior', veteranos: 'Veteranos',
 };
 
+// Competition level dropdown — the same 7-option list the retired A-04
+// questionnaire used (biq-methodology, removed in d8b33e6). Stored value is
+// the option code; the wire format stays a free string.
+const COMPETITIVE_LEVEL_OPTIONS: { value: string; label: string }[] = [
+  { value: 'none', label: 'No compite' },
+  { value: 'local', label: 'Local' },
+  { value: 'provincial', label: 'Provincial' },
+  { value: 'regional', label: 'Regional' },
+  { value: 'regional_top', label: 'Regional máximo' },
+  { value: 'autonomic', label: 'Autonómico' },
+  { value: 'national', label: 'Nacional' },
+];
+const COMPETITIVE_LEVEL_LABELS: Record<string, string> = Object.fromEntries(
+  COMPETITIVE_LEVEL_OPTIONS.map((o) => [o.value, o.label]),
+);
 
 // F12: Inline SVG icons (stroke currentColor, same style as biq-methodology / STT).
 const ICON_EDIT = '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 20h9" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>';
@@ -183,6 +198,20 @@ const ICON_CANCEL = '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><pa
 
 const escapeHtml = (s: string): string =>
   String(s || '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]!));
+
+// Options markup for the competitive_level <select>: placeholder for the
+// unset state; a stored value outside the canonical list (legacy free text)
+// is preserved as an extra selected option rather than silently dropped.
+function competitiveLevelOptionsHtml(current: string): string {
+  const opts = COMPETITIVE_LEVEL_OPTIONS.map(
+    (o) => `<option value="${o.value}"${current === o.value ? ' selected' : ''}>${o.label}</option>`,
+  );
+  const known = COMPETITIVE_LEVEL_OPTIONS.some((o) => o.value === current);
+  if (current && !known) {
+    opts.push(`<option value="${escapeHtml(current)}" selected>${escapeHtml(current)}</option>`);
+  }
+  return `<option value=""${!current ? ' selected' : ''}>Selecciona…</option>${opts.join('')}`;
+}
 
 // Roles that may create clubs (ADDENDUM-07 §6.3 — mirrors the server rule;
 // here it drives presentation only, the server enforces with 403).
@@ -1629,7 +1658,9 @@ class BiqOnboardApp extends HTMLElement {
         // mapping, so the badge stays one character wide on narrow screens.
         const genderBadge = t.gender ? `<span class="onboard-badge">${escapeHtml(t.gender)}</span>` : '';
         const archivedBadge = t.archived ? '<span class="onboard-badge onboard-badge-muted">Archivado</span>' : '';
-        const level = t.competitive_level || 'Sin definir';
+        const level = t.competitive_level
+          ? (COMPETITIVE_LEVEL_LABELS[t.competitive_level] || t.competitive_level)
+          : 'Sin definir';
         if (this._editingTeamId === t.id) {
           // Edit: name on its own line; level + save/cancel on the second.
           return `<div class="onboard-team-row" data-team-row="${escapeHtml(t.id)}" data-editing="true">
@@ -1638,7 +1669,7 @@ class BiqOnboardApp extends HTMLElement {
             </div>
             <div class="onboard-team-row-meta">
               ${genderBadge}
-              <input type="text" class="onboard-input onboard-input-sm" data-edit-team-level placeholder="Nivel de competición" value="${escapeHtml(t.competitive_level || '')}" />
+              <select class="onboard-input onboard-input-sm" data-edit-team-level aria-label="Nivel de competición">${competitiveLevelOptionsHtml(t.competitive_level || '')}</select>
               <div class="onboard-team-actions">
                 <button class="onboard-icon-btn" data-save-team="${escapeHtml(t.id)}" title="Guardar" aria-label="Guardar">${ICON_CHECK}</button>
                 <button class="onboard-icon-btn" data-cancel-edit title="Cancelar" aria-label="Cancelar">${ICON_CANCEL}</button>
@@ -1683,7 +1714,7 @@ class BiqOnboardApp extends HTMLElement {
             <option value="F">F</option>
             <option value="X">X</option>
           </select>
-          <input type="text" class="onboard-input onboard-input-sm" data-new-team-level placeholder="Nivel de competición" />
+          <select class="onboard-input onboard-input-sm" data-new-team-level aria-label="Nivel de competición">${competitiveLevelOptionsHtml('')}</select>
           <div class="onboard-team-actions">
             <button class="onboard-icon-btn" data-confirm-add-team="${escapeHtml(cat)}" title="Confirmar" aria-label="Confirmar">${ICON_CHECK}</button>
             <button class="onboard-icon-btn" data-cancel-add-team title="Cancelar" aria-label="Cancelar">${ICON_CANCEL}</button>
@@ -2250,7 +2281,7 @@ class BiqOnboardApp extends HTMLElement {
         const row = this.shadow.querySelector(`[data-team-row="${CSS.escape(teamId)}"][data-editing="true"]`);
         if (!row) return;
         const name = (row.querySelector('[data-edit-team-name]') as HTMLInputElement)?.value.trim() || '';
-        const competitive_level = (row.querySelector('[data-edit-team-level]') as HTMLInputElement)?.value.trim() || '';
+        const competitive_level = (row.querySelector('[data-edit-team-level]') as HTMLSelectElement)?.value.trim() || '';
         if (!name) {
           this._teamsError = 'El nombre es obligatorio.';
           this.render();
@@ -2375,7 +2406,7 @@ class BiqOnboardApp extends HTMLElement {
         if (!addRow) return;
         const name = (addRow.querySelector('[data-new-team-name]') as HTMLInputElement)?.value.trim() || '';
         const gender = (addRow.querySelector('[data-new-team-gender]') as HTMLSelectElement)?.value || 'M';
-        const competitive_level = (addRow.querySelector('[data-new-team-level]') as HTMLInputElement)?.value.trim() || '';
+        const competitive_level = (addRow.querySelector('[data-new-team-level]') as HTMLSelectElement)?.value.trim() || '';
         if (!name) {
           this._teamsError = 'El nombre es obligatorio.';
           this.render();

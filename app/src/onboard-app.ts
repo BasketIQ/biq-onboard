@@ -162,11 +162,11 @@ const THEME_JOB_COPY: Record<string, { title: string; description: string; actio
 };
 
 // F12: Canonical category taxonomy (mirrors shell.js CATEGORY_ORDER)
-const CATEGORY_ORDER = ['babybasket', 'prebenjamin', 'benjamin', 'alevin', 'infantil', 'cadete', 'junior', 'senior'];
+const CATEGORY_ORDER = ['babybasket', 'prebenjamin', 'benjamin', 'alevin', 'infantil', 'cadete', 'junior', 'senior', 'veteranos'];
 const CATEGORY_LABELS: Record<string, string> = {
   babybasket: 'Babybasket', prebenjamin: 'Prebenjamín', benjamin: 'Benjamín',
   alevin: 'Alevín', infantil: 'Infantil', cadete: 'Cadete',
-  junior: 'Junior', senior: 'Senior',
+  junior: 'Junior', senior: 'Senior', veteranos: 'Veteranos',
 };
 
 

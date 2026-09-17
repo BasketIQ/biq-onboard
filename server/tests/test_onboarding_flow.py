@@ -525,17 +525,23 @@ def test_f12_create_club_seeds_full_team_catalog(client, monkeypatch):
     assert data["teams_seeded"] > 0, "teams_seeded count in response"
 
     teams = reg.list_teams(club_id)
-    # build_team_catalog generates 28 teams for a season (8 categories ×
+    # build_team_catalog generates 30 teams for a season (9 categories ×
     # genders, with birth-year cohorts for some categories).
-    assert len(teams) == 28, f"expected 28 teams, got {len(teams)}"
+    assert len(teams) == 30, f"expected 30 teams, got {len(teams)}"
 
     # Verify representative category × gender entries exist.
     categories = {t.category for t in teams}
     genders = {t.gender for t in teams}
     assert "babybasket" in categories
     assert "senior" in categories
+    assert "veteranos" in categories
     assert "M" in genders
     assert "F" in genders
+
+    # Veteranos teams use the per-gender display names, not
+    # "Veteranos Masculino/Femenino" and no birth-year suffix.
+    vet_names = sorted(t.name for t in teams if t.category == "veteranos")
+    assert vet_names == ["Veteranas", "Veteranos"]
 
     # Verify team IDs are scoped by club_id (the slug parameter).
     assert all(t.club_id == club_id for t in teams)
@@ -555,14 +561,14 @@ def test_f12_idempotent_replay_reseeds_without_duplicates(client, monkeypatch):
     club_id = first.json()["club"]["id"]
 
     teams_after_first = reg.list_teams(club_id)
-    assert len(teams_after_first) == 28
+    assert len(teams_after_first) == 30
 
     second = client.post("/api/onboarding/clubs", json=body)
     assert second.status_code == 200
     assert second.json()["club"]["id"] == club_id
 
     teams_after_second = reg.list_teams(club_id)
-    assert len(teams_after_second) == 28, "no duplicate teams on replay"
+    assert len(teams_after_second) == 30, "no duplicate teams on replay"
 
 
 def test_f12_seeding_job_done_after_create(client, monkeypatch):
@@ -579,8 +585,8 @@ def test_f12_seeding_job_done_after_create(client, monkeypatch):
     job = reg.get_club(club_id).team_seeding_job
     assert job is not None
     assert job["status"] == "done"
-    assert job["teams_expected"] == 28
-    assert job["teams_written"] == 28
+    assert job["teams_expected"] == 30
+    assert job["teams_written"] == 30
     assert job["reason"] is None
     assert job["catalog_slug"] == club_id
     assert job["requestedAt"]

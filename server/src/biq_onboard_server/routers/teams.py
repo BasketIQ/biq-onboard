@@ -122,7 +122,7 @@ def list_teams(club_id: str, request: Request) -> dict:
 # team_<slug>_<category>[_<cohort>]_<gender> — category slugs from
 # biq_core.org.catalog.CATEGORIES; cohort only for cohorted categories.
 _CATALOG_TEAM_ID_RE = re.compile(
-    r"^team_(.+)_(babybasket|prebenjamin|benjamin|alevin|infantil|cadete|junior|senior)"
+    r"^team_(.+)_(babybasket|prebenjamin|benjamin|alevin|infantil|cadete|junior|senior|veteranos)"
     r"(?:_\d+)?_[mfx]$"
 )
 

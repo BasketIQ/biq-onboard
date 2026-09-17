@@ -745,8 +745,8 @@ def test_team_seeding_job_done_after_onboard(admin_client):
     assert data["ok"] is True
     job = data["team_seeding_job"]
     assert job["status"] == "done"
-    assert job["teams_expected"] == 28
-    assert job["teams_written"] == 28
+    assert job["teams_expected"] == 30
+    assert job["teams_written"] == 30
     assert job["catalog_slug"] == "seed"
 
 
@@ -784,10 +784,10 @@ def test_reseed_recovers_zero_team_club(admin_client):
     assert r.status_code == 200
     data = r.json()
     assert data["ok"] is True
-    assert data["teams_written"] == 28
+    assert data["teams_written"] == 30
     assert data["team_seeding_job"]["status"] == "done"
     teams = reg.list_teams("club_zero")
-    assert len(teams) == 28
+    assert len(teams) == 30
     assert all(t.id.startswith("team_zero_") for t in teams)
 
 
@@ -798,11 +798,11 @@ def test_reseed_recovers_zero_team_pretracking_club(admin_client):
     r = admin_client.post("/api/admin/clubs/club_pre/teams/reseed")
     assert r.status_code == 200
     data = r.json()
-    assert data["teams_written"] == 28
+    assert data["teams_written"] == 30
     from biq_onboard_server import org
 
     teams = org.get_registry().list_teams("club_pre")
-    assert len(teams) == 28
+    assert len(teams) == 30
     assert all(t.id.startswith("team_club_pre_") for t in teams)
 
 
@@ -817,8 +817,8 @@ def test_reseed_twice_is_idempotent(admin_client):
     for _ in range(2):
         r = admin_client.post("/api/admin/clubs/club_r2/teams/reseed")
         assert r.status_code == 200
-        assert r.json()["teams_written"] == 28
-    assert len(org.get_registry().list_teams("club_r2")) == 28
+        assert r.json()["teams_written"] == 30
+    assert len(org.get_registry().list_teams("club_r2")) == 30
 
 
 def test_reseed_failure_persists_failed_job(admin_client, monkeypatch):

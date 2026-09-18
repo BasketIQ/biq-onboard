@@ -666,6 +666,133 @@
   min-width: 0;
 }
 
+/* Consolidated Equipos tab — "Mis equipos" selection summary + pick control.
+   The checkbox reuses the former shell page's custom-check visual language
+   adapted to onboard tokens; it is its own click target at the start of the
+   row so selection never shares a target with management icons. */
+
+.onboard-myteams {
+  margin-bottom: 16px;
+}
+
+.onboard-myteams-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.onboard-myteams-chip {
+  padding: 4px 10px;
+  border: 1px solid var(--biq-border, #f0f0f0);
+  border-radius: 999px;
+  background: var(--biq-surface-1, #fff);
+  color: var(--biq-text, #1a1a1a);
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.onboard-myteams-chip-stale {
+  border-style: dashed;
+  color: var(--biq-muted, #666);
+  font-weight: 600;
+}
+
+.onboard-myteams-empty {
+  color: var(--biq-muted, #666);
+  font-size: 12.5px;
+  font-weight: 700;
+}
+
+.onboard-myteams-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+  min-height: 20px;
+}
+
+.onboard-save-status {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--biq-muted, #666);
+}
+
+.onboard-save-status-error {
+  color: var(--biq-red, #d32f2f);
+}
+
+.onboard-clubteams-head {
+  justify-content: space-between;
+  align-items: center;
+}
+
+.onboard-clubteams-head .onboard-card-title {
+  margin: 0;
+}
+
+.onboard-team-pick {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.onboard-team-check {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.onboard-team-box {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  flex: none;
+  border-radius: 8px;
+  border: 1.8px solid var(--biq-border, #d8d8d8);
+  background: var(--biq-surface-2, #f5f5f5);
+  color: transparent;
+  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}
+
+.onboard-team-box svg {
+  width: 14px;
+  height: 14px;
+  display: block;
+}
+
+.onboard-team-check:checked ~ .onboard-team-box {
+  background: var(--biq-orange, #E87722);
+  border-color: transparent;
+  color: #fff;
+}
+
+.onboard-team-check:focus-visible ~ .onboard-team-box {
+  outline: 2px solid var(--biq-orange, #E87722);
+  outline-offset: 2px;
+}
+
+.onboard-linkbtn {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--biq-orange, #E87722);
+  font-size: 13px;
+  font-weight: 800;
+  padding: 2px 0;
+  cursor: pointer;
+}
+
+.onboard-btn-sm {
+  padding: 6px 12px;
+  font-size: 13px;
+}
+
 .onboard-team-row-meta {
   display: flex;
   align-items: center;

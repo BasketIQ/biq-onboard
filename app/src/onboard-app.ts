@@ -217,6 +217,11 @@ function competitiveLevelOptionsHtml(current: string): string {
 // here it drives presentation only, the server enforces with 403).
 const ADMIN_ROLES = ['administrator', 'sports_director', 'super_administrator'];
 
+// Consolidated Equipos tab (2026-09-19 design): who may pick their own teams
+// via the self-scoped /api/org/my-teams contract. Management stays behind
+// ADMIN_ROLES (the server's club.teams.manage gate enforces it).
+const PICK_ROLES = ['administrator', 'super_administrator', 'sports_director', 'coordinator', 'coach'];
+
 function canCreateClub(memberships: MembershipInfo[] | undefined): boolean {
   const ms = memberships || [];
   return ms.length === 0 || ms.some((m) => ADMIN_ROLES.includes(m.role));
@@ -350,6 +355,22 @@ class BiqOnboardApp extends HTMLElement {
   private _addingTeamCategory: string | null = null;
   private _teamsFilter: 'active' | 'all' = 'active';
   private _deleteConfirmTeamId: string | null = null;
+  // Consolidated Equipos tab: self-scoped selection via /api/org/my-teams.
+  // _myTeamsCatalog is the selectable universe (and its order); _teams is the
+  // management feed (archived flag, competition level, seeding) loaded only
+  // for ADMIN_ROLES — coaches/coordinators must never hit those endpoints.
+  private _myTeamsCatalog: TeamRow[] = [];
+  private _myTeamsLoaded = false;
+  private _myTeamsLoading = false;
+  private _myTeamsError: string | null = null;
+  private _selectedIds = new Set<string>();
+  private _confirmedSelected = new Set<string>();
+  private _failedSelection: string[] | null = null; // last unsaved intent (retry)
+  private _selectionStatus: 'idle' | 'saving' | 'saved' | 'error' = 'idle';
+  private _selectionSaveChain: Promise<void> = Promise.resolve();
+  private _selectionSaveTimer: ReturnType<typeof setTimeout> | null = null;
+  // Deep link `teams?return=<route>` from the mandatory-selection gate.
+  private _returnRoute = '';
   // F12: Team-catalog seeding job state (Club.team_seeding_job, Phase 1).
   private _teamSeedingJob: { status?: string; reason?: string | null } | null = null;
   private _seedingLoading = false; // reseed POST in-flight
@@ -413,11 +434,23 @@ class BiqOnboardApp extends HTMLElement {
       this._membersError = null;
       this._editingMemberId = null;
       this._deleteConfirmUserId = null;
+      // Consolidated Equipos: selection + management catalog are club-scoped.
+      this._teams = [];
+      this._teamsError = null;
+      this._myTeamsCatalog = [];
+      this._myTeamsLoaded = false;
+      this._myTeamsError = null;
+      this._selectedIds = new Set();
+      this._confirmedSelected = new Set();
+      this._failedSelection = null;
+      this._selectionStatus = 'idle';
     }
     // F12: If the shell deep-linked straight to the Equipos route, the tab
     // renders before any nav click — load the catalog on org arrival too.
-    if (newClubId && this._subRoute === 'teams' && this._teams.length === 0 && !this._teamsLoading) {
-      this.loadTeams(newClubId);
+    // Role-aware: managers also pull the management feed; pickers/read-only
+    // roles only ever call the self-scoped /api/org/my-teams.
+    if (newClubId && this._subRoute === 'teams') {
+      this._ensureTeamsData(newClubId);
     }
     // Phase 3: same for the Perfil club summary.
     if (newClubId && this._subRoute === 'profile' && !this._clubSummary && !this._clubSummaryLoading) {
@@ -437,13 +470,22 @@ class BiqOnboardApp extends HTMLElement {
   get user(): string | null { return this._user; }
 
   set route(value: string) {
-    this._subRoute = value || '';
+    // Deep links may carry a query ("teams?return=cycle" from the mandatory
+    // selection gate). Path and query are parsed separately — _subRoute is
+    // always the bare tab id; _returnRoute preserves the continuation intent
+    // until a successful selection save lets the user navigate there.
+    const raw = value || '';
+    const qIdx = raw.indexOf('?');
+    this._subRoute = qIdx >= 0 ? raw.slice(0, qIdx) : raw;
+    this._returnRoute = qIdx >= 0
+      ? (new URLSearchParams(raw.slice(qIdx + 1)).get('return') || '')
+      : '';
     this.render();
     // F12: Deep-linking to #/onboard/teams bypasses the nav click that loads
     // the catalog — trigger the load here when club context is already set.
     const clubId = this._org?.club?.id;
-    if (this._subRoute === 'teams' && clubId && this._teams.length === 0 && !this._teamsLoading) {
-      this.loadTeams(clubId);
+    if (this._subRoute === 'teams' && clubId) {
+      this._ensureTeamsData(clubId);
     }
     // Phase 3: same for the Perfil club summary.
     if (this._subRoute === 'profile' && clubId && !this._clubSummary && !this._clubSummaryLoading) {
@@ -545,6 +587,137 @@ class BiqOnboardApp extends HTMLElement {
       this._membersLoading = false;
       this.render();
     }
+  }
+
+  // Consolidated Equipos: load whichever data the role is entitled to.
+  // Everyone (incl. read-only roles) gets the self-scoped selection feed;
+  // only ADMIN_ROLES additionally pull the management feed + seeding job.
+  private _canPickTeams(): boolean {
+    return PICK_ROLES.includes(this._org?.role || '');
+  }
+
+  private _canManageTeams(): boolean {
+    return ADMIN_ROLES.includes(this._org?.role || '');
+  }
+
+  private _ensureTeamsData(clubId: string): void {
+    if (!this._myTeamsLoaded && !this._myTeamsLoading) {
+      this.loadTeamSelection();
+    }
+    if (this._canManageTeams() && this._teams.length === 0 && !this._teamsLoading) {
+      this.loadTeams(clubId);
+    }
+  }
+
+  // Self-scoped selection feed (biq-app BFF, same origin): returns the club
+  // catalog plus the current user's selected team ids. Self-scoped means any
+  // role may call it — no management capability is exercised.
+  private async loadTeamSelection(): Promise<void> {
+    this._myTeamsLoading = true;
+    this._myTeamsError = null;
+    this.render();
+    try {
+      const res = await fetch(`${window.location.origin}/api/org/my-teams`, {
+        credentials: 'include',
+        cache: 'no-store',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      this._myTeamsCatalog = Array.isArray(data.catalog) ? data.catalog : [];
+      const selected = Array.isArray(data.selected) ? data.selected : [];
+      this._selectedIds = new Set(selected);
+      this._confirmedSelected = new Set(selected);
+      this._failedSelection = null;
+      this._selectionStatus = 'idle';
+      this._myTeamsLoaded = true;
+    } catch (err) {
+      this._myTeamsError = (err as Error).message;
+    } finally {
+      this._myTeamsLoading = false;
+      this.render();
+    }
+  }
+
+  // Selection save: optimistic chips + writes serialized through
+  // _selectionSaveChain so a slow earlier response can never overwrite a
+  // newer intent. The debounce batches rapid toggles into one PUT.
+  private _scheduleSelectionSave(): void {
+    if (this._selectionSaveTimer) clearTimeout(this._selectionSaveTimer);
+    this._selectionSaveTimer = setTimeout(() => { this._queueSelectionSave(); }, 350);
+  }
+
+  private _queueSelectionSave(): Promise<void> {
+    this._selectionSaveChain = this._selectionSaveChain
+      .catch(() => {})
+      .then(() => this._saveSelection());
+    return this._selectionSaveChain;
+  }
+
+  private async _saveSelection(): Promise<void> {
+    const sent = this._orderedSelectedIds();
+    this._selectionStatus = 'saving';
+    this._updateSelectionDom();
+    try {
+      const res = await fetch(`${window.location.origin}/api/org/my-teams`, {
+        method: 'PUT',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ team_ids: sent }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json().catch(() => ({}));
+      const serverSelected = Array.isArray(data.selected) ? data.selected : sent;
+      this._confirmedSelected = new Set(serverSelected);
+      this._failedSelection = null;
+      // If the intent moved while this PUT was in flight, the chained
+      // follow-up save persists it — only reconcile the view when the set
+      // we sent is still what the user wants.
+      if (this._orderedSelectedIds().join('|') === sent.join('|')) {
+        this._selectedIds = new Set(serverSelected);
+        this._selectionStatus = 'saved';
+        this._emitSelectionChanged(serverSelected);
+      }
+      this._updateSelectionDom();
+    } catch {
+      // Honest failure: record the unsaved intent for retry. When the user
+      // has not moved on, restore the last confirmed state — the optimistic
+      // set was never persisted and must not pretend otherwise.
+      this._failedSelection = sent;
+      if (this._orderedSelectedIds().join('|') === sent.join('|')) {
+        this._selectedIds = new Set(this._confirmedSelected);
+      }
+      this._selectionStatus = 'error';
+      this._updateSelectionDom();
+    }
+  }
+
+  // Public contract for the shell: fired only after a successful save, from
+  // the host element so it crosses the shadow boundary (bubbles + composed).
+  private _emitSelectionChanged(selected: string[]): void {
+    try {
+      this.dispatchEvent(new CustomEvent('biq-teams:selection-changed', {
+        detail: { selected: [...selected], catalog: this._mergedCatalog() },
+        bubbles: true,
+        composed: true,
+      }));
+    } catch { /* CustomEvent unavailable */ }
+  }
+
+  // Targeted DOM refresh for selection toggles — avoids a full shadow-DOM
+  // rebuild so the checkbox that fired the change keeps its focus.
+  private _updateSelectionDom(): void {
+    const chips = this.shadow.querySelector('[data-myteams-chips]');
+    if (chips) chips.innerHTML = this._myTeamsChipsHtml();
+    const status = this.shadow.querySelector('[data-selection-status]');
+    if (status) {
+      status.textContent = this._selectionStatusText();
+      status.classList.toggle('onboard-save-status-error', this._selectionStatus === 'error');
+    }
+    const retry = this.shadow.querySelector('[data-retry-save]') as HTMLElement | null;
+    if (retry) retry.hidden = !(this._selectionStatus === 'error' && this._failedSelection);
+    const cont = this.shadow.querySelector('[data-continue]') as HTMLButtonElement | null;
+    if (cont) cont.disabled = !this._canContinue();
   }
 
   // F12: Load the club's team catalog from the teams API.
@@ -1075,7 +1248,7 @@ class BiqOnboardApp extends HTMLElement {
     if (section === 'profile') {
       content = this.renderProfile();
     } else if (section === 'teams') {
-      content = this.renderTeamsTab(club.id);
+      content = this.renderTeamsTab();
     } else if (section === 'members' && canManageMembers) {
       content = this.renderMembers(club.id);
     } else {
@@ -1586,36 +1759,152 @@ class BiqOnboardApp extends HTMLElement {
     }
   }
 
+  // ─── Consolidated Equipos tab ──────────────────────────────────────────
+  // "Mis equipos" (self-scoped selection summary) + "Equipos del club"
+  // (catalog). Selection rides the self-scoped /api/org/my-teams contract;
+  // catalog management keeps the existing club.teams.manage-gated endpoints.
+
+  // Merge the two feeds by team id into one normalized row model — the
+  // my-teams catalog defines the selectable universe and its order; the
+  // management feed enriches rows it knows (archived flag, competition
+  // level) and contributes management-only rows. No row appears twice.
+  private _mergedCatalog(): TeamRow[] {
+    const mgmtById = new Map(this._teams.map((t) => [t.id, t]));
+    const merged: TeamRow[] = [];
+    const seen = new Set<string>();
+    for (const t of this._myTeamsCatalog) {
+      const m = mgmtById.get(t.id);
+      seen.add(t.id);
+      merged.push({
+        id: t.id,
+        name: m?.name || t.name,
+        category: (m?.category ?? t.category) || null,
+        gender: (m?.gender ?? t.gender) || null,
+        label: (m?.label ?? t.label) || null,
+        archived: m ? !!m.archived : !!t.archived,
+        competitive_level: m?.competitive_level ?? t.competitive_level,
+      });
+    }
+    for (const t of this._teams) {
+      if (!seen.has(t.id)) merged.push(t);
+    }
+    return merged;
+  }
+
+  // Selected ids in catalog order — the PUT contract sends the complete
+  // desired set. Only selectable rows count (in catalog, not archived), so a
+  // stale archived/foreign persisted id is cleaned by the next explicit save
+  // rather than silently re-persisted.
+  private _orderedSelectedIds(): string[] {
+    const selectable = new Map(
+      this._mergedCatalog().filter((t) => !t.archived).map((t, i) => [t.id, i] as [string, number]),
+    );
+    return [...this._selectedIds]
+      .filter((id) => selectable.has(id))
+      .sort((a, b) => selectable.get(a)! - selectable.get(b)!);
+  }
+
+  private _myTeamsChipsHtml(): string {
+    const catalog = this._mergedCatalog();
+    const byId = new Map(catalog.map((t) => [t.id, t]));
+    const chips: string[] = [];
+    const stale: string[] = [];
+    for (const t of catalog) {
+      if (!this._selectedIds.has(t.id)) continue;
+      const label = t.name || t.label || t.id;
+      if (t.archived) {
+        stale.push(`<span class="onboard-myteams-chip onboard-myteams-chip-stale" title="Equipo archivado">${escapeHtml(label)} · no disponible</span>`);
+      } else {
+        chips.push(`<span class="onboard-myteams-chip">${escapeHtml(label)}</span>`);
+      }
+    }
+    // A persisted id outside the current catalog is flagged too — never
+    // silently dropped from the summary.
+    for (const id of this._selectedIds) {
+      if (!byId.has(id)) {
+        stale.push(`<span class="onboard-myteams-chip onboard-myteams-chip-stale" title="Ya no está en el catálogo">${escapeHtml(id)} · no disponible</span>`);
+      }
+    }
+    if (!chips.length && !stale.length) {
+      return '<span class="onboard-myteams-empty">No tienes equipos seleccionados</span>';
+    }
+    return chips.join('') + stale.join('');
+  }
+
+  private _selectionStatusText(): string {
+    switch (this._selectionStatus) {
+      case 'saving': return 'Guardando…';
+      case 'saved': return 'Guardado';
+      case 'error': return 'No se pudo guardar';
+      default: return '';
+    }
+  }
+
+  // Continuar is usable once a non-empty selection is persisted — a deep
+  // link with ?return= must never navigate before a successful save.
+  private _canContinue(): boolean {
+    return !!this._returnRoute && this._selectedIds.size > 0 && this._selectionStatus !== 'saving';
+  }
+
+  private _renderMyTeamsBlock(canPick: boolean): string {
+    const status = this._selectionStatusText();
+    const statusCls = this._selectionStatus === 'error' ? ' onboard-save-status-error' : '';
+    return `<div class="onboard-card onboard-myteams">
+      <h3 class="onboard-card-title">Mis equipos</h3>
+      <div class="onboard-myteams-chips" data-myteams-chips>${this._myTeamsChipsHtml()}</div>
+      ${canPick ? `<div class="onboard-myteams-meta">
+        <span class="onboard-save-status${statusCls}" data-selection-status aria-live="polite">${escapeHtml(status)}</span>
+        <button class="onboard-linkbtn" data-retry-save ${this._selectionStatus === 'error' && this._failedSelection ? '' : 'hidden'}>Reintentar</button>
+        ${this._returnRoute ? `<button class="onboard-btn onboard-btn-primary onboard-btn-sm" data-continue ${this._canContinue() ? '' : 'disabled'}>Continuar</button>` : ''}
+      </div>` : ''}
+    </div>`;
+  }
+
   // F12: Render the Equipos tab — club team catalog management.
-  private renderTeamsTab(clubId: string): string {
+  private renderTeamsTab(): string {
+    const canPick = this._canPickTeams();
+    const canManage = this._canManageTeams();
+    const myTeamsBlock = this._renderMyTeamsBlock(canPick);
+
     // Team-seeding job states — pending shows "generating", failed (or a
     // stale pending) shows an explicit error + Reintentar. The category
     // sections still render below so manual add stays available.
-    const seeding = this._teamSeedingJob;
     let seedingBanner = '';
-    if (seeding?.status === 'pending' && !this._seedingStale) {
-      seedingBanner = '<div class="onboard-loading" role="status" aria-live="polite"><span class="onboard-spinner" aria-hidden="true"></span> Generando el catálogo de equipos del club… Esto puede tardar unos segundos.</div>';
-    } else if (seeding?.status === 'failed' || (seeding?.status === 'pending' && this._seedingStale)) {
-      const reason = seeding.reason ? `<p class="onboard-card-desc">${escapeHtml(seeding.reason)}</p>` : '';
-      const staleNote = this._seedingStale ? '<p class="onboard-card-desc">El proceso está tardando demasiado.</p>' : '';
-      seedingBanner = `<div class="onboard-card">
+    if (canManage) {
+      const seeding = this._teamSeedingJob;
+      if (seeding?.status === 'pending' && !this._seedingStale) {
+        seedingBanner = '<div class="onboard-loading" role="status" aria-live="polite"><span class="onboard-spinner" aria-hidden="true"></span> Generando el catálogo de equipos del club… Esto puede tardar unos segundos.</div>';
+      } else if (seeding?.status === 'failed' || (seeding?.status === 'pending' && this._seedingStale)) {
+        const reason = seeding.reason ? `<p class="onboard-card-desc">${escapeHtml(seeding.reason)}</p>` : '';
+        const staleNote = this._seedingStale ? '<p class="onboard-card-desc">El proceso está tardando demasiado.</p>' : '';
+        seedingBanner = `<div class="onboard-card">
         <p class="onboard-error" role="alert">No se pudieron generar los equipos automáticamente.</p>
         ${reason}${staleNote}
         <p class="onboard-card-desc">Puedes reintentar la generación o añadir equipos manualmente desde cada categoría.</p>
         <button class="onboard-btn onboard-btn-primary" data-reseed-teams ${this._seedingLoading ? 'disabled' : ''}>${this._seedingLoading ? 'Generando…' : 'Reintentar'}</button>
       </div>`;
-    }
-    if (this._teamsLoading) {
-      return '<div class="onboard-loading" role="status" aria-live="polite"><span class="onboard-spinner" aria-hidden="true"></span> Cargando equipos…</div>';
-    }
-    if (this._teamsError && !this._deleteConfirmTeamId) {
-      return `<div class="onboard-error" role="alert">${escapeHtml(this._teamsError)}</div>`;
+      }
     }
 
-    // Filter teams based on the current filter setting.
-    const visibleTeams = this._teamsFilter === 'all'
-      ? this._teams
-      : this._teams.filter(t => !t.archived);
+    if (this._myTeamsLoading && !this._myTeamsLoaded) {
+      return `${myTeamsBlock}<div class="onboard-loading" role="status" aria-live="polite"><span class="onboard-spinner" aria-hidden="true"></span> Cargando equipos…</div>`;
+    }
+    if (this._myTeamsError && !this._myTeamsLoaded) {
+      return `${myTeamsBlock}<div class="onboard-error" role="alert">${escapeHtml(this._myTeamsError)} <button class="onboard-linkbtn" data-retry-load>Reintentar</button></div>`;
+    }
+    if (canManage && this._teamsLoading && !this._teams.length) {
+      return `${myTeamsBlock}<div class="onboard-loading" role="status" aria-live="polite"><span class="onboard-spinner" aria-hidden="true"></span> Cargando equipos…</div>`;
+    }
+    if (canManage && this._teamsError && !this._deleteConfirmTeamId && !this._teams.length) {
+      return `${myTeamsBlock}<div class="onboard-error" role="alert">${escapeHtml(this._teamsError)}</div>`;
+    }
+
+    const catalog = this._mergedCatalog();
+    // Non-managers only ever see the active catalog — archived rows and the
+    // archived filter are management surfaces.
+    const visibleTeams = canManage
+      ? (this._teamsFilter === 'all' ? catalog : catalog.filter(t => !t.archived))
+      : catalog.filter(t => !t.archived);
 
     // Group teams by category using the canonical order.
     const groups = new Map<string, TeamRow[]>();
@@ -1624,23 +1913,17 @@ class BiqOnboardApp extends HTMLElement {
       if (!groups.has(cat)) groups.set(cat, []);
       groups.get(cat)!.push(t);
     }
-    const ordered: [string, TeamRow[]][] = [];
-    for (const cat of CATEGORY_ORDER) {
-      if (groups.has(cat)) ordered.push([cat, groups.get(cat)!]);
-    }
-    // Non-canonical categories at the end (defensive).
-    for (const [cat, teams] of groups) {
-      if (!CATEGORY_ORDER.includes(cat)) ordered.push([cat, teams]);
-    }
 
-    // Check which categories have teams (including archived, for the + button)
+    // Managers keep every canonical category card so the + add-row is always
+    // available; pickers/read-only roles only see categories with teams.
     const allCategoryIds = new Set<string>();
-    for (const t of this._teams) {
-      allCategoryIds.add(t.category || 'senior');
+    for (const t of catalog) {
+      if (canManage || !t.archived) allCategoryIds.add(t.category || 'senior');
     }
-    // Always show all canonical categories so + is available even if empty
-    for (const cat of CATEGORY_ORDER) {
-      allCategoryIds.add(cat);
+    if (canManage) {
+      for (const cat of CATEGORY_ORDER) {
+        allCategoryIds.add(cat);
+      }
     }
 
     const sections = Array.from(allCategoryIds).sort((a, b) => {
@@ -1660,8 +1943,8 @@ class BiqOnboardApp extends HTMLElement {
         const archivedBadge = t.archived ? '<span class="onboard-badge onboard-badge-muted">Archivado</span>' : '';
         const level = t.competitive_level
           ? (COMPETITIVE_LEVEL_LABELS[t.competitive_level] || t.competitive_level)
-          : 'Sin definir';
-        if (this._editingTeamId === t.id) {
+          : (canManage ? 'Sin definir' : '');
+        if (canManage && this._editingTeamId === t.id) {
           // Edit: name on its own line; level + save/cancel on the second.
           return `<div class="onboard-team-row" data-team-row="${escapeHtml(t.id)}" data-editing="true">
             <div class="onboard-team-row-main">
@@ -1677,34 +1960,46 @@ class BiqOnboardApp extends HTMLElement {
             </div>
           </div>`;
         }
-        const actions = [
-          `<button class="onboard-icon-btn" data-edit-team="${escapeHtml(t.id)}" title="Editar nombre" aria-label="Editar nombre">${ICON_EDIT}</button>`,
-        ];
-        if (t.archived) {
-          // Archived teams: show restore + delete (physical)
-          actions.push(`<button class="onboard-icon-btn" data-unarchive-team="${escapeHtml(t.id)}" title="Restaurar" aria-label="Restaurar">${ICON_RESTORE}</button>`);
-          actions.push(`<button class="onboard-icon-btn onboard-icon-btn-danger" data-delete-team="${escapeHtml(t.id)}" title="Eliminar" aria-label="Eliminar">${ICON_TRASH}</button>`);
-        } else {
-          // Active teams: archive (logical) + delete (physical)
-          actions.push(`<button class="onboard-icon-btn" data-archive-team="${escapeHtml(t.id)}" title="Archivar" aria-label="Archivar">${ICON_ARCHIVE}</button>`);
-          actions.push(`<button class="onboard-icon-btn onboard-icon-btn-danger" data-delete-team="${escapeHtml(t.id)}" title="Eliminar" aria-label="Eliminar">${ICON_TRASH}</button>`);
+        // Selection is its own click target — a small checkbox at the start
+        // of the row. Management icons stay on the meta line so picking a
+        // team can never fire edit/archive/delete. Archived teams are not
+        // selectable.
+        const pick = (canPick && !t.archived)
+          ? `<label class="onboard-team-pick" title="Seleccionar ${escapeHtml(t.name)}"><input type="checkbox" class="onboard-team-check" data-pick-team="${escapeHtml(t.id)}"${this._selectedIds.has(t.id) ? ' checked' : ''} /><span class="onboard-team-box">${ICON_CHECK}</span></label>`
+          : '';
+        let actions = '';
+        if (canManage) {
+          const actionBtns = [
+            `<button class="onboard-icon-btn" data-edit-team="${escapeHtml(t.id)}" title="Editar nombre" aria-label="Editar nombre">${ICON_EDIT}</button>`,
+          ];
+          if (t.archived) {
+            // Archived teams: show restore + delete (physical)
+            actionBtns.push(`<button class="onboard-icon-btn" data-unarchive-team="${escapeHtml(t.id)}" title="Restaurar" aria-label="Restaurar">${ICON_RESTORE}</button>`);
+            actionBtns.push(`<button class="onboard-icon-btn onboard-icon-btn-danger" data-delete-team="${escapeHtml(t.id)}" title="Eliminar" aria-label="Eliminar">${ICON_TRASH}</button>`);
+          } else {
+            // Active teams: archive (logical) + delete (physical)
+            actionBtns.push(`<button class="onboard-icon-btn" data-archive-team="${escapeHtml(t.id)}" title="Archivar" aria-label="Archivar">${ICON_ARCHIVE}</button>`);
+            actionBtns.push(`<button class="onboard-icon-btn onboard-icon-btn-danger" data-delete-team="${escapeHtml(t.id)}" title="Eliminar" aria-label="Eliminar">${ICON_TRASH}</button>`);
+          }
+          actions = `<div class="onboard-team-actions">${actionBtns.join('')}</div>`;
         }
         // Name gets the full row width (never truncates); gender/level/actions
         // share the compact second line.
         return `<div class="onboard-team-row" data-team-row="${escapeHtml(t.id)}">
           <div class="onboard-team-row-main">
+            ${pick}
             <span class="onboard-team-name">${escapeHtml(t.name)}</span> ${archivedBadge}
           </div>
           <div class="onboard-team-row-meta">
             ${genderBadge}
-            <span class="onboard-team-level">${escapeHtml(level)}</span>
-            <div class="onboard-team-actions">${actions.join('')}</div>
+            ${level ? `<span class="onboard-team-level">${escapeHtml(level)}</span>` : ''}
+            ${actions}
           </div>
         </div>`;
       }).join('');
 
       // Category-level add row (when _addingTeamCategory === cat)
-      const addRow = this._addingTeamCategory === cat ? `<div class="onboard-team-row" data-adding-row="true">
+      const addRow = canManage && this._addingTeamCategory === cat ? `<div class="onboard-team-row" data-adding-row="true">
         <div class="onboard-team-row-main">
           <input type="text" class="onboard-input onboard-input-sm" data-new-team-name placeholder="Nombre del equipo" />
         </div>
@@ -1724,18 +2019,18 @@ class BiqOnboardApp extends HTMLElement {
 
       const hasTeams = teams.length > 0 || this._addingTeamCategory === cat;
       if (!hasTeams) {
-        // Empty category: just show the header with + button
+        // Empty category: just show the header (+ button for managers)
         return `<div class="onboard-card">
           <div class="onboard-team-header">
             <h3 class="onboard-card-title">${escapeHtml(catLabel)}</h3>
-            <button class="onboard-icon-btn" data-add-team-category="${escapeHtml(cat)}" title="Añadir equipo" aria-label="Añadir equipo a ${escapeHtml(catLabel)}">${ICON_PLUS}</button>
+            ${canManage ? `<button class="onboard-icon-btn" data-add-team-category="${escapeHtml(cat)}" title="Añadir equipo" aria-label="Añadir equipo a ${escapeHtml(catLabel)}">${ICON_PLUS}</button>` : ''}
           </div>
         </div>`;
       }
       return `<div class="onboard-card">
         <div class="onboard-team-header">
           <h3 class="onboard-card-title">${escapeHtml(catLabel)}</h3>
-          <button class="onboard-icon-btn" data-add-team-category="${escapeHtml(cat)}" title="Añadir equipo" aria-label="Añadir equipo a ${escapeHtml(catLabel)}">${ICON_PLUS}</button>
+          ${canManage ? `<button class="onboard-icon-btn" data-add-team-category="${escapeHtml(cat)}" title="Añadir equipo" aria-label="Añadir equipo a ${escapeHtml(catLabel)}">${ICON_PLUS}</button>` : ''}
         </div>
         <div class="onboard-team-list" role="table" aria-label="Equipos">
           ${rows}${addRow}
@@ -1743,9 +2038,9 @@ class BiqOnboardApp extends HTMLElement {
       </div>`;
     }).join('');
 
-    // Delete confirmation modal
-    const deleteModal = this._deleteConfirmTeamId ? (() => {
-      const team = this._teams.find(t => t.id === this._deleteConfirmTeamId);
+    // Delete confirmation modal (management only)
+    const deleteModal = canManage && this._deleteConfirmTeamId ? (() => {
+      const team = this._mergedCatalog().find(t => t.id === this._deleteConfirmTeamId);
       const teamName = team ? team.name : this._deleteConfirmTeamId;
       return `<div class="onboard-modal-overlay" role="dialog" aria-modal="true" aria-labelledby="delete-modal-title">
         <div class="onboard-modal">
@@ -1762,15 +2057,16 @@ class BiqOnboardApp extends HTMLElement {
 
     return `<section class="onboard-section">
       <h2 class="onboard-section-title">Equipos</h2>
-      <div class="onboard-form-row" style="justify-content: space-between; align-items: center;">
-        <p class="onboard-card-desc" style="margin:0;">Catálogo de equipos del club.</p>
-        <label class="onboard-filter-label">
+      ${myTeamsBlock}
+      <div class="onboard-form-row onboard-clubteams-head">
+        <h3 class="onboard-card-title">Equipos del club</h3>
+        ${canManage ? `<label class="onboard-filter-label">
           Ver:
           <select class="onboard-input onboard-input-sm" data-teams-filter>
             <option value="active" ${this._teamsFilter === 'active' ? 'selected' : ''}>Activos</option>
             <option value="all" ${this._teamsFilter === 'all' ? 'selected' : ''}>Todos</option>
           </select>
-        </label>
+        </label>` : ''}
       </div>
       ${seedingBanner}
       ${this._teamsError ? `<div class="onboard-error" role="alert">${escapeHtml(this._teamsError)}</div>` : ''}
@@ -1959,8 +2255,8 @@ class BiqOnboardApp extends HTMLElement {
       btn.addEventListener('click', () => {
         const nav = (btn as HTMLElement).dataset.nav || 'club-details';
         this._subRoute = nav;
-        if (nav === 'teams' && this._teams.length === 0 && !this._teamsLoading) {
-          this.loadTeams(clubId);
+        if (nav === 'teams') {
+          this._ensureTeamsData(clubId);
         } else if (nav === 'profile' && !this._clubSummary && !this._clubSummaryLoading) {
           this.loadClubSummary(clubId);
         } else {
@@ -2115,8 +2411,8 @@ class BiqOnboardApp extends HTMLElement {
         const nav = (btn as HTMLElement).dataset.nav || 'club-details';
         this._subRoute = nav;
         // F12: Load teams when navigating to the Equipos tab.
-        if (nav === 'teams' && this._teams.length === 0 && !this._teamsLoading) {
-          this.loadTeams(clubId);
+        if (nav === 'teams') {
+          this._ensureTeamsData(clubId);
         } else if (nav === 'profile' && !this._clubSummary && !this._clubSummaryLoading) {
           this.loadClubSummary(clubId);
         } else {
@@ -2205,13 +2501,57 @@ class BiqOnboardApp extends HTMLElement {
         this._editingTeamId = null;
         this._addingTeamCategory = null;
         this._deleteConfirmTeamId = null;
-        if (nav === 'teams' && this._teams.length === 0 && !this._teamsLoading) {
-          this.loadTeams(clubId);
-        } else {
-          this.render();
+        if (nav === 'teams') {
+          this._ensureTeamsData(clubId);
         }
+        this.render();
       });
     });
+
+    // Self-selection checkboxes (pickers only — the control does not render
+    // for players or on archived rows). Optimistic chips; the save is
+    // debounced then serialized through _selectionSaveChain.
+    this.shadow.querySelectorAll('[data-pick-team]').forEach(input => {
+      input.addEventListener('change', () => {
+        const el = input as HTMLInputElement;
+        const id = el.dataset.pickTeam || '';
+        if (!id) return;
+        if (el.checked) this._selectedIds.add(id);
+        else this._selectedIds.delete(id);
+        this._selectionStatus = 'saving';
+        this._failedSelection = null;
+        this._updateSelectionDom();
+        this._scheduleSelectionSave();
+      });
+    });
+
+    // Retry a failed save — re-applies the last intended (unsaved) set.
+    const retrySaveBtn = this.shadow.querySelector('[data-retry-save]');
+    if (retrySaveBtn) {
+      retrySaveBtn.addEventListener('click', () => {
+        if (this._failedSelection) {
+          this._selectedIds = new Set(this._failedSelection);
+          this._failedSelection = null;
+        }
+        this._queueSelectionSave();
+      });
+    }
+
+    // Retry the self-scoped catalog load after a fetch failure.
+    const retryLoadBtn = this.shadow.querySelector('[data-retry-load]');
+    if (retryLoadBtn) {
+      retryLoadBtn.addEventListener('click', () => this.loadTeamSelection());
+    }
+
+    // Continuar after a gate deep link — only fires when a non-empty
+    // selection is already persisted (_canContinue), never mid-flight.
+    const continueBtn = this.shadow.querySelector('[data-continue]');
+    if (continueBtn) {
+      continueBtn.addEventListener('click', () => {
+        if (!this._canContinue()) return;
+        location.hash = `#/${this._returnRoute}`;
+      });
+    }
 
     // Filter toggle (active / all)
     const filterSelect = this.shadow.querySelector('[data-teams-filter]');

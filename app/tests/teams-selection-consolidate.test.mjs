@@ -257,6 +257,80 @@ test('administrator: pick controls AND full management surface, merged catalog w
   await browser.close();
 });
 
+test('row layout: checkbox follows name, has accessible stateful label, and no duplicate Equipos title', async () => {
+  const browser = await chromium.launch();
+  const state = { role: 'coach', myTeams: { selected: ['team_club1_senior_m'], catalog: MY_CATALOG }, mgmtTeams: [] };
+  const { page } = await newPage(browser, state);
+
+  const view = await page.evaluate(() => {
+    const sr = document.getElementById('app').shadowRoot;
+    const row = sr.querySelector('[data-team-row="team_club1_senior_m"]');
+    const main = row.querySelector('.onboard-team-row-main');
+    const name = main.querySelector('.onboard-team-name');
+    const pick = main.querySelector('.onboard-team-pick');
+    const box = main.querySelector('.onboard-team-box');
+    const sectionTitle = sr.querySelector('.onboard-section > .onboard-section-title');
+    const clubHeading = [...sr.querySelectorAll('.onboard-card-title')].find((el) => el.textContent.trim() === 'Equipos del club');
+    const style = getComputedStyle(pick);
+    return {
+      nameIndex: [...main.children].indexOf(name),
+      pickIndex: [...main.children].indexOf(pick),
+      label: pick.getAttribute('aria-label'),
+      title: pick.getAttribute('title'),
+      pickWidth: parseFloat(style.width),
+      pickHeight: parseFloat(style.height),
+      boxWidth: parseFloat(getComputedStyle(box).width),
+      sectionTitle: sectionTitle?.textContent.trim() || '',
+      clubHeading: clubHeading?.textContent.trim() || '',
+    };
+  });
+
+  assert.ok(view.nameIndex >= 0 && view.pickIndex > view.nameIndex, 'checkbox follows the team name in DOM order');
+  assert.equal(view.label, 'Quitar Senior Masculino de Mis equipos', 'checked control has remove label');
+  assert.equal(view.title, view.label, 'title mirrors the accessible action');
+  assert.ok(view.pickWidth >= 44 && view.pickHeight >= 44, 'checkbox hit target is at least 44x44');
+  assert.equal(view.boxWidth, 24, 'visual checkbox remains compact inside the hit target');
+  assert.equal(view.sectionTitle, '', 'duplicate page-level Equipos heading is absent');
+  assert.equal(view.clubHeading, 'Equipos del club', 'club catalog heading remains');
+
+  await browser.close();
+});
+
+test('row layout: long active name wraps without shrinking the right checkbox', async () => {
+  const browser = await chromium.launch();
+  const longName = 'Benjamín Femenino 2017 con un nombre extraordinariamente largo';
+  const state = {
+    role: 'coach',
+    myTeams: { selected: [], catalog: [{ ...MY_CATALOG[0], name: longName }] },
+    mgmtTeams: [],
+  };
+  const { page } = await newPage(browser, state);
+  await page.setViewportSize({ width: 390, height: 800 });
+
+  const metrics = await page.evaluate(() => {
+    const main = document.getElementById('app').shadowRoot.querySelector('.onboard-team-row-main');
+    const name = main.querySelector('.onboard-team-name');
+    const pick = main.querySelector('.onboard-team-pick');
+    return {
+      name: name.textContent.trim(),
+      mainWidth: main.getBoundingClientRect().width,
+      nameWidth: name.getBoundingClientRect().width,
+      pickWidth: pick.getBoundingClientRect().width,
+      pickLeft: pick.getBoundingClientRect().left,
+      mainRight: main.getBoundingClientRect().right,
+      fontSize: parseFloat(getComputedStyle(name).fontSize),
+      height: name.getBoundingClientRect().height,
+    };
+  });
+  assert.equal(metrics.name, longName, 'full long name remains in the DOM');
+  assert.ok(metrics.nameWidth > 0, 'name retains available width');
+  assert.equal(metrics.pickWidth, 44, 'checkbox does not shrink');
+  assert.ok(metrics.pickLeft + metrics.pickWidth <= metrics.mainRight + 1, 'checkbox remains inside the primary row');
+  assert.ok(metrics.height >= metrics.fontSize * 1.8, 'long name wraps to multiple lines');
+
+  await browser.close();
+});
+
 test('player: read-only catalog — no pick and no management controls', async () => {
   const browser = await chromium.launch();
   const state = { role: 'player', myTeams: { selected: [], catalog: MY_CATALOG }, mgmtTeams: MGMT_TEAMS };

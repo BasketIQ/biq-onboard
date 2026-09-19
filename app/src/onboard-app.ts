@@ -1960,12 +1960,12 @@ class BiqOnboardApp extends HTMLElement {
             </div>
           </div>`;
         }
-        // Selection is its own click target — a small checkbox at the start
-        // of the row. Management icons stay on the meta line so picking a
-        // team can never fire edit/archive/delete. Archived teams are not
-        // selectable.
+        // Selection is its own click target on the right side of the primary
+        // row. Management icons stay on the meta line so picking a team can
+        // never fire edit/archive/delete. Archived teams are not selectable.
+        const selected = this._selectedIds.has(t.id);
         const pick = (canPick && !t.archived)
-          ? `<label class="onboard-team-pick" title="Seleccionar ${escapeHtml(t.name)}"><input type="checkbox" class="onboard-team-check" data-pick-team="${escapeHtml(t.id)}"${this._selectedIds.has(t.id) ? ' checked' : ''} /><span class="onboard-team-box">${ICON_CHECK}</span></label>`
+          ? `<label class="onboard-team-pick" title="${selected ? 'Quitar' : 'Añadir'} ${escapeHtml(t.name)} ${selected ? 'de' : 'a'} Mis equipos" aria-label="${selected ? 'Quitar' : 'Añadir'} ${escapeHtml(t.name)} ${selected ? 'de' : 'a'} Mis equipos"><input type="checkbox" class="onboard-team-check" data-pick-team="${escapeHtml(t.id)}"${selected ? ' checked' : ''} /><span class="onboard-team-box">${ICON_CHECK}</span></label>`
           : '';
         let actions = '';
         if (canManage) {
@@ -1987,8 +1987,8 @@ class BiqOnboardApp extends HTMLElement {
         // share the compact second line.
         return `<div class="onboard-team-row" data-team-row="${escapeHtml(t.id)}">
           <div class="onboard-team-row-main">
-            ${pick}
             <span class="onboard-team-name">${escapeHtml(t.name)}</span> ${archivedBadge}
+            ${pick}
           </div>
           <div class="onboard-team-row-meta">
             ${genderBadge}
@@ -2056,7 +2056,6 @@ class BiqOnboardApp extends HTMLElement {
     })() : '';
 
     return `<section class="onboard-section">
-      <h2 class="onboard-section-title">Equipos</h2>
       ${myTeamsBlock}
       <div class="onboard-form-row onboard-clubteams-head">
         <h3 class="onboard-card-title">Equipos del club</h3>

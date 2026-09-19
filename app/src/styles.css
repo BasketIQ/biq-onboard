@@ -666,6 +666,24 @@
   min-width: 0;
 }
 
+.onboard-team-row-main > .onboard-team-pick {
+  margin-left: auto;
+  flex: none;
+}
+
+.onboard-team-pick {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 44px;
+  min-width: 44px;
+  height: 44px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
 /* Consolidated Equipos tab — "Mis equipos" selection summary + pick control.
    The checkbox reuses the former shell page's custom-check visual language
    adapted to onboard tokens; it is its own click target at the start of the
@@ -729,14 +747,6 @@
 
 .onboard-clubteams-head .onboard-card-title {
   margin: 0;
-}
-
-.onboard-team-pick {
-  position: relative;
-  display: inline-flex;
-  flex: none;
-  cursor: pointer;
-  -webkit-tap-highlight-color: transparent;
 }
 
 .onboard-team-check {

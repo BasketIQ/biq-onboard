@@ -141,6 +141,18 @@ How to use: <consumption steps or contract>
 Validation: <tests/fixtures/dry-run>
 ```
 
+**Product validation request** — a role asks the Product Owner (+ Business Analyst) to validate a product decision (see `03-agent-decision-integration-policy.md` §0quater):
+
+```text
+Product validation request
+From: <architect|developer|tester>
+To: Product Owner (+ Business Analyst)
+What to validate: <feature/flow/wording/UX to try>
+Context: <PR/phase/staging URL/how to reach it>
+Acceptance criteria: <what "approved" means>
+Blocks: <phase/decision waiting on the answer>
+```
+
 ### 3. Processing flow
 
 When a role finds a new document in its `handoff/inbox/`:

@@ -39,6 +39,15 @@ Communication between agents always has two parts:
 
 Never put the full specification only in chat, and never drop a bare file path with no summary. Chat is the pointer; the handoff file is the contract.
 
+## 0quater. Product decisions — Product Owner & Business Analyst
+
+- **The USER is the Director and the Product Owner.** Product decisions — scope, acceptance, priorities, UX, wording — are taken by **two actors: the Product Owner and the Business Analyst**. Never by an agent, and never by default.
+- **Product-Owner validation requires an explicit request.** When work produces something that must be tested or validated by the Product Owner (a feature flow, UI, wording, a business rule), the responsible agent — Architect, Developer or Tester — must **ask for it explicitly**; it is never assumed the USER will notice:
+  - state clearly **what needs PO validation** and **what is being asked** (e.g. "try the onboarding flow, confirm the wording");
+  - deliver it as an agent-to-agent communication (§0ter): a short snippet in chat + a *Product validation request* handoff (`02-agent-boundaries-handoffs.md` §2);
+  - the item stays **blocked on product validation** until the Product Owner or the Business Analyst answers — silence is not approval.
+- The Architect's `APPROVED` covers technical quality only. When a phase handoff or the design flags a PO-validation point, it does not replace product acceptance.
+
 ## 1. Phase-based handoff cycle
 
 Feature development follows this cycle:
@@ -81,7 +90,7 @@ Developer: merges Phase 1 PR, moves handoff to processed/, starts Phase 2
 ## 2. Autonomous decision — no multi-option questions to the USER
 
 - The agent **decides by itself**. It does not open "option A vs option B vs option C" questions to the USER.
-- The USER reserves the role of validator and arbiter only when the decision is not resolvable from canonical sources (plan, contracts, rules, live handoffs).
+- The USER reserves the role of validator and arbiter only when the decision is not resolvable from canonical sources (plan, contracts, rules, live handoffs). When the open point is a **product decision**, it is routed explicitly per §0quater — the answer comes from the Product Owner or the Business Analyst, through a *Product validation request*, never inferred.
 - If the doubt **depends on another role**, do not ask the USER: open a `Dependency request` in the responsible role's `handoff/inbox/` (rule 02 § Inter-Role Handoff Protocol §2).
 - If the doubt is **within your own domain**, apply section 3 and proceed.
 
@@ -114,6 +123,7 @@ Before declaring a phase finished, the Developer verifies:
 - [ ] Tests passing + green CI.
 - [ ] Evidence Bundle delivered to the Architect (PR URL, CI URL, test output, evidence file).
 - [ ] `APPROVED` received from the Architect.
+- [ ] *Product validation request* sent for any PO-validation points flagged in the phase — and answered by the Product Owner or the Business Analyst (§0quater).
 - [ ] PR merged to `main` via `gh pr merge`.
 - [ ] Phase handoff moved from `handoff/inbox/` to `handoff/processed/`.
 - [ ] Next phase handoff read and work started (if it exists).
@@ -128,6 +138,7 @@ Before declaring a phase finished, the Developer verifies:
 - The **Developer** merging outside `gh pr merge` (local merge + push).
 - The **Architect** re-running the test suite, repeating a deploy, or reproducing live verification as a default step — unless evidence is missing/contradictory or the USER explicitly asks.
 - Accepting a review request without an Evidence Bundle; the correct response is to return it, not to complete it for the Developer.
+- Marking a PO-validation item complete without an explicit answer from the Product Owner or the Business Analyst — silence is not approval.
 - Starting phase N+1 before phase N is merged.
 - Sending an agent-to-agent communication without the handoff file(s) carrying the details, or sending a bare file path with no summary snippet in chat.
 

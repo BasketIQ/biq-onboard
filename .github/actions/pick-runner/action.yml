@@ -1,14 +1,17 @@
 name: Pick self-hosted runner
 description: >-
-  Pick a BasketIQ self-hosted runner (development -> integration2 -> integration)
-  and fall back to ubuntu-latest when none is
-  free/online, no runner-read token is set, or the chosen host is critically
-  loaded per Netdata Cloud CPU. The BasketIQ self-hosted runners live at org
-  level (BasketIQ org, Default group, visibility=all) since 2026-05-21, so this
-  queries orgs/<owner>/actions/runners derived from github.repository. Signal is
-  runner.busy + status; Netdata is an optional circuit-breaker. Safe by
-  construction: empty token, missing jq, API error, all runners busy/offline,
-  or Netdata unavailable => ubuntu-latest (CI never hangs).
+  Pick a BasketIQ self-hosted runner pool (development -> integration2 ->
+  integration) and fall back to ubuntu-latest when no pool has a
+  free/online runner, no runner-read token is set, or the chosen host is
+  critically loaded per Netdata Cloud CPU. The BasketIQ self-hosted runners
+  live at org level (BasketIQ org, Default group, visibility=all) since
+  2026-05-21, so this queries orgs/<owner>/actions/runners derived from
+  github.repository. Pools are evaluated by runner label: a pool is free
+  when ANY online, non-busy runner carries its label (e.g. several runners
+  on the development Mac mini all carry 'development'). Netdata is an
+  optional circuit-breaker. Safe by construction: empty token, missing jq,
+  API error, all runners busy/offline, or Netdata unavailable =>
+  ubuntu-latest (CI never hangs).
 inputs:
   token:
     description: "Token with org 'Self-hosted runners: Read'. Empty => ubuntu-latest."
@@ -145,15 +148,23 @@ runs:
           exit 0
         fi
 
+        # Pool state by label: free = at least one online, non-busy runner
+        # carrying the pool label (multiple runners per host pool supported).
+        # $1 = pool label (development|integration2|integration)
+        # $2 = configured runner-name input (empty disables the pool)
         state() {
-          [ -z "$1" ] && { echo absent; return; }
-          echo "$runners" | jq -r --arg N "$1" '(.runners // []) | map(select(.name == $N))
-            | if length == 0 then "absent" elif .[0].status != "online" then "offline" elif .[0].busy == true then "busy" else "free" end' 2>/dev/null || echo absent
+          [ -z "$2" ] && { echo absent; return; }
+          echo "$runners" | jq -r --arg L "$1" '(.runners // [])
+            | map(select(.labels | map(.name) | index($L)))
+            | if length == 0 then "absent"
+              elif any(.[]; .status == "online" and (.busy | not)) then "free"
+              elif any(.[]; .status == "online") then "busy"
+              else "offline" end' 2>/dev/null || echo absent
         }
 
-        DEV=$(state "$DEV_NAME")
-        INT=$(state "$INT_NAME")
-        INT2=$(state "$INT2_NAME")
+        DEV=$(state development "$DEV_NAME")
+        INT=$(state integration "$INT_NAME")
+        INT2=$(state integration2 "$INT2_NAME")
         echo "::notice title=pick-runner::development=${DEV_NAME:-<unset>}($DEV) integration2=${INT2_NAME:-<unset>}($INT2) integration=${INT_NAME:-<unset>}($INT)"
 
         # ----- Optional Netdata CPU circuit-breaker -----

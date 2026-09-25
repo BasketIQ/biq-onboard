@@ -38,7 +38,8 @@ concurrency:
 
 jobs:
   server:
-    runs-on: ubuntu-latest
+    needs: [pick]
+    runs-on: ${{ needs.pick.outputs.runner == 'ubuntu-latest' && fromJSON('["ubuntu-latest"]') || fromJSON(format('["self-hosted","{0}"]', needs.pick.outputs.runner)) }}
     permissions:
       contents: read
       id-token: write

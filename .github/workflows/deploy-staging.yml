@@ -31,7 +31,8 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    needs: [pick]
+    runs-on: ${{ needs.pick.outputs.runner == 'ubuntu-latest' && fromJSON('["ubuntu-latest"]') || fromJSON(format('["self-hosted","{0}"]', needs.pick.outputs.runner)) }}
     timeout-minutes: 10
     permissions:
       contents: read

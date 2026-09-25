@@ -9,9 +9,11 @@ description: >-
   github.repository. Pools are evaluated by runner label: a pool is free
   when ANY online, non-busy runner carries its label (e.g. several runners
   on the development Mac mini all carry 'development'). Netdata is an
-  optional circuit-breaker. Safe by construction: empty token, missing jq,
-  API error, all runners busy/offline, or Netdata unavailable =>
-  ubuntu-latest (CI never hangs).
+  optional circuit-breaker. Hosted fallback is disabled: empty token,
+  missing jq, API error, or all pools busy/offline => 'development'
+  (jobs queue on the pool until a runner frees). The pick job itself runs
+  on [self-hosted, development]; 'override: ubuntu-latest' remains the
+  manual escape hatch.
 inputs:
   token:
     description: "Token with org 'Self-hosted runners: Read'. Empty => ubuntu-latest."
@@ -134,19 +136,28 @@ runs:
           *) echo "::error::Invalid override '$OVERRIDE'"; exit 1 ;;
         esac
 
-        # ----- No token / no jq fast-fail -----
-        if [ -z "$GH_TOKEN" ]; then emit ubuntu-latest "no token"; exit 0; fi
-        if ! command -v jq >/dev/null 2>&1; then emit ubuntu-latest "no jq"; exit 0; fi
+        # ----- No token / no jq fast-fail -> queue on development -----
+        if [ -z "$GH_TOKEN" ]; then emit development "no token — queue on development"; exit 0; fi
+        if ! command -v jq >/dev/null 2>&1; then emit development "no jq — queue on development"; exit 0; fi
 
-        # ----- Query org runners -----
+        # ----- Query org runners (curl: no gh CLI dependency on runners) -----
         ORG="${REPO%%/*}"
-        if ! runners=$(gh api "orgs/$ORG/actions/runners" --paginate 2>&1); then
+        if ! runners=$(curl -sS --max-time 15 -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/orgs/$ORG/actions/runners?per_page=100" 2>&1); then
           echo "::group::pick-runner api error"
           printf '%s\n' "${runners:0:600}"
           echo "::endgroup::"
-          emit ubuntu-latest "api error"
+          emit development "api error — queue on development"
           exit 0
         fi
+        echo "$runners" | jq -e '.runners' >/dev/null 2>&1 || {
+          echo "::group::pick-runner api error (non-runners payload)"
+          printf '%s\n' "${runners:0:600}"
+          echo "::endgroup::"
+          emit development "api error — queue on development"
+          exit 0
+        }
 
         # Pool state by label: free = at least one online, non-busy runner
         # carrying the pool label (multiple runners per host pool supported).
@@ -226,8 +237,8 @@ runs:
         fi
 
         # ----- Final decision -----
-        # Chain: development -> integration2 -> integration -> ubuntu-latest
+        # Chain: development -> integration2 -> integration -> development (queue)
         if [ "$DEV" = free ]; then emit development "development free"; exit 0; fi
         if [ "$INT2" = free ]; then emit integration2 "development=$DEV, integration2 free"; exit 0; fi
         if [ "$INT" = free ]; then emit integration "development=$DEV integration2=$INT2, integration free"; exit 0; fi
-        emit ubuntu-latest "development=$DEV integration2=$INT2 integration=$INT"
+        emit development "all pools busy/offline (development=$DEV integration2=$INT2 integration=$INT) — queue"

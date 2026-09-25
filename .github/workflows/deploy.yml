@@ -50,6 +50,26 @@ permissions:
   deployments: write
 
 jobs:
+  pick:
+    name: Pick runner
+    runs-on: [self-hosted, development]
+    outputs:
+      runner: ${{ steps.runner.outputs.runner }}
+    steps:
+      - name: Checkout (action only)
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            .github/actions/pick-runner
+          sparse-checkout-cone-mode: false
+      - id: runner
+        uses: ./.github/actions/pick-runner
+        with:
+          token: ${{ secrets.RUNNER_PICK_PAT }}
+          development_runner_name: ${{ vars.DEVELOPMENT_RUNNER_NAME }}
+          integration_runner_name: ${{ vars.INTEGRATION_RUNNER_NAME }}
+          integration2_runner_name: ${{ vars.INTEGRATION2_RUNNER_NAME }}
+
   deploy-staging:
     needs: [pick]
     runs-on: ${{ needs.pick.outputs.runner == 'ubuntu-latest' && fromJSON('["ubuntu-latest"]') || fromJSON(format('["self-hosted","{0}"]', needs.pick.outputs.runner)) }}

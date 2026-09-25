@@ -4,25 +4,6 @@ name: CI
 # from private GAR via WIF), including the regression test that prevents
 # update_club from erasing audit provenance.
 #
-# ── Rule 19 exception ──────────────────────────────────────────────────
-# This workflow does NOT use the org-wide `pick-runner` pattern
-# (rule 19). The first OEE-1c CI run that used pick-runner selected
-# `integration2` (the action saw it as free/online at org level), but
-# the `server` job sat queued indefinitely — the runner could not
-# accept jobs from this repo. Forcing the pattern makes CI hang, which
-# is worse than a documented exception.
-#
-# This was confirmed twice: run 32673723140 (Architect's original
-# attempt) and run 32677342847 (this audit's attempt to restore the
-# pattern). Both had `Pick runner` complete successfully, then `server`
-# queued indefinitely.
-#
-# To remove this exception: add `biq-onboard` to the self-hosted
-# runners' repository allow-list (org settings → Actions → Runners →
-# Default group → configure access). Then replace this workflow with
-# the standard pick-runner pattern (see `deploy.yml` in this repo for
-# the template).
-
 on:
   pull_request:
   push:
@@ -37,8 +18,29 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  pick:
+    name: Pick runner
+    runs-on: [self-hosted, development]
+    outputs:
+      runner: ${{ steps.runner.outputs.runner }}
+    steps:
+      - name: Checkout (action only)
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            .github/actions/pick-runner
+          sparse-checkout-cone-mode: false
+      - id: runner
+        uses: ./.github/actions/pick-runner
+        with:
+          token: ${{ secrets.RUNNER_PICK_PAT }}
+          development_runner_name: ${{ vars.DEVELOPMENT_RUNNER_NAME }}
+          integration_runner_name: ${{ vars.INTEGRATION_RUNNER_NAME }}
+          integration2_runner_name: ${{ vars.INTEGRATION2_RUNNER_NAME }}
+
   server:
-    runs-on: ubuntu-latest
+    needs: [pick]
+    runs-on: ${{ needs.pick.outputs.runner == 'ubuntu-latest' && fromJSON('["ubuntu-latest"]') || fromJSON(format('["self-hosted","{0}"]', needs.pick.outputs.runner)) }}
     permissions:
       contents: read
       id-token: write

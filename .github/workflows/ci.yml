@@ -32,6 +32,10 @@ permissions:
   contents: read
   id-token: write   # WIF, to read biq-core[org] from the private GAR index
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   server:
     runs-on: ubuntu-latest

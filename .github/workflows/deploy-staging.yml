@@ -38,10 +38,6 @@ jobs:
     steps:
       - name: Checkout (action only)
         uses: actions/checkout@v4
-        with:
-          sparse-checkout: |
-            .github/actions/pick-runner
-          sparse-checkout-cone-mode: false
       - id: runner
         uses: ./.github/actions/pick-runner
         with:

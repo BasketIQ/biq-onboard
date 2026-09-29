@@ -385,6 +385,7 @@ class BiqOnboardApp extends HTMLElement {
   private _memberAssignments: MemberAssignment[] | null = null;
   private _membersLoading = false;
   private _membersError: string | null = null;
+  private _membersRequestId = 0;
   private _editingMemberId: string | null = null;
   private _deleteConfirmUserId: string | null = null;
   private _inviteState: { sending: boolean; error: string | null; sent: string | null } = {
@@ -432,6 +433,8 @@ class BiqOnboardApp extends HTMLElement {
       this._members = null;
       this._memberAssignments = null;
       this._membersError = null;
+      this._membersLoading = false;
+      this._membersRequestId++; // invalidate any in-flight roster fetch
       this._editingMemberId = null;
       this._deleteConfirmUserId = null;
       // Consolidated Equipos: selection + management catalog are club-scoped.
@@ -457,15 +460,31 @@ class BiqOnboardApp extends HTMLElement {
       this.loadClubSummary(newClubId);
     }
     // Phase 4: same for the Miembros roster.
-    if (newClubId && this._subRoute === 'members' && !this._members && !this._membersLoading) {
-      this.loadMembers(newClubId);
+    if (newClubId && this._subRoute === 'members') {
+      this._ensureMembersData(newClubId);
     }
   }
   get org(): OrgContext | null { return this._org; }
 
   set user(value: string | null) {
+    const changed = value !== this._user;
+    if (changed) {
+      // User/session scope changed — the previous subject's roster and
+      // role assignments must not survive into the new context.
+      this._members = null;
+      this._memberAssignments = null;
+      this._membersError = null;
+      this._membersLoading = false;
+      this._membersRequestId++;
+      this._editingMemberId = null;
+      this._deleteConfirmUserId = null;
+    }
     this._user = value;
     this.render();
+    if (changed && this._subRoute === 'members') {
+      const clubId = this._org?.club?.id;
+      if (clubId) this._ensureMembersData(clubId);
+    }
   }
   get user(): string | null { return this._user; }
 
@@ -492,8 +511,8 @@ class BiqOnboardApp extends HTMLElement {
       this.loadClubSummary(clubId);
     }
     // Phase 4: same for the Miembros roster.
-    if (this._subRoute === 'members' && clubId && !this._members && !this._membersLoading) {
-      this.loadMembers(clubId);
+    if (this._subRoute === 'members' && clubId) {
+      this._ensureMembersData(clubId);
     }
   }
   get route(): string { return this._subRoute; }
@@ -563,9 +582,39 @@ class BiqOnboardApp extends HTMLElement {
     }
   }
 
-  // Mi Club Phase 4: Load the member roster + role assignments together —
-  // assignments are needed to resolve a removable role to its id.
+  // Shared tab entry: every navigation path (nav clicks on any tab, the
+  // route setter and org-context arrival) funnels through here so no tab
+  // can render without its data load being triggered.
+  private _selectTab(nav: string, clubId: string): void {
+    this._subRoute = nav;
+    if (nav === 'teams') {
+      this._ensureTeamsData(clubId);
+    } else if (nav === 'profile' && !this._clubSummary && !this._clubSummaryLoading) {
+      this.loadClubSummary(clubId);
+    } else {
+      if (nav === 'members') {
+        this._ensureMembersData(clubId);
+      }
+      this.render();
+    }
+  }
+
+  // Mi Club Phase 4: roster is loaded on first entry and retried after a
+  // failed fetch; a confirmed roster (even an empty one) is kept while the
+  // club context is unchanged.
+  private _ensureMembersData(clubId: string): void {
+    if (this._membersLoading) return;
+    if (this._members !== null && !this._membersError) return;
+    this.loadMembers(clubId);
+  }
+
+  // Load the member roster + role assignments together — assignments are
+  // needed to resolve a removable role to its id. Results only apply while
+  // the requesting club/session context is still current.
   private async loadMembers(clubId: string): Promise<void> {
+    const requestId = ++this._membersRequestId;
+    const isCurrent = () =>
+      requestId === this._membersRequestId && this._org?.club?.id === clubId;
     this._membersLoading = true;
     this._membersError = null;
     this.render();
@@ -577,15 +626,21 @@ class BiqOnboardApp extends HTMLElement {
       ]);
       if (!usersRes.ok) throw new Error(`HTTP ${usersRes.status}`);
       const data = await usersRes.json();
-      this._members = (data.users || data || []) as MemberRow[];
-      this._memberAssignments = rolesRes.ok
-        ? ((await rolesRes.json()).assignments || []) as MemberAssignment[]
+      const users = Array.isArray(data?.users) ? data.users : Array.isArray(data) ? data : null;
+      if (!users) throw new Error('Respuesta de miembros inválida');
+      const assignments = rolesRes.ok
+        ? (((await rolesRes.json()).assignments ?? []) as MemberAssignment[])
         : [];
+      if (!isCurrent()) return; // late response from another club/user — drop it
+      this._members = users as MemberRow[];
+      this._memberAssignments = Array.isArray(assignments) ? assignments : [];
     } catch (err) {
-      this._membersError = (err as Error).message;
+      if (isCurrent()) this._membersError = (err as Error).message;
     } finally {
-      this._membersLoading = false;
-      this.render();
+      if (requestId === this._membersRequestId) {
+        this._membersLoading = false;
+        this.render();
+      }
     }
   }
 
@@ -2149,10 +2204,12 @@ class BiqOnboardApp extends HTMLElement {
     const roleOptions = this._memberAssignableRoles();
 
     let body: string;
-    if (this._membersLoading && !this._members) {
+    if (this._membersError) {
+      body = `<p class="onboard-error" data-members-error>No se pudo cargar la lista de miembros (${escapeHtml(this._membersError)}).</p><button class="onboard-btn onboard-btn-sm" data-members-retry type="button">Reintentar</button>`;
+    } else if (this._members === null) {
+      // Roster unknown: never fetched or load still in flight — never show
+      // the empty message until a successful 200 confirms an empty array.
       body = '<p class="onboard-muted">Cargando miembros…</p>';
-    } else if (this._membersError) {
-      body = `<p class="onboard-error">No se pudo cargar la lista de miembros (${escapeHtml(this._membersError)}).</p>`;
     } else if (members.length === 0) {
       body = '<p class="onboard-muted">Aún no hay miembros en este club.</p>';
     } else {
@@ -2249,19 +2306,17 @@ class BiqOnboardApp extends HTMLElement {
   }
 
   private wireMembersEvents(clubId: string): void {
-    // Navigation (same as wireEvents — duplicated wiring is idempotent).
+    // Navigation — shared path so every tab entry triggers its loader.
     this.shadow.querySelectorAll('[data-nav]').forEach(btn => {
       btn.addEventListener('click', () => {
         const nav = (btn as HTMLElement).dataset.nav || 'club-details';
-        this._subRoute = nav;
-        if (nav === 'teams') {
-          this._ensureTeamsData(clubId);
-        } else if (nav === 'profile' && !this._clubSummary && !this._clubSummaryLoading) {
-          this.loadClubSummary(clubId);
-        } else {
-          this.render();
-        }
+        this._selectTab(nav, clubId);
       });
+    });
+
+    // Error-state retry.
+    this.shadow.querySelector('[data-members-retry]')?.addEventListener('click', () => {
+      this.loadMembers(clubId);
     });
 
     // Invite form → Phase 5 endpoint.
@@ -2404,19 +2459,11 @@ class BiqOnboardApp extends HTMLElement {
   // ─── Event wiring ──────────────────────────────────────────────────────
 
   private wireEvents(clubId: string): void {
-    // Navigation
+    // Navigation — shared path so every tab entry triggers its loader.
     this.shadow.querySelectorAll('[data-nav]').forEach(btn => {
       btn.addEventListener('click', () => {
         const nav = (btn as HTMLElement).dataset.nav || 'club-details';
-        this._subRoute = nav;
-        // F12: Load teams when navigating to the Equipos tab.
-        if (nav === 'teams') {
-          this._ensureTeamsData(clubId);
-        } else if (nav === 'profile' && !this._clubSummary && !this._clubSummaryLoading) {
-          this.loadClubSummary(clubId);
-        } else {
-          this.render();
-        }
+        this._selectTab(nav, clubId);
       });
     });
 
@@ -2496,14 +2543,10 @@ class BiqOnboardApp extends HTMLElement {
     this.shadow.querySelectorAll('[data-nav]').forEach(btn => {
       btn.addEventListener('click', () => {
         const nav = (btn as HTMLElement).dataset.nav || 'club-details';
-        this._subRoute = nav;
         this._editingTeamId = null;
         this._addingTeamCategory = null;
         this._deleteConfirmTeamId = null;
-        if (nav === 'teams') {
-          this._ensureTeamsData(clubId);
-        }
-        this.render();
+        this._selectTab(nav, clubId);
       });
     });
 

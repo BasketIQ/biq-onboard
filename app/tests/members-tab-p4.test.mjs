@@ -313,3 +313,257 @@ test('P4: sports_director sees roles/deactivate but no delete or identity edit',
     await browser.close();
   }
 });
+
+// ─── Navigation-load regression (empty-roster bug) ──────────────────────────
+// The reported defect: clicking Miembros from another tab rendered
+// "Aún no hay miembros" without ever fetching the roster. These tests drive
+// real nav clicks and pin loading/empty/error state boundaries.
+
+function usersGetCount(log, club = 'club1') {
+  return log.filter((e) => e.method === 'GET' && e.url.includes(`/api/clubs/${club}/users`)).length;
+}
+
+async function mountAt(page, role, route) {
+  await page.evaluate((r) => {
+    const el = document.getElementById('app');
+    el.org = { club: { id: 'club1', name: 'Club Test' }, role: r.role };
+    el.user = 'admin';
+    el.route = r.route;
+  }, { role, route });
+}
+
+async function clickNav(page, nav) {
+  await page.evaluate((n) => {
+    document.getElementById('app').shadowRoot
+      .querySelector(`[data-nav="${n}"]`).click();
+  }, nav);
+}
+
+test('P4-nav: clicking Miembros from Estilo triggers exactly one roster fetch', async () => {
+  const browser = await chromium.launch();
+  const { page, log } = await newPage(browser);
+  try {
+    let resolveUsers;
+    const gate = new Promise((r) => { resolveUsers = r; });
+    await page.route('**/api/clubs/club1/users', async (route) => {
+      log.push({ url: route.request().url(), method: 'GET' });
+      await gate;
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(MEMBERS) });
+    });
+    await mountAt(page, 'administrator', 'club-details');
+    // No roster request before entering the tab.
+    assert.equal(usersGetCount(log), 0, 'no fetch before members entry');
+    await clickNav(page, 'members');
+    // Loading state must be distinct from the empty state while the
+    // response is pending.
+    await page.waitForFunction(() =>
+      document.getElementById('app').shadowRoot
+        .querySelector('[data-testid="members-tab"]')?.textContent.includes('Cargando miembros'),
+      { timeout: 5000 });
+    const shownEmptyEarly = await page.evaluate(() =>
+      document.getElementById('app').shadowRoot
+        .querySelector('[data-testid="members-tab"]').textContent.includes('Aún no hay miembros'));
+    assert.equal(shownEmptyEarly, false, 'no false empty state while loading');
+    resolveUsers();
+    await page.waitForFunction(() =>
+      document.getElementById('app').shadowRoot.querySelectorAll('[data-member-row]').length === 3,
+      { timeout: 10000 });
+    assert.equal(usersGetCount(log), 1, 'exactly one users GET');
+    const badges = await page.evaluate(() =>
+      document.getElementById('app').shadowRoot
+        .querySelectorAll('.onboard-role-badge').length);
+    assert.ok(badges >= 3, 'role badges rendered');
+  } finally {
+    await browser.close();
+  }
+});
+
+test('P4-nav: clicking Miembros from Equipos and Perfil loads the roster', async () => {
+  for (const start of ['teams', 'profile']) {
+    const browser = await chromium.launch();
+    const { page, log } = await newPage(browser);
+    try {
+      await mountAt(page, 'administrator', start);
+      await clickNav(page, 'members');
+      await page.waitForFunction(() =>
+        document.getElementById('app').shadowRoot.querySelectorAll('[data-member-row]').length === 3,
+        { timeout: 10000 });
+      assert.ok(usersGetCount(log) >= 1, `roster fetched after ${start} → members click`);
+    } finally {
+      await browser.close();
+    }
+  }
+});
+
+test('P4-nav: rapid members → teams → members keeps a single in-flight fetch', async () => {
+  const browser = await chromium.launch();
+  const { page, log } = await newPage(browser);
+  try {
+    let resolveUsers;
+    const gate = new Promise((r) => { resolveUsers = r; });
+    await page.route('**/api/clubs/club1/users', async (route) => {
+      log.push({ url: route.request().url(), method: 'GET' });
+      await gate;
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(MEMBERS) });
+    });
+    await mountAt(page, 'administrator', 'club-details');
+    await clickNav(page, 'members');
+    await clickNav(page, 'teams');
+    await clickNav(page, 'members');
+    resolveUsers();
+    await page.waitForFunction(() =>
+      document.getElementById('app').shadowRoot.querySelectorAll('[data-member-row]').length === 3,
+      { timeout: 10000 });
+    assert.equal(usersGetCount(log), 1, 'one in-flight request deduplicated');
+  } finally {
+    await browser.close();
+  }
+});
+
+test('P4-nav: 5xx shows bounded error + retry, never a false empty roster', async () => {
+  const browser = await chromium.launch();
+  const { page } = await newPage(browser);
+  try {
+    let calls = 0;
+    await page.route('**/api/clubs/club1/users', async (route) => {
+      calls += 1;
+      if (calls === 1) {
+        await route.fulfill({ status: 500, contentType: 'application/json', body: '{}' });
+      } else {
+        await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(MEMBERS) });
+      }
+    });
+    await mountAt(page, 'administrator', 'club-details');
+    await clickNav(page, 'members');
+    await page.waitForFunction(() =>
+      !!document.getElementById('app').shadowRoot.querySelector('[data-members-error]'),
+      { timeout: 10000 });
+    const tab = await page.evaluate(() =>
+      document.getElementById('app').shadowRoot
+        .querySelector('[data-testid="members-tab"]').textContent);
+    assert.ok(!tab.includes('Aún no hay miembros'), 'error never rendered as empty roster');
+    assert.equal(await page.evaluate(() =>
+      document.getElementById('app').shadowRoot.querySelectorAll('[data-member-row]').length), 0);
+    // Retry button recovers.
+    await page.evaluate(() =>
+      document.getElementById('app').shadowRoot.querySelector('[data-members-retry]').click());
+    await page.waitForFunction(() =>
+      document.getElementById('app').shadowRoot.querySelectorAll('[data-member-row]').length === 3,
+      { timeout: 10000 });
+    assert.equal(calls, 2, 'retry issued a second fetch');
+  } finally {
+    await browser.close();
+  }
+});
+
+test('P4-nav: 401/403 and malformed payloads surface errors, not empty rosters', async () => {
+  for (const variant of [
+    { name: '401', status: 401, body: '{}' },
+    { name: '403', status: 403, body: '{}' },
+    { name: 'malformed', status: 200, body: JSON.stringify({ ok: true }) },
+  ]) {
+    const browser = await chromium.launch();
+    const { page } = await newPage(browser);
+    try {
+      await page.route('**/api/clubs/club1/users', async (route) => {
+        await route.fulfill({ status: variant.status, contentType: 'application/json', body: variant.body });
+      });
+      await mountAt(page, 'administrator', 'club-details');
+      await clickNav(page, 'members');
+      await page.waitForFunction(() =>
+        !!document.getElementById('app').shadowRoot.querySelector('[data-members-error]'),
+        { timeout: 10000 });
+      const tab = await page.evaluate(() =>
+        document.getElementById('app').shadowRoot
+          .querySelector('[data-testid="members-tab"]').textContent);
+      assert.ok(!tab.includes('Aún no hay miembros'), `${variant.name}: no false empty state`);
+      assert.equal(await page.evaluate(() =>
+        document.getElementById('app').shadowRoot.querySelectorAll('[data-member-edit]').length), 0,
+        `${variant.name}: no unauthorized controls`);
+    } finally {
+      await browser.close();
+    }
+  }
+});
+
+test('P4-nav: confirmed empty array renders the empty message only after 200', async () => {
+  const browser = await chromium.launch();
+  const { page } = await newPage(browser);
+  try {
+    let resolveUsers;
+    const gate = new Promise((r) => { resolveUsers = r; });
+    await page.route('**/api/clubs/club1/users', async (route) => {
+      await gate;
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ users: [] }) });
+    });
+    await mountAt(page, 'administrator', 'club-details');
+    await clickNav(page, 'members');
+    await page.waitForFunction(() =>
+      document.getElementById('app').shadowRoot
+        .querySelector('[data-testid="members-tab"]')?.textContent.includes('Cargando miembros'),
+      { timeout: 5000 });
+    const earlyEmpty = await page.evaluate(() =>
+      document.getElementById('app').shadowRoot
+        .querySelector('[data-testid="members-tab"]').textContent.includes('Aún no hay miembros'));
+    assert.equal(earlyEmpty, false, 'empty message only after confirmed response');
+    resolveUsers();
+    await page.waitForFunction(() =>
+      document.getElementById('app').shadowRoot
+        .querySelector('[data-testid="members-tab"]')?.textContent.includes('Aún no hay miembros'),
+      { timeout: 10000 });
+  } finally {
+    await browser.close();
+  }
+});
+
+test('P4-nav: club switch drops a late response from the previous club', async () => {
+  const browser = await chromium.launch();
+  const { page, log } = await newPage(browser);
+  try {
+    let resolveC1;
+    const gateC1 = new Promise((r) => { resolveC1 = r; });
+    await page.route('**/api/clubs/club1/users', async (route) => {
+      await gateC1;
+      await route.fulfill({
+        status: 200, contentType: 'application/json',
+        body: JSON.stringify({ users: [{ id: 'stale1', display_name: 'Pedro Viejo', email: 'p@old.es', role: 'coach', roles: ['coach'], status: 'active' }] }),
+      });
+    });
+    await mountAt(page, 'administrator', 'members');
+    // Switch club while club1's roster fetch is still pending.
+    await page.evaluate(() => {
+      document.getElementById('app').org = { club: { id: 'club2', name: 'Club Dos' }, role: 'administrator' };
+    });
+    await page.waitForFunction(() =>
+      document.getElementById('app').shadowRoot.querySelectorAll('[data-member-row]').length === 3,
+      { timeout: 10000 });
+    resolveC1(); // late club1 response must be dropped
+    await page.waitForTimeout(300);
+    const txt = await page.evaluate(() =>
+      document.getElementById('app').shadowRoot
+        .querySelector('[data-testid="members-tab"]').textContent);
+    assert.ok(!txt.includes('Pedro Viejo'), 'stale club1 member never rendered');
+    assert.ok(log.some((e) => e.url.includes('/api/clubs/club2/users')), 'club2 roster fetched');
+  } finally {
+    await browser.close();
+  }
+});
+
+test('P4-nav: user/session change clears the roster and refetches', async () => {
+  const browser = await chromium.launch();
+  const { page, log } = await newPage(browser);
+  try {
+    await mountAt(page, 'administrator', 'members');
+    await page.waitForFunction(() =>
+      document.getElementById('app').shadowRoot.querySelectorAll('[data-member-row]').length === 3,
+      { timeout: 10000 });
+    assert.equal(usersGetCount(log), 1);
+    await page.evaluate(() => { document.getElementById('app').user = 'other-subject'; });
+    await page.waitForFunction(() =>
+      document.getElementById('app').shadowRoot.querySelectorAll('[data-member-row]').length === 3,
+      { timeout: 10000 });
+    assert.equal(usersGetCount(log), 2, 'roster refetched for new subject');
+  } finally {
+    await browser.close();
+  }
+});

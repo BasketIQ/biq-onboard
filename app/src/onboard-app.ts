@@ -438,11 +438,15 @@ class BiqOnboardApp extends HTMLElement {
     const newClubId = value?.club?.id;
     const newRole = value?.role || '';
     const clubChanged = newClubId !== prevClubId;
+    const roleChanged = newRole !== prevRole;
     // Invalidate member scope BEFORE the first render under the new context:
-    // club change (including logout/no-club) or loss of member-management
-    // rights must synchronously drop the old roster, assignments and any
-    // edit/delete controls — an async response guard cannot stop that paint.
-    if (clubChanged || (ADMIN_ROLES.includes(prevRole) && !ADMIN_ROLES.includes(newRole))) {
+    // club change (including logout/no-club) or ANY role change alters
+    // member-management scope (e.g. administrator → sports_director keeps
+    // ADMIN_ROLES but loses admin-tier edit rights) — the old roster,
+    // assignments and edit/delete controls must be dropped synchronously and
+    // in-flight reads invalidated; an async response guard cannot stop that
+    // paint. A fresh fetch under the new tier repopulates below.
+    if (clubChanged || roleChanged) {
       this._clearMembersState();
     }
     this._org = value;
@@ -661,20 +665,30 @@ class BiqOnboardApp extends HTMLElement {
       if (!Array.isArray(rolesData?.assignments)) {
         throw new Error('Respuesta de roles inválida');
       }
+      // Every assignment must carry the upstream scope contract
+      // (scope === "club:<requested club>") and must not conflict with an
+      // explicit club_id or name a user outside this member set. A foreign or
+      // malformed row is non-authoritative — fail closed instead of wiring
+      // another club's assignment id into this club's controls.
+      const memberIds = new Set(
+        (users as { id?: unknown }[])
+          .map((u) => u?.id)
+          .filter((id): id is string => typeof id === 'string'),
+      );
       const assignments: MemberAssignment[] = rolesData.assignments.map((a: Record<string, unknown>) => {
-        const scopeClub = typeof a?.scope === 'string' && a.scope.startsWith('club:')
-          ? a.scope.slice(5)
-          : null;
-        const row = {
-          id: typeof a?.id === 'string' ? a.id : '',
-          user_id: typeof a?.user_id === 'string' ? a.user_id : '',
-          role: typeof a?.role === 'string' ? a.role : '',
-          club_id: typeof a?.club_id === 'string' ? a.club_id : (scopeClub || ''),
+        const valid = a !== null && typeof a === 'object'
+          && a.scope === `club:${clubId}`
+          && (a.club_id === undefined || a.club_id === clubId)
+          && typeof a.id === 'string' && a.id.length > 0
+          && typeof a.user_id === 'string' && memberIds.has(a.user_id)
+          && typeof a.role === 'string' && a.role.length > 0;
+        if (!valid) throw new Error('Respuesta de roles inválida');
+        return {
+          id: a.id as string,
+          user_id: a.user_id as string,
+          role: a.role as string,
+          club_id: clubId,
         };
-        if (!row.id || !row.user_id || !row.role || !row.club_id) {
-          throw new Error('Respuesta de roles inválida');
-        }
-        return row;
       });
       if (!isCurrent()) return; // late response from another club/user — drop it
       this._members = users as MemberRow[];
@@ -2279,9 +2293,11 @@ class BiqOnboardApp extends HTMLElement {
   }
 
   private _renderMemberRow(m: MemberRow, isAdminTier: boolean, roleOptions: string[]): string {
-    const editing = this._editingMemberId === m.id;
     const deactivated = m.status === 'deactivated';
     const canEdit = this._memberCanEdit(m);
+    // Edit mode also requires the CURRENT role to permit editing this member —
+    // a stale _editingMemberId must never paint controls from an older tier.
+    const editing = canEdit && this._editingMemberId === m.id;
     const secondary = (m.roles || []).filter((r) => r !== m.role);
     const roleBadges = [m.role, ...secondary]
       .map((r) => `<span class="onboard-role-badge">${escapeHtml(ROLE_LABELS[r] || r)}</span>`)

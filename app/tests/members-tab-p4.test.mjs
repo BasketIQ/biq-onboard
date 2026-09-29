@@ -44,11 +44,14 @@ const MEMBERS = {
     { id: 'u3', display_name: 'Marta Admin', email: 'marta@club.es', role: 'administrator', roles: ['administrator'], status: 'active' },
   ],
 };
-const ASSIGNMENTS = {
+// Canonical upstream shape (pass-through BFF): scope:"club:<id>", no club_id.
+// The stub derives the scope from the requested club so multi-club tests see
+// correctly-scoped authority, like the real upstream filter.
+const assignmentsFor = (clubId) => ({
   assignments: [
-    { id: 'u1__coordinator__club:club1', user_id: 'u1', role: 'coordinator', club_id: 'club1' },
+    { id: `u1__coordinator__club:${clubId}`, user_id: 'u1', role: 'coordinator', scope: `club:${clubId}` },
   ],
-};
+});
 
 async function startServer() {
   server = createServer((req, res) => {
@@ -79,7 +82,8 @@ async function newPage(browser) {
       return;
     }
     if (u.includes('/api/clubs/') && u.endsWith('/roles') && m === 'GET') {
-      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(ASSIGNMENTS) });
+      const cid = u.match(/\/api\/clubs\/([^/]+)\/roles/)?.[1] || 'club1';
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(assignmentsFor(cid)) });
       return;
     }
     await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true }) });
@@ -496,6 +500,10 @@ test('P4-nav: confirmed empty array renders the empty message only after 200', a
       await gate;
       await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ users: [] }) });
     });
+    // Confirmed-empty member set → authoritative assignment set is empty too.
+    await page.route('**/api/clubs/club1/roles', async (route) => {
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ assignments: [] }) });
+    });
     await mountAt(page, 'administrator', 'club-details');
     await clickNav(page, 'members');
     await page.waitForFunction(() =>
@@ -817,5 +825,201 @@ test('P4-r1: roles 401/403/5xx/malformed — bounded error, no controls from inc
     } finally {
       await browser.close();
     }
+  }
+});
+
+// ─── R2 corrections: same-club role-tier invalidation (R1-F1) and
+//     assignment-scope authority validation (R1-F2) ──────────────────────────
+
+test('P4-r2: administrator → sports_director same club drops edit state synchronously', async () => {
+  const browser = await chromium.launch();
+  const { page } = await newPage(browser);
+  try {
+    // Gate every users fetch so the post-downgrade refetch can be held while
+    // we inspect the cleared/loading state deterministically.
+    const pending = [];
+    const nextPending = () => new Promise((r) => {
+      const tick = () => (pending.length ? r() : setTimeout(tick, 20));
+      tick();
+    });
+    await page.route('**/api/clubs/club1/users', async (route) => {
+      await new Promise((resolve) => pending.push(resolve));
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(MEMBERS) });
+    });
+    await mountAt(page, 'administrator', 'members');
+    await nextPending();
+    pending.shift()(); // resolve admin fetch
+    await page.waitForFunction(() =>
+      document.getElementById('app').shadowRoot.querySelectorAll('[data-member-row]').length === 3,
+      { timeout: 10000 });
+
+    // Administrator opens the administrator member's edit form.
+    await page.evaluate(() =>
+      document.getElementById('app').shadowRoot
+        .querySelector('[data-member-row="u3"] [data-member-edit]').click());
+    await page.waitForFunction(() =>
+      !!document.getElementById('app').shadowRoot.querySelector('[data-edit-name="u3"]'),
+      { timeout: 5000 });
+
+    // Same-club downgrade administrator → sports_director: every rendered
+    // frame must already show zero member rows and zero admin-era controls.
+    const sync = await page.evaluate(() => {
+      const el = document.getElementById('app');
+      const frames = [];
+      const origRender = el.render.bind(el);
+      el.render = () => {
+        origRender();
+        frames.push({
+          rows: el.shadowRoot.querySelectorAll('[data-member-row]').length,
+          editForms: el.shadowRoot.querySelectorAll('[data-edit-name]').length,
+          saves: el.shadowRoot.querySelectorAll('[data-member-save]').length,
+          roleRemove: el.shadowRoot.querySelectorAll('[data-member-role-remove]').length,
+        });
+      };
+      el.org = { club: { id: 'club1', name: 'Club Test' }, role: 'sports_director' };
+      const sr = el.shadowRoot;
+      return {
+        frames,
+        rows: sr.querySelectorAll('[data-member-row]').length,
+        editForms: sr.querySelectorAll('[data-edit-name]').length,
+        membersState: el._members,
+        assignmentsState: el._memberAssignments,
+        editingState: el._editingMemberId,
+        loadingShown: sr.textContent.includes('Cargando miembros'),
+      };
+    });
+    assert.ok(sync.frames.length >= 1, 'setter rendered');
+    assert.ok(
+      sync.frames.every((f) => f.rows === 0 && f.editForms === 0 && f.saves === 0 && f.roleRemove === 0),
+      `no frame may show admin-era rows or edit controls after downgrade — ${JSON.stringify(sync.frames)}`,
+    );
+    assert.equal(sync.editForms, 0, 'admin edit form must not survive a same-club tier change');
+    assert.equal(sync.membersState, null, 'cached roster invalidated on tier change');
+    assert.equal(sync.assignmentsState, null, 'cached assignments invalidated on tier change');
+    assert.equal(sync.editingState, null, 'edit state invalidated on tier change');
+    assert.equal(sync.loadingShown, true, 'loading shown until new-tier data arrives');
+
+    // Completing the delayed refetch renders the sports-director tier:
+    // sporting member stays editable; the administrator row exposes nothing.
+    await nextPending();
+    pending.shift()();
+    await page.waitForFunction(() =>
+      document.getElementById('app').shadowRoot.querySelectorAll('[data-member-row]').length === 3,
+      { timeout: 10000 });
+    const post = await page.evaluate(() => {
+      const sr = document.getElementById('app').shadowRoot;
+      const row = (id) => sr.querySelector(`[data-member-row="${id}"]`);
+      return {
+        u3Edit: !!row('u3').querySelector('[data-member-edit]'),
+        u3Status: !!row('u3').querySelector('[data-member-status]'),
+        u3Delete: !!row('u3').querySelector('[data-member-delete]'),
+        u1Edit: !!row('u1').querySelector('[data-member-edit]'),
+        editForms: sr.querySelectorAll('[data-edit-name]').length,
+        editingState: document.getElementById('app')._editingMemberId,
+      };
+    });
+    assert.equal(post.u3Edit, false, 'no edit control on administrator row for SD');
+    assert.equal(post.u3Status, false, 'no status control on administrator row for SD');
+    assert.equal(post.u3Delete, false, 'no delete control for SD');
+    assert.equal(post.u1Edit, true, 'sporting member still editable for SD (F9)');
+    assert.equal(post.editForms, 0, 'no edit form resurrected');
+    assert.equal(post.editingState, null, 'editing id stays cleared');
+
+    // Render guard: even a stale editing id can never paint edit controls on
+    // a member the current role may not edit.
+    const guard = await page.evaluate(() => {
+      const el = document.getElementById('app');
+      el._editingMemberId = 'u3'; // simulated stale admin-era id
+      el.render();
+      const row = el.shadowRoot.querySelector('[data-member-row="u3"]');
+      const res = {
+        u3EditForm: !!row.querySelector('[data-edit-name="u3"]'),
+        u3RoleRemove: !!row.querySelector('[data-member-role-remove]'),
+        u3Save: !!row.querySelector('[data-member-save="u3"]'),
+      };
+      el._editingMemberId = null;
+      el.render();
+      return res;
+    });
+    assert.equal(guard.u3EditForm, false, 'stale edit id cannot open admin edit form');
+    assert.equal(guard.u3RoleRemove, false, 'stale edit id cannot paint role-remove controls');
+    assert.equal(guard.u3Save, false, 'stale edit id cannot paint save control');
+  } finally {
+    await browser.close();
+  }
+});
+
+test('P4-r2: roles assignments must be scoped to the requested club — foreign/malformed fail closed', async () => {
+  for (const variant of [
+    { name: 'foreign-scope', assignments: [{ id: 'a1', user_id: 'u1', role: 'coach', scope: 'club:other' }] },
+    { name: 'conflicting-club_id', assignments: [{ id: 'a1', user_id: 'u1', role: 'coach', scope: 'club:club1', club_id: 'clubX' }] },
+    { name: 'missing-scope', assignments: [{ id: 'a1', user_id: 'u1', role: 'coach', club_id: 'club1' }] },
+    { name: 'typed-id', assignments: [{ id: 42, user_id: 'u1', role: 'coach', scope: 'club:club1' }] },
+    { name: 'blank-role', assignments: [{ id: 'a1', user_id: 'u1', role: '', scope: 'club:club1' }] },
+    { name: 'non-member-user', assignments: [{ id: 'a1', user_id: 'ghost', role: 'coach', scope: 'club:club1' }] },
+    { name: 'blank-scope', assignments: [{ id: 'a1', user_id: 'u1', role: 'coach', scope: '' }] },
+  ]) {
+    const browser = await chromium.launch();
+    const { page } = await newPage(browser);
+    try {
+      await page.route('**/api/clubs/club1/roles', async (route) => {
+        await route.fulfill({
+          status: 200, contentType: 'application/json',
+          body: JSON.stringify({ assignments: variant.assignments }),
+        });
+      });
+      await mountAt(page, 'administrator', 'members');
+      await page.waitForFunction(() =>
+        !!document.getElementById('app').shadowRoot.querySelector('[data-members-error]'),
+        { timeout: 10000 });
+      const dom = await page.evaluate(() => {
+        const sr = document.getElementById('app').shadowRoot;
+        return {
+          rows: sr.querySelectorAll('[data-member-row]').length,
+          edits: sr.querySelectorAll('[data-member-edit]').length,
+          roleRemove: sr.querySelectorAll('[data-member-role-remove]').length,
+          retry: !!sr.querySelector('[data-members-retry]'),
+          assignmentsState: document.getElementById('app')._memberAssignments,
+        };
+      });
+      assert.equal(dom.rows, 0, `${variant.name}: no rows from non-authoritative roles`);
+      assert.equal(dom.edits, 0, `${variant.name}: no edit controls`);
+      assert.equal(dom.roleRemove, 0, `${variant.name}: no role-remove controls`);
+      assert.equal(dom.retry, true, `${variant.name}: bounded retry available`);
+      assert.equal(dom.assignmentsState, null, `${variant.name}: foreign authority never stored`);
+    } finally {
+      await browser.close();
+    }
+  }
+});
+
+test('P4-r2: canonical scope assignments are accepted and drive role removal', async () => {
+  const browser = await chromium.launch();
+  const { page, log } = await newPage(browser);
+  try {
+    await mountAt(page, 'administrator', 'members');
+    await page.waitForFunction(() =>
+      document.getElementById('app').shadowRoot.querySelectorAll('[data-member-row]').length === 3,
+      { timeout: 10000 });
+    const state = await page.evaluate(() =>
+      document.getElementById('app')._memberAssignments);
+    assert.equal(state.length, 1, 'canonical assignment stored');
+    assert.equal(state[0].club_id, 'club1', 'club_id resolved from scope');
+    // Removal lookup uses the authoritative assignment id.
+    await page.evaluate(() =>
+      document.getElementById('app').shadowRoot
+        .querySelector('[data-member-row="u1"] [data-member-edit]').click());
+    await page.waitForFunction(() =>
+      !!document.getElementById('app').shadowRoot.querySelector('[data-member-role-remove="u1"]'),
+      { timeout: 5000 });
+    await page.evaluate(() =>
+      document.getElementById('app').shadowRoot
+        .querySelector('[data-member-role-remove="u1"]').click());
+    await page.waitForFunction(() => true);
+    assert.ok(log.some((e) =>
+      e.method === 'DELETE' && e.url.includes('/api/clubs/club1/roles/u1__coordinator__club%3Aclub1')),
+      'role removal hits the validated assignment id');
+  } finally {
+    await browser.close();
   }
 });

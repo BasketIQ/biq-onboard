@@ -567,3 +567,255 @@ test('P4-nav: user/session change clears the roster and refetches', async () => 
     await browser.close();
   }
 });
+
+// ─── R1 corrections: synchronous invalidation, unauthorized zero-call,
+//     roles-dependency fail-closed ──────────────────────────────────────────
+
+test('P4-r1: club switch clears roster+edit state synchronously, stale response rejected', async () => {
+  const browser = await chromium.launch();
+  const { page, log } = await newPage(browser);
+  try {
+    await mountAt(page, 'administrator', 'members');
+    await page.waitForFunction(() =>
+      document.getElementById('app').shadowRoot.querySelectorAll('[data-member-row]').length === 3,
+      { timeout: 10000 });
+    // Put a member into edit mode first — edit state must also be dropped.
+    await page.evaluate(() =>
+      document.getElementById('app').shadowRoot
+        .querySelector('[data-member-row="u1"] [data-member-edit]').click());
+    await page.waitForFunction(() =>
+      !!document.getElementById('app').shadowRoot.querySelector('[data-edit-name="u1"]'),
+      { timeout: 5000 });
+
+    // Inject club B while recording EVERY rendered frame — a transient paint
+    // of club A's rows under club B's context is a synchronous disclosure even
+    // if a later render overwrites it in the same task.
+    const sync = await page.evaluate(() => {
+      const el = document.getElementById('app');
+      const frames = [];
+      const origRender = el.render.bind(el);
+      el.render = () => {
+        origRender();
+        frames.push({
+          rows: el.shadowRoot.querySelectorAll('[data-member-row]').length,
+          editOpen: !!el.shadowRoot.querySelector('[data-edit-name]'),
+          staleName: el.shadowRoot.textContent.includes('Ana Entrenadora'),
+        });
+      };
+      el.org = { club: { id: 'club2', name: 'Club Dos' }, role: 'administrator' };
+      const sr = el.shadowRoot;
+      return {
+        frames,
+        rows: sr.querySelectorAll('[data-member-row]').length,
+        editOpen: !!sr.querySelector('[data-edit-name]'),
+        badges: sr.querySelectorAll('.onboard-role-badge').length,
+        staleNameVisible: sr.textContent.includes('Ana Entrenadora'),
+        membersState: el._members,
+        assignmentsState: el._memberAssignments,
+        editingState: el._editingMemberId,
+      };
+    });
+    assert.ok(sync.frames.length >= 1, 'setter rendered');
+    assert.ok(sync.frames.every((f) => f.rows === 0 && !f.staleName),
+      `club A roster must not appear in ANY frame under club B — got ${JSON.stringify(sync.frames)}`);
+    assert.equal(sync.rows, 0, 'club A rows must not paint under club B');
+    assert.equal(sync.editOpen, false, 'edit form must not survive a club switch');
+    assert.equal(sync.badges, 0, 'role badges from club A cleared');
+    assert.equal(sync.staleNameVisible, false, 'no club A member text under club B');
+    assert.equal(sync.membersState, null, 'cached roster invalidated');
+    assert.equal(sync.assignmentsState, null, 'cached assignments invalidated');
+    assert.equal(sync.editingState, null, 'edit state invalidated');
+
+    // club B loads its own roster (fixture serves same 3 members for both clubs;
+    // prove the fetch was actually re-issued for club2).
+    await page.waitForFunction(() =>
+      document.getElementById('app').shadowRoot.querySelectorAll('[data-member-row]').length === 3,
+      { timeout: 10000 });
+    assert.ok(log.some((e) => e.url.includes('/api/clubs/club2/users')), 'club2 roster fetched');
+  } finally {
+    await browser.close();
+  }
+});
+
+test('P4-r1: switch to no-club context clears roster synchronously', async () => {
+  const browser = await chromium.launch();
+  const { page, log } = await newPage(browser);
+  try {
+    await mountAt(page, 'administrator', 'members');
+    await page.waitForFunction(() =>
+      document.getElementById('app').shadowRoot.querySelectorAll('[data-member-row]').length === 3,
+      { timeout: 10000 });
+    const memberCallsBefore = log.filter((e) =>
+      /\/api\/clubs\/[^/]+\/(users|roles)$/.test(e.url)).length;
+    const sync = await page.evaluate(() => {
+      const el = document.getElementById('app');
+      el.org = null; // logout / no-club transition
+      return {
+        rows: el.shadowRoot.querySelectorAll('[data-member-row]').length,
+        membersState: el._members,
+        editingState: el._editingMemberId,
+      };
+    });
+    assert.equal(sync.rows, 0, 'roster must not render after context is gone');
+    assert.equal(sync.membersState, null, 'cached roster invalidated on no-club');
+    assert.equal(sync.editingState, null, 'edit state invalidated on no-club');
+    const after = await page.evaluate(() =>
+      document.getElementById('app').shadowRoot.querySelectorAll('[data-member-row]').length);
+    assert.equal(after, 0);
+    await page.waitForTimeout(300);
+    const memberCallsAfter = log.filter((e) =>
+      /\/api\/clubs\/[^/]+\/(users|roles)$/.test(e.url)).length;
+    assert.equal(memberCallsAfter, memberCallsBefore,
+      'no new member fetch for a null org');
+  } finally {
+    await browser.close();
+  }
+});
+
+test('P4-r1: coach deep-link to members issues zero member API calls', async () => {
+  const browser = await chromium.launch();
+  const { page, log } = await newPage(browser);
+  try {
+    await mountAt(page, 'coach', 'members');
+    await page.waitForTimeout(400); // give any (buggy) fetch time to fire
+    const memberCalls = log.filter((e) =>
+      /\/api\/clubs\/[^/]+\/(users|roles)$/.test(e.url));
+    assert.equal(memberCalls.length, 0, 'no member endpoints called for coach');
+    const dom = await page.evaluate(() => {
+      const sr = document.getElementById('app').shadowRoot;
+      return {
+        rows: sr.querySelectorAll('[data-member-row]').length,
+        edits: sr.querySelectorAll('[data-member-edit]').length,
+      };
+    });
+    assert.equal(dom.rows, 0, 'no roster rows for unauthorized role');
+    assert.equal(dom.edits, 0, 'no edit controls for unauthorized role');
+  } finally {
+    await browser.close();
+  }
+});
+
+test('P4-r1: role downgrade while Members open clears synchronously and drops in-flight data', async () => {
+  const browser = await chromium.launch();
+  const { page, log } = await newPage(browser);
+  try {
+    await mountAt(page, 'administrator', 'members');
+    await page.waitForFunction(() =>
+      document.getElementById('app').shadowRoot.querySelectorAll('[data-member-row]').length === 3,
+      { timeout: 10000 });
+    const before = log.filter((e) => e.url.includes('/api/clubs/')).length;
+
+    // Downgrade to coach on the SAME club — synchronous DOM check across
+    // every rendered frame.
+    const sync = await page.evaluate(() => {
+      const el = document.getElementById('app');
+      const frames = [];
+      const origRender = el.render.bind(el);
+      el.render = () => {
+        origRender();
+        frames.push({
+          rows: el.shadowRoot.querySelectorAll('[data-member-row]').length,
+          edits: el.shadowRoot.querySelectorAll('[data-member-edit]').length,
+        });
+      };
+      el.org = { club: { id: 'club1', name: 'Club Test' }, role: 'coach' };
+      const sr = el.shadowRoot;
+      return {
+        frames,
+        rows: sr.querySelectorAll('[data-member-row]').length,
+        edits: sr.querySelectorAll('[data-member-edit]').length,
+        membersTab: !!sr.querySelector('[data-nav="members"]'),
+        membersState: el._members,
+        assignmentsState: el._memberAssignments,
+        editingState: el._editingMemberId,
+      };
+    });
+    assert.ok(sync.frames.every((f) => f.rows === 0 && f.edits === 0),
+      `no frame may show roster/edit controls after downgrade — got ${JSON.stringify(sync.frames)}`);
+    assert.equal(sync.rows, 0, 'roster cleared on downgrade');
+    assert.equal(sync.membersState, null, 'cached roster invalidated on downgrade');
+    assert.equal(sync.assignmentsState, null, 'cached assignments invalidated on downgrade');
+    assert.equal(sync.editingState, null, 'edit state invalidated on downgrade');
+    assert.equal(sync.edits, 0, 'edit controls gone on downgrade');
+    assert.equal(sync.membersTab, false, 'Miembros nav hidden for coach');
+    await page.waitForTimeout(300);
+    assert.equal(log.filter((e) => e.url.includes('/api/clubs/')).length, before,
+      'no member refetch after downgrade');
+
+    // A late admin-era response must not resurrect rows for the coach.
+    await page.waitForTimeout(300);
+    const rows = await page.evaluate(() =>
+      document.getElementById('app').shadowRoot.querySelectorAll('[data-member-row]').length);
+    assert.equal(rows, 0, 'stale response cannot resurrect roster');
+  } finally {
+    await browser.close();
+  }
+});
+
+test('P4-r1: stale in-flight admin response is dropped after role downgrade', async () => {
+  const browser = await chromium.launch();
+  const { page, log } = await newPage(browser);
+  try {
+    let resolveUsers;
+    const gate = new Promise((r) => { resolveUsers = r; });
+    await page.route('**/api/clubs/club1/users', async (route) => {
+      log.push({ url: route.request().url(), method: 'GET' });
+      await gate;
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(MEMBERS) });
+    });
+    // Admin opens members; fetch is pending.
+    await mountAt(page, 'administrator', 'members');
+    // Downgrade BEFORE the response lands.
+    await page.evaluate(() => {
+      document.getElementById('app').org = { club: { id: 'club1', name: 'Club Test' }, role: 'coach' };
+    });
+    resolveUsers();
+    await page.waitForTimeout(400);
+    const rows = await page.evaluate(() =>
+      document.getElementById('app').shadowRoot.querySelectorAll('[data-member-row]').length);
+    assert.equal(rows, 0, 'admin-era response must not paint for a coach');
+    const state = await page.evaluate(() => document.getElementById('app')._members);
+    assert.equal(state, null, 'stale response must not write member state for a coach');
+  } finally {
+    await browser.close();
+  }
+});
+
+test('P4-r1: roles 401/403/5xx/malformed — bounded error, no controls from incomplete state', async () => {
+  for (const variant of [
+    { name: 'roles-401', status: 401, body: '{}' },
+    { name: 'roles-403', status: 403, body: '{}' },
+    { name: 'roles-500', status: 500, body: '{}' },
+    { name: 'roles-malformed', status: 200, body: JSON.stringify({ ok: true }) },
+    { name: 'roles-bad-entry', status: 200, body: JSON.stringify({ assignments: [{ id: 'a1' }] }) },
+  ]) {
+    const browser = await chromium.launch();
+    const { page } = await newPage(browser);
+    try {
+      await page.route('**/api/clubs/club1/roles', async (route) => {
+        await route.fulfill({ status: variant.status, contentType: 'application/json', body: variant.body });
+      });
+      await mountAt(page, 'administrator', 'members');
+      await page.waitForFunction(() =>
+        !!document.getElementById('app').shadowRoot.querySelector('[data-members-error]'),
+        { timeout: 10000 });
+      const dom = await page.evaluate(() => {
+        const sr = document.getElementById('app').shadowRoot;
+        return {
+          rows: sr.querySelectorAll('[data-member-row]').length,
+          edits: sr.querySelectorAll('[data-member-edit]').length,
+          roleRemove: sr.querySelectorAll('[data-member-role-remove]').length,
+          empty: sr.querySelector('[data-testid="members-tab"]')?.textContent.includes('Aún no hay miembros'),
+          retry: !!sr.querySelector('[data-members-retry]'),
+        };
+      });
+      assert.equal(dom.rows, 0, `${variant.name}: roster not rendered from partial data`);
+      assert.equal(dom.edits, 0, `${variant.name}: no edit controls`);
+      assert.equal(dom.roleRemove, 0, `${variant.name}: no role-remove controls`);
+      assert.equal(dom.empty, false, `${variant.name}: dependency failure is not an empty roster`);
+      assert.equal(dom.retry, true, `${variant.name}: bounded retry available`);
+    } finally {
+      await browser.close();
+    }
+  }
+});

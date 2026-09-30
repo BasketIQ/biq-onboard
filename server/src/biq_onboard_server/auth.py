@@ -143,10 +143,33 @@ def require_admin_acting(request: Request, club_id: str) -> str:
 
 
 def require_roles_admin_acting(request: Request, club_id: str) -> str:
-    """``require_roles_admin`` over the acting identity (S2S-aware)."""
+    """``require_roles_admin`` over the acting identity (S2S-aware).
+
+    Fail-closed actor gate: the acting principal must resolve to a real,
+    ``active`` Org Registry member of the *requested* club before
+    club-scoped role-management capabilities are considered.
+    ``effective_capabilities`` only evaluates RoleAssignment active dates —
+    a deactivated, pending or wrong-club user could otherwise keep
+    mutating roles on a still-active assignment.
+    """
     user, _email = _resolve_acting_identity(request)
     if _is_break_glass_admin(user):
         return user
+    try:
+        record = org.get_registry().get_user(user)
+    except Exception:
+        raise HTTPException(
+            status_code=503, detail="identity registry unavailable"
+        )
+    if (
+        record is None
+        or getattr(record, "club_id", None) != club_id
+        or getattr(record, "status", None) != "active"
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="acting user is not an active member of this club",
+        )
     scope = f"club:{club_id}"
     caps = effective_capabilities(user, scope, org.get_roles())
     if not ({"club.admin", "roles.manage", "roles.manage.sporting"} & set(caps)):

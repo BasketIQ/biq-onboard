@@ -988,13 +988,19 @@
   margin-bottom: 8px;
 }
 
+/* The shared .onboard-input rule sets flex:1 + min-width:200px for stacked
+   forms — inside a roster row that floor would split the row in half, so
+   the name field gets all free space and the dorsal stays at ~2 chars. */
 .onboard-roster-row [data-player-name] {
   flex: 1;
   min-width: 0;
 }
 
-.onboard-player-num {
-  width: 64px;
+/* .onboard-input-sm sets width:auto later in the file — scope this rule to
+   the roster row so the narrow dorsal field survives the cascade. */
+.onboard-roster-row .onboard-player-num {
+  width: 56px;
+  min-width: 0;
   flex: none;
   text-align: center;
 }

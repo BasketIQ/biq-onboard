@@ -650,6 +650,19 @@ test('Plantilla: dorsal out of range shows the error inside the modal and no PUT
   });
   assert.equal(openError, null, 'error cleared on open');
 
+  // Field sizing: the name input takes the free space; Nº stays ~2 chars wide.
+  const widths = await page.evaluate(() => {
+    const sr = document.getElementById('app').shadowRoot;
+    return {
+      name: sr.querySelector('[data-player-name="0"]').getBoundingClientRect().width,
+      num: sr.querySelector('[data-player-number="0"]').getBoundingClientRect().width,
+      numMaxLength: sr.querySelector('[data-player-number="0"]').getAttribute('maxlength'),
+    };
+  });
+  assert.ok(widths.num <= 72, `dorsal field is narrow (${widths.num}px)`);
+  assert.ok(widths.name >= widths.num * 2, 'name field takes the remaining width');
+  assert.equal(widths.numMaxLength, '2', 'dorsal limited to 2 characters');
+
   // Set dorsal 100 (> 99) on the seeded row, then save.
   await page.evaluate(() => {
     const sr = document.getElementById('app').shadowRoot;

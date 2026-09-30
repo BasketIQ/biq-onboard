@@ -2233,7 +2233,7 @@ class BiqOnboardApp extends HTMLElement {
       const rosterRows = this._rosterDraft.map((p, i) => `
         <div class="onboard-roster-row" data-roster-row>
           <input type="text" class="onboard-input onboard-input-sm" data-player-name="${i}" placeholder="Nombre y apellidos" aria-label="Nombre y apellidos del jugador" value="${escapeHtml(p.name)}" />
-          <input type="number" class="onboard-input onboard-input-sm onboard-player-num" data-player-number="${i}" placeholder="Nº" aria-label="Dorsal" min="0" max="99" inputmode="numeric" value="${escapeHtml(p.number)}" />
+          <input type="text" class="onboard-input onboard-input-sm onboard-player-num" data-player-number="${i}" placeholder="Nº" aria-label="Dorsal" inputmode="numeric" maxlength="2" value="${escapeHtml(p.number)}" />
           <button class="onboard-icon-btn onboard-icon-btn-danger" data-remove-player="${i}" type="button" title="Quitar jugador" aria-label="Quitar jugador">${ICON_TRASH}</button>
         </div>`).join('');
       return `<div class="onboard-modal-overlay" role="dialog" aria-modal="true" aria-labelledby="edit-team-modal-title" data-edit-modal>

@@ -127,11 +127,35 @@ def _resolve_acting_identity(request: Request) -> tuple[str, str]:
     return session_user(request), ""
 
 
+def _require_active_member(user: str, club_id: str) -> None:
+    """Fail closed unless ``user`` is an active Org Registry member of
+    ``club_id``. ``effective_capabilities`` only evaluates RoleAssignment
+    active dates — a deactivated, pending or wrong-club user could
+    otherwise keep mutating through a still-active assignment.
+    """
+    try:
+        record = org.get_registry().get_user(user)
+    except Exception:
+        raise HTTPException(
+            status_code=503, detail="identity registry unavailable"
+        )
+    if (
+        record is None
+        or getattr(record, "club_id", None) != club_id
+        or getattr(record, "status", None) != "active"
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="acting user is not an active member of this club",
+        )
+
+
 def require_admin_acting(request: Request, club_id: str) -> str:
     """``require_admin`` over the acting identity (S2S-aware)."""
     user, _email = _resolve_acting_identity(request)
     if _is_break_glass_admin(user):
         return user
+    _require_active_member(user, club_id)
     scope = f"club:{club_id}"
     caps = effective_capabilities(user, scope, org.get_roles())
     if "club.admin" not in caps and "roles.manage" not in caps:
@@ -143,10 +167,16 @@ def require_admin_acting(request: Request, club_id: str) -> str:
 
 
 def require_roles_admin_acting(request: Request, club_id: str) -> str:
-    """``require_roles_admin`` over the acting identity (S2S-aware)."""
+    """``require_roles_admin`` over the acting identity (S2S-aware).
+
+    Fail-closed actor gate: the acting principal must resolve to a real,
+    ``active`` Org Registry member of the *requested* club before
+    club-scoped role-management capabilities are considered.
+    """
     user, _email = _resolve_acting_identity(request)
     if _is_break_glass_admin(user):
         return user
+    _require_active_member(user, club_id)
     scope = f"club:{club_id}"
     caps = effective_capabilities(user, scope, org.get_roles())
     if not ({"club.admin", "roles.manage", "roles.manage.sporting"} & set(caps)):

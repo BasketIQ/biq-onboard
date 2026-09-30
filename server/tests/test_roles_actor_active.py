@@ -197,6 +197,93 @@ def test_cookie_session_does_not_bypass(client):
     assert r.status_code == 401
 
 
+# ─── CR-A1: require_admin_acting (PUT/DELETE users) shares the gate ──────
+
+
+def _assignments_of(user_id: str):
+    return sorted(
+        a.id for a in org.get_roles().list_assignments(user_id, f"club:{CLUB}")
+    )
+
+
+def test_active_admin_can_put_and_delete_user(client):
+    r = client.put(
+        f"/api/admin/clubs/{CLUB}/users/{TARGET}",
+        json={"role": "coordinator"},
+        headers=_s2s("actor_admin"),
+    )
+    assert r.status_code == 200
+    assert _assignments_of(TARGET) == [f"{TARGET}__coordinator__club:{CLUB}"]
+    d = client.delete(
+        f"/api/admin/clubs/{CLUB}/users/{TARGET}", headers=_s2s("actor_admin")
+    )
+    assert d.status_code == 200
+    assert org.get_registry().get_user(TARGET) is None
+
+
+def test_deactivated_admin_cannot_put_or_delete_user(client):
+    """CR-A1 regression: live administrator assignment, deactivated member —
+    PUT (primary + secondary roles) and DELETE must fail with zero
+    target/role/audit mutation."""
+    _seed_member("actor_gone", CLUB, status="deactivated")
+    before_audit = _audit_count(CLUB)
+    before_roles = _assignments_of(TARGET)
+    before_user = org.get_registry().get_user(TARGET)
+
+    r = client.put(
+        f"/api/admin/clubs/{CLUB}/users/{TARGET}",
+        json={"role": "administrator", "roles": ["coordinator"]},
+        headers=_s2s("actor_gone"),
+    )
+    assert r.status_code == 403
+    d = client.delete(
+        f"/api/admin/clubs/{CLUB}/users/{TARGET}", headers=_s2s("actor_gone")
+    )
+    assert d.status_code == 403
+
+    assert _assignments_of(TARGET) == before_roles
+    assert _audit_count(CLUB) == before_audit
+    assert org.get_registry().get_user(TARGET) is not None
+    assert org.get_registry().get_user(TARGET).role == before_user.role
+
+
+@pytest.mark.parametrize("actor", ["ghost_no_record", "actor_pending_x"])
+def test_put_delete_denied_for_unknown_or_pending(client, actor):
+    if actor == "actor_pending_x":
+        _seed_member(actor, CLUB, status="pending")
+    before = _audit_count(CLUB)
+    assert client.put(
+        f"/api/admin/clubs/{CLUB}/users/{TARGET}",
+        json={"display_name": "x"},
+        headers=_s2s(actor),
+    ).status_code == 403
+    assert client.delete(
+        f"/api/admin/clubs/{CLUB}/users/{TARGET}", headers=_s2s(actor)
+    ).status_code == 403
+    assert _audit_count(CLUB) == before
+
+
+def test_put_delete_denied_for_wrong_club_actor(client):
+    _seed_member("actor_b2", OTHER_CLUB)
+    assert client.put(
+        f"/api/admin/clubs/{CLUB}/users/{TARGET}",
+        json={"role": "player"},
+        headers=_s2s("actor_b2"),
+    ).status_code == 403
+
+
+def test_sd_actor_cannot_put_users_stronger_admin_gate(client):
+    """require_admin_acting keeps its administrator-only capability check —
+    an active sports_director is denied even though they pass the
+    role-management gate on other routes."""
+    _seed_member("actor_sd2", CLUB, role="sports_director")
+    assert client.put(
+        f"/api/admin/clubs/{CLUB}/users/{TARGET}",
+        json={"display_name": "x"},
+        headers=_s2s("actor_sd2"),
+    ).status_code == 403
+
+
 # ─── Standalone mode (no S2S secret) — session path still gated ──────────
 
 

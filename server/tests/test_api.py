@@ -903,6 +903,38 @@ def test_reseed_twice_is_idempotent(admin_client):
     assert len(org.get_registry().list_teams("club_r2")) == 30
 
 
+def test_reseed_preserves_roster(admin_client):
+    """A reseed upserts catalog teams without players in the payload — the
+    partial-write contract (exclude_unset + merge) must leave a roster the
+    director already entered untouched."""
+    admin_client.post(
+        "/api/admin/clubs/club_rs/onboard",
+        json={"club_id": "club_rs", "name": "Club RS", "slug": "rs", "season": "2026/27"},
+    )
+    r = admin_client.put(
+        "/api/admin/clubs/club_rs/teams/team_rs_senior_m",
+        json={
+            "players": [
+                {"name": "Ana García", "number": 7},
+                {"name": "Luis Pérez"},
+            ]
+        },
+    )
+    assert r.status_code == 200
+
+    r = admin_client.post("/api/admin/clubs/club_rs/teams/reseed")
+    assert r.status_code == 200
+    assert r.json()["teams_written"] == 30
+
+    from biq_onboard_server import org
+
+    team = org.get_registry().get_team("club_rs", "team_rs_senior_m")
+    assert [(p.name, p.number) for p in team.players] == [
+        ("Ana García", 7),
+        ("Luis Pérez", None),
+    ]
+
+
 def test_reseed_failure_persists_failed_job(admin_client, monkeypatch):
     admin_client.post(
         "/api/admin/clubs/club_rf/onboard",

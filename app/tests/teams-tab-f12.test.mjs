@@ -622,3 +622,58 @@ test('Plantilla: remove row and empty-name rows are dropped from the PUT body', 
 
   await browser.close();
 });
+
+test('Plantilla: dorsal out of range shows the error inside the modal and no PUT is sent', async () => {
+  const browser = await chromium.launch();
+  const { page, log } = await newPage(browser);
+
+  await page.evaluate(() => {
+    document.getElementById('app').shadowRoot.querySelector('[data-nav="teams"]').click();
+  });
+  await page.waitForFunction(() => {
+    const el = document.getElementById('app');
+    return !!(el.shadowRoot && el.shadowRoot.querySelector('[data-team-row="team_club1_senior_f"]'));
+  }, { timeout: 10000 });
+
+  await page.evaluate(() => {
+    document.getElementById('app').shadowRoot
+      .querySelector('[data-team-row="team_club1_senior_f"] [data-edit-roster]').click();
+  });
+  await page.waitForFunction(() => {
+    return !!document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]');
+  }, { timeout: 10000 });
+
+  // No error on open.
+  const openError = await page.evaluate(() => {
+    const m = document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]');
+    return m.querySelector('[role="alert"]')?.textContent ?? null;
+  });
+  assert.equal(openError, null, 'error cleared on open');
+
+  // Set dorsal 100 (> 99) on the seeded row, then save.
+  await page.evaluate(() => {
+    const sr = document.getElementById('app').shadowRoot;
+    const num = sr.querySelector('[data-player-number="0"]');
+    num.value = '100';
+    num.dispatchEvent(new Event('input', { bubbles: true }));
+    sr.querySelector('[data-save-team]').click();
+  });
+  await page.waitForFunction(() => {
+    const m = document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]');
+    return !!(m && m.querySelector('[role="alert"]'));
+  }, { timeout: 10000 });
+
+  const alertText = await page.evaluate(() => {
+    const m = document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]');
+    return m.querySelector('[role="alert"]').textContent;
+  });
+  assert.match(alertText, /dorsal/i, 'in-modal alert explains the dorsal range');
+  const puts = log.filter((e) => e.method === 'PUT' && e.url.match(/\/teams\/[^/]+$/) && !e.url.includes('archive'));
+  assert.equal(puts.length, 0, 'invalid dorsal — no PUT sent');
+  const modalStillOpen = await page.evaluate(() => {
+    return !!document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]');
+  });
+  assert.ok(modalStillOpen, 'modal stays open for correction');
+
+  await browser.close();
+});

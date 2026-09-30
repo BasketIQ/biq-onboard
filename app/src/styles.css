@@ -938,6 +938,12 @@
   justify-content: flex-end;
 }
 
+/* In-modal error for the edit dialog — the section-level onboard-error
+   banner would render behind the fixed overlay. */
+.onboard-modal-error {
+  margin-top: 16px;
+}
+
 /* Team edit modal — wider than the confirm dialog and scrollable on short
    viewports so a long plantilla never pushes Guardar off-screen. */
 .onboard-modal-team {

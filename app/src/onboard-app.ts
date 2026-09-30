@@ -369,6 +369,10 @@ class BiqOnboardApp extends HTMLElement {
   private _editNameDraft = '';
   private _editLevelDraft = '';
   private _rosterDraft: { name: string; number: string }[] = [];
+  // Save/validation errors render INSIDE the modal — the overlay is
+  // z-index 1000, so the section-level _teamsError banner would sit behind
+  // it invisible. Cleared on open/close/success.
+  private _editError: string | null = null;
   // Set by the «Plantilla» row action and by «Añadir jugador»: focus lands
   // on the roster editor after the next render, then the flag clears.
   private _rosterFocus = false;
@@ -910,6 +914,7 @@ class BiqOnboardApp extends HTMLElement {
     this._addingTeamCategory = null;
     this._deleteConfirmTeamId = null;
     this._teamsError = null;
+    this._editError = null;
     this.render();
   }
 
@@ -917,6 +922,7 @@ class BiqOnboardApp extends HTMLElement {
     this._editingTeamId = null;
     this._rosterDraft = [];
     this._rosterFocus = false;
+    this._editError = null;
     this.render();
   }
 
@@ -2244,6 +2250,7 @@ class BiqOnboardApp extends HTMLElement {
             </div>
             ${rosterRows || '<p class="onboard-card-desc onboard-roster-empty">Sin jugadores todavía — añade el primero con «Añadir jugador».</p>'}
           </div>
+          ${this._editError ? `<div class="onboard-error onboard-modal-error" role="alert">${escapeHtml(this._editError)}</div>` : ''}
           <div class="onboard-team-actions">
             <button class="onboard-btn onboard-btn-primary" data-save-team="${escapeHtml(team.id)}" type="button">Guardar</button>
             <button class="onboard-btn onboard-btn-secondary" data-cancel-edit type="button">Cancelar</button>
@@ -2849,7 +2856,7 @@ class BiqOnboardApp extends HTMLElement {
         const name = this._editNameDraft.trim();
         const competitive_level = this._editLevelDraft.trim();
         if (!name) {
-          this._teamsError = 'El nombre es obligatorio.';
+          this._editError = 'El nombre es obligatorio.';
           this.render();
           return;
         }
@@ -2867,7 +2874,7 @@ class BiqOnboardApp extends HTMLElement {
           players.push({ name: pname, number: num });
         }
         if (invalidNumber) {
-          this._teamsError = 'El dorsal debe ser un número entre 0 y 99.';
+          this._editError = 'El dorsal debe ser un número entre 0 y 99.';
           this.render();
           return;
         }
@@ -2882,7 +2889,7 @@ class BiqOnboardApp extends HTMLElement {
           this._closeEditModal();
           await this.loadTeams(clubId);
         } catch (err) {
-          this._teamsError = (err as Error).message;
+          this._editError = (err as Error).message;
           this.render();
         }
       });

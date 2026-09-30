@@ -193,6 +193,8 @@ const ICON_TRASH = '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><pat
 const ICON_PLUS = '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg>';
 const ICON_CHECK = '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 12.5l4.2 4.2L19 7" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 const ICON_CANCEL = '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>';
+// Plantilla — roster icon (two person silhouettes)
+const ICON_USERS = '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="9" cy="8" r="3.2" stroke="currentColor" stroke-width="1.9"/><path d="M3.5 19.5c.6-3.2 2.9-5 5.5-5s4.9 1.8 5.5 5" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/><circle cx="16.5" cy="9" r="2.4" stroke="currentColor" stroke-width="1.7"/><path d="M16 14.7c2.4.2 4 1.7 4.5 4.3" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>';
 
 // ─── Helpers ────────────────────────────────────────────────────────────
 
@@ -235,6 +237,13 @@ interface ClubTab {
 }
 
 // F12: A club team-catalog row as returned by GET /api/clubs/{id}/teams.
+// Plantilla — roster row (name + shirt number) as served by the team
+// catalog (biq-core TeamPlayer). Plain reference data, no account.
+interface RosterPlayer {
+  name: string;
+  number: number | null;
+}
+
 interface TeamRow {
   id: string;
   name: string;
@@ -243,6 +252,7 @@ interface TeamRow {
   label: string | null;
   archived: boolean;
   competitive_level?: string;
+  players?: RosterPlayer[];
 }
 
 // Mi Club Phase 4 (Miembros tab): member roster row from
@@ -352,6 +362,16 @@ class BiqOnboardApp extends HTMLElement {
   private _teamsLoading = false;
   private _teamsError: string | null = null;
   private _editingTeamId: string | null = null;
+  // Edit-team modal draft: name/level are plain fields; the roster draft
+  // holds raw strings so typing never needs a re-render (innerHTML would
+  // wipe in-flight input values). Synced from the DOM before every
+  // re-render/save.
+  private _editNameDraft = '';
+  private _editLevelDraft = '';
+  private _rosterDraft: { name: string; number: string }[] = [];
+  // Set by the «Plantilla» row action and by «Añadir jugador»: focus lands
+  // on the roster editor after the next render, then the flag clears.
+  private _rosterFocus = false;
   private _addingTeamCategory: string | null = null;
   private _teamsFilter: 'active' | 'all' = 'active';
   private _deleteConfirmTeamId: string | null = null;
@@ -874,6 +894,65 @@ class BiqOnboardApp extends HTMLElement {
     this._teamSeedingJob = data.team_seeding_job ?? null;
   }
 
+  // Edit-team modal lifecycle — the draft fields carry name/level/roster so
+  // add/remove-player re-renders never lose typed input (innerHTML re-render
+  // discards live input values).
+  private _openEditModal(teamId: string, rosterFocus: boolean): void {
+    const team = this._mergedCatalog().find((t) => t.id === teamId);
+    this._editingTeamId = teamId;
+    this._editNameDraft = team?.name ?? '';
+    this._editLevelDraft = team?.competitive_level ?? '';
+    this._rosterDraft = (team?.players ?? []).map((p) => ({
+      name: p.name,
+      number: p.number === null || p.number === undefined ? '' : String(p.number),
+    }));
+    this._rosterFocus = rosterFocus;
+    this._addingTeamCategory = null;
+    this._deleteConfirmTeamId = null;
+    this._teamsError = null;
+    this.render();
+  }
+
+  private _closeEditModal(): void {
+    this._editingTeamId = null;
+    this._rosterDraft = [];
+    this._rosterFocus = false;
+    this.render();
+  }
+
+  // Flush the open modal's DOM into the draft fields — the single place
+  // where live input values are captured.
+  private _syncEditDraftFromDom(): void {
+    const modal = this.shadow.querySelector('[data-edit-modal]');
+    if (!modal) return;
+    const nameInput = modal.querySelector('[data-edit-team-name]') as HTMLInputElement | null;
+    const levelSel = modal.querySelector('[data-edit-team-level]') as HTMLSelectElement | null;
+    if (nameInput) this._editNameDraft = nameInput.value;
+    if (levelSel) this._editLevelDraft = levelSel.value;
+    modal.querySelectorAll('[data-roster-row]').forEach((row, i) => {
+      const pname = row.querySelector('[data-player-name]') as HTMLInputElement | null;
+      const pnum = row.querySelector('[data-player-number]') as HTMLInputElement | null;
+      if (!this._rosterDraft[i]) this._rosterDraft[i] = { name: '', number: '' };
+      this._rosterDraft[i].name = pname?.value ?? '';
+      this._rosterDraft[i].number = pnum?.value ?? '';
+    });
+  }
+
+  // Focus handoff after a render triggered with _rosterFocus: land on the
+  // last roster name input (the new row from «Añadir jugador», or the first
+  // when «Plantilla» opened the modal), else on the add button itself.
+  private _maybeFocusRoster(): void {
+    if (!this._rosterFocus) return;
+    this._rosterFocus = false;
+    const modal = this.shadow.querySelector('[data-edit-modal]');
+    if (!modal) return;
+    const rows = modal.querySelectorAll('[data-roster-row] [data-player-name]');
+    const target = (rows.length
+      ? rows[rows.length - 1]
+      : modal.querySelector('[data-add-player]')) as HTMLElement | null;
+    target?.focus();
+  }
+
   // F12: Mirror of _maybeStartPolling for the seeding job — same 3s initial
   // backoff, ×1.5 bounded at 30s, and the same staleness threshold.
   private _maybeStartSeedingPolling(clubId: string): void {
@@ -1381,6 +1460,7 @@ class BiqOnboardApp extends HTMLElement {
       </div>`;
     if (section === 'teams') {
       this.wireTeamsEvents(club.id);
+      this._maybeFocusRoster();
     } else if (section === 'members' && canManageMembers) {
       this.wireMembersEvents(club.id);
     } else {
@@ -1897,6 +1977,7 @@ class BiqOnboardApp extends HTMLElement {
         label: (m?.label ?? t.label) || null,
         archived: m ? !!m.archived : !!t.archived,
         competitive_level: m?.competitive_level ?? t.competitive_level,
+        players: m?.players ?? t.players,
       });
     }
     for (const t of this._teams) {
@@ -2058,22 +2139,6 @@ class BiqOnboardApp extends HTMLElement {
         const level = t.competitive_level
           ? (COMPETITIVE_LEVEL_LABELS[t.competitive_level] || t.competitive_level)
           : (canManage ? 'Sin definir' : '');
-        if (canManage && this._editingTeamId === t.id) {
-          // Edit: name on its own line; level + save/cancel on the second.
-          return `<div class="onboard-team-row" data-team-row="${escapeHtml(t.id)}" data-editing="true">
-            <div class="onboard-team-row-main">
-              <input type="text" class="onboard-input onboard-input-sm" data-edit-team-name value="${escapeHtml(t.name)}" />
-            </div>
-            <div class="onboard-team-row-meta">
-              ${genderBadge}
-              <select class="onboard-input onboard-input-sm" data-edit-team-level aria-label="Nivel de competición">${competitiveLevelOptionsHtml(t.competitive_level || '')}</select>
-              <div class="onboard-team-actions">
-                <button class="onboard-icon-btn" data-save-team="${escapeHtml(t.id)}" title="Guardar" aria-label="Guardar">${ICON_CHECK}</button>
-                <button class="onboard-icon-btn" data-cancel-edit title="Cancelar" aria-label="Cancelar">${ICON_CANCEL}</button>
-              </div>
-            </div>
-          </div>`;
-        }
         // Selection is its own click target on the right side of the primary
         // row. Management icons stay on the meta line so picking a team can
         // never fire edit/archive/delete. Archived teams are not selectable.
@@ -2084,7 +2149,8 @@ class BiqOnboardApp extends HTMLElement {
         let actions = '';
         if (canManage) {
           const actionBtns = [
-            `<button class="onboard-icon-btn" data-edit-team="${escapeHtml(t.id)}" title="Editar nombre" aria-label="Editar nombre">${ICON_EDIT}</button>`,
+            `<button class="onboard-icon-btn" data-edit-team="${escapeHtml(t.id)}" title="Editar equipo" aria-label="Editar equipo">${ICON_EDIT}</button>`,
+            `<button class="onboard-icon-btn" data-edit-roster="${escapeHtml(t.id)}" title="Plantilla" aria-label="Editar plantilla">${ICON_USERS}</button>`,
           ];
           if (t.archived) {
             // Archived teams: show restore + delete (physical)
@@ -2152,6 +2218,40 @@ class BiqOnboardApp extends HTMLElement {
       </div>`;
     }).join('');
 
+    // Team edit modal (management only): name + competition level + plantilla.
+    // Values render from the draft state — input events keep the draft in
+    // sync, so re-renders from add/remove-player never lose typed text.
+    const editModal = canManage && this._editingTeamId ? (() => {
+      const team = this._mergedCatalog().find((t) => t.id === this._editingTeamId);
+      if (!team) return '';
+      const rosterRows = this._rosterDraft.map((p, i) => `
+        <div class="onboard-roster-row" data-roster-row>
+          <input type="text" class="onboard-input onboard-input-sm" data-player-name="${i}" placeholder="Nombre y apellidos" aria-label="Nombre y apellidos del jugador" value="${escapeHtml(p.name)}" />
+          <input type="number" class="onboard-input onboard-input-sm onboard-player-num" data-player-number="${i}" placeholder="Nº" aria-label="Dorsal" min="0" max="99" inputmode="numeric" value="${escapeHtml(p.number)}" />
+          <button class="onboard-icon-btn onboard-icon-btn-danger" data-remove-player="${i}" type="button" title="Quitar jugador" aria-label="Quitar jugador">${ICON_TRASH}</button>
+        </div>`).join('');
+      return `<div class="onboard-modal-overlay" role="dialog" aria-modal="true" aria-labelledby="edit-team-modal-title" data-edit-modal>
+        <div class="onboard-modal onboard-modal-team">
+          <h3 id="edit-team-modal-title">Editar equipo</h3>
+          <label class="onboard-field-label" for="edit-team-name">Nombre del equipo</label>
+          <input id="edit-team-name" type="text" class="onboard-input" data-edit-team-name value="${escapeHtml(this._editNameDraft)}" />
+          <label class="onboard-field-label" for="edit-team-level">Nivel de competición</label>
+          <select id="edit-team-level" class="onboard-input" data-edit-team-level>${competitiveLevelOptionsHtml(this._editLevelDraft)}</select>
+          <div class="onboard-roster">
+            <div class="onboard-roster-head">
+              <h4 class="onboard-roster-title">Plantilla</h4>
+              <button class="onboard-linkbtn" data-add-player type="button">+ Añadir jugador</button>
+            </div>
+            ${rosterRows || '<p class="onboard-card-desc onboard-roster-empty">Sin jugadores todavía — añade el primero con «Añadir jugador».</p>'}
+          </div>
+          <div class="onboard-team-actions">
+            <button class="onboard-btn onboard-btn-primary" data-save-team="${escapeHtml(team.id)}" type="button">Guardar</button>
+            <button class="onboard-btn onboard-btn-secondary" data-cancel-edit type="button">Cancelar</button>
+          </div>
+        </div>
+      </div>`;
+    })() : '';
+
     // Delete confirmation modal (management only)
     const deleteModal = canManage && this._deleteConfirmTeamId ? (() => {
       const team = this._mergedCatalog().find(t => t.id === this._deleteConfirmTeamId);
@@ -2184,6 +2284,7 @@ class BiqOnboardApp extends HTMLElement {
       ${seedingBanner}
       ${this._teamsError ? `<div class="onboard-error" role="alert">${escapeHtml(this._teamsError)}</div>` : ''}
       ${sections || '<p class="onboard-card-desc">No hay equipos.</p>'}
+      ${editModal}
       ${deleteModal}
     </section>`;
   }
@@ -2698,35 +2799,75 @@ class BiqOnboardApp extends HTMLElement {
       });
     }
 
-    // Edit team (pen icon → only name editable)
+    // Edit team (pen icon → modal: name + level + plantilla)
     this.shadow.querySelectorAll('[data-edit-team]').forEach(btn => {
       btn.addEventListener('click', () => {
-        this._editingTeamId = (btn as HTMLElement).dataset.editTeam || '';
-        this._addingTeamCategory = null;
-        this._deleteConfirmTeamId = null;
+        this._openEditModal((btn as HTMLElement).dataset.editTeam || '', false);
+      });
+    });
+
+    // Plantilla (users icon → same modal, focus lands on the roster editor)
+    this.shadow.querySelectorAll('[data-edit-roster]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        this._openEditModal((btn as HTMLElement).dataset.editRoster || '', true);
+      });
+    });
+
+    // Cancel edit (modal)
+    const cancelBtn = this.shadow.querySelector('[data-cancel-edit]');
+    if (cancelBtn) {
+      cancelBtn.addEventListener('click', () => {
+        this._closeEditModal();
+      });
+    }
+
+    // Roster editor — add/remove re-render from the draft, so the DOM is
+    // flushed into _rosterDraft first and nothing typed is lost.
+    const addPlayerBtn = this.shadow.querySelector('[data-add-player]');
+    if (addPlayerBtn) {
+      addPlayerBtn.addEventListener('click', () => {
+        this._syncEditDraftFromDom();
+        this._rosterDraft.push({ name: '', number: '' });
+        this._rosterFocus = true;
+        this.render();
+      });
+    }
+    this.shadow.querySelectorAll('[data-remove-player]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        this._syncEditDraftFromDom();
+        this._rosterDraft.splice(Number((btn as HTMLElement).dataset.removePlayer), 1);
         this.render();
       });
     });
 
-    // Cancel edit
-    const cancelBtn = this.shadow.querySelector('[data-cancel-edit]');
-    if (cancelBtn) {
-      cancelBtn.addEventListener('click', () => {
-        this._editingTeamId = null;
-        this.render();
-      });
-    }
-
-    // Save team edit (name + competition level are sent)
+    // Save team edit — the modal's DOM is flushed into the draft first, then
+    // name + competition level + full roster are sent (replace semantics).
     this.shadow.querySelectorAll('[data-save-team]').forEach(btn => {
       btn.addEventListener('click', async () => {
         const teamId = (btn as HTMLElement).dataset.saveTeam || '';
-        const row = this.shadow.querySelector(`[data-team-row="${CSS.escape(teamId)}"][data-editing="true"]`);
-        if (!row) return;
-        const name = (row.querySelector('[data-edit-team-name]') as HTMLInputElement)?.value.trim() || '';
-        const competitive_level = (row.querySelector('[data-edit-team-level]') as HTMLSelectElement)?.value.trim() || '';
+        this._syncEditDraftFromDom();
+        const name = this._editNameDraft.trim();
+        const competitive_level = this._editLevelDraft.trim();
         if (!name) {
           this._teamsError = 'El nombre es obligatorio.';
+          this.render();
+          return;
+        }
+        const players: { name: string; number: number | null }[] = [];
+        let invalidNumber = false;
+        for (const p of this._rosterDraft) {
+          const pname = p.name.trim();
+          if (!pname) continue; // blank rows are ignored
+          const numStr = p.number.trim();
+          const num = numStr === '' ? null : Number.parseInt(numStr, 10);
+          if (num !== null && (!Number.isInteger(num) || num < 0 || num > 99)) {
+            invalidNumber = true;
+            break;
+          }
+          players.push({ name: pname, number: num });
+        }
+        if (invalidNumber) {
+          this._teamsError = 'El dorsal debe ser un número entre 0 y 99.';
           this.render();
           return;
         }
@@ -2735,10 +2876,10 @@ class BiqOnboardApp extends HTMLElement {
             method: 'PUT',
             credentials: 'include',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name, competitive_level }),
+            body: JSON.stringify({ name, competitive_level, players }),
           });
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
-          this._editingTeamId = null;
+          this._closeEditModal();
           await this.loadTeams(clubId);
         } catch (err) {
           this._teamsError = (err as Error).message;

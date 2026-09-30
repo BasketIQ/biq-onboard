@@ -938,6 +938,61 @@
   justify-content: flex-end;
 }
 
+/* Team edit modal — wider than the confirm dialog and scrollable on short
+   viewports so a long plantilla never pushes Guardar off-screen. */
+.onboard-modal-team {
+  max-width: 560px;
+  max-height: 90vh;
+  overflow-y: auto;
+}
+
+.onboard-modal-team .onboard-field-label {
+  display: block;
+  margin-top: 12px;
+  margin-bottom: 4px;
+}
+
+.onboard-roster {
+  margin-top: 16px;
+  border-top: 1px solid var(--biq-border, #e5e5e5);
+  padding-top: 12px;
+}
+
+.onboard-roster-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.onboard-roster-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.onboard-roster-empty {
+  margin: 4px 0;
+}
+
+.onboard-roster-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.onboard-roster-row [data-player-name] {
+  flex: 1;
+  min-width: 0;
+}
+
+.onboard-player-num {
+  width: 64px;
+  flex: none;
+  text-align: center;
+}
+
 /* Mi Club Phase 4: Miembros tab */
 .onboard-invite-card {
   padding: 16px;

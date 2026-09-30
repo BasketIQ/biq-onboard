@@ -25,6 +25,11 @@ def _s2s_secret() -> str | None:
     return os.environ.get("BIQ_ONBOARD_S2S_SECRET") or None
 
 
+def _players_json(team) -> list[dict]:
+    """Serialize ``Team.players`` (biq-core TeamPlayer rows) for the API."""
+    return [{"name": p.name, "number": p.number} for p in team.players]
+
+
 def _require_teams_manage(request: Request, club_id: str) -> str:
     """Authorize team-catalog management, resolving identity from S2S or session.
 
@@ -75,12 +80,17 @@ def create_team(club_id: str, payload: TeamCreate, request: Request) -> dict:
     from biq_core.org import Team
 
     registry = org.get_registry()
-    # competitive_level is only passed when the caller sent it — under the
-    # registry's partial-write contract an omitted field means "leave alone",
-    # so a create against an existing id cannot silently clear a stored level.
+    # competitive_level/players are only passed when the caller sent them —
+    # under the registry's partial-write contract an omitted field means
+    # "leave alone", so a create against an existing id cannot silently
+    # clear a stored level or roster.
     extra = {}
     if payload.competitive_level is not None:
         extra["competitive_level"] = payload.competitive_level
+    if payload.players is not None:
+        from biq_core.org import TeamPlayer
+
+        extra["players"] = [TeamPlayer(name=p.name, number=p.number) for p in payload.players]
     team = Team(
         id=payload.id,
         club_id=club_id,
@@ -112,6 +122,7 @@ def list_teams(club_id: str, request: Request) -> dict:
                 "staff_user_ids": t.staff_user_ids,
                 "archived": t.archived,
                 "competitive_level": t.competitive_level,
+                "players": _players_json(t),
             }
             for t in teams
         ],
@@ -203,7 +214,7 @@ def reseed_teams(club_id: str, request: Request) -> dict:
 @router.put("/{team_id}")
 def update_team(club_id: str, team_id: str, payload: TeamUpdate, request: Request) -> dict:
     _require_teams_manage(request, club_id)
-    from biq_core.org import Team
+    from biq_core.org import Team, TeamPlayer
 
     registry = org.get_registry()
     existing = registry.get_team(club_id, team_id)
@@ -225,6 +236,11 @@ def update_team(club_id: str, team_id: str, payload: TeamUpdate, request: Reques
         timezone=payload.timezone if payload.timezone is not None else existing.timezone,
         staff_user_ids=payload.staff_user_ids if payload.staff_user_ids is not None else existing.staff_user_ids,
         competitive_level=payload.competitive_level if payload.competitive_level is not None else existing.competitive_level,
+        players=(
+            [TeamPlayer(name=p.name, number=p.number) for p in payload.players]
+            if payload.players is not None
+            else existing.players
+        ),
     )
     registry.upsert_team(team)
     return {
@@ -235,6 +251,7 @@ def update_team(club_id: str, team_id: str, payload: TeamUpdate, request: Reques
             "timezone": team.timezone,
             "staff_user_ids": team.staff_user_ids,
             "competitive_level": team.competitive_level,
+            "players": _players_json(team),
         },
     }
 
@@ -274,6 +291,7 @@ def archive_team(club_id: str, team_id: str, request: Request) -> dict:
         timezone=existing.timezone,
         staff_user_ids=existing.staff_user_ids,
         competitive_level=existing.competitive_level,
+        players=existing.players,
         archived=True,
     )
     registry.upsert_team(team)
@@ -301,6 +319,7 @@ def unarchive_team(club_id: str, team_id: str, request: Request) -> dict:
         timezone=existing.timezone,
         staff_user_ids=existing.staff_user_ids,
         competitive_level=existing.competitive_level,
+        players=existing.players,
         archived=False,
     )
     registry.upsert_team(team)

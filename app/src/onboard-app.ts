@@ -376,6 +376,10 @@ class BiqOnboardApp extends HTMLElement {
   // Set by the «Plantilla» row action and by «Añadir jugador»: focus lands
   // on the roster editor after the next render, then the flag clears.
   private _rosterFocus = false;
+  // Deep-link intent from `#/onboard/teams?edit=<id>`: a pending request to
+  // open the team edit modal once the catalogs finish loading. Cleared on
+  // drain (success or not) — the modal never reopens on a later render.
+  private _pendingEditTeamId: string | null = null;
   private _addingTeamCategory: string | null = null;
   private _teamsFilter: 'active' | 'all' = 'active';
   private _deleteConfirmTeamId: string | null = null;
@@ -540,15 +544,19 @@ class BiqOnboardApp extends HTMLElement {
     const raw = value || '';
     const qIdx = raw.indexOf('?');
     this._subRoute = qIdx >= 0 ? raw.slice(0, qIdx) : raw;
-    this._returnRoute = qIdx >= 0
-      ? (new URLSearchParams(raw.slice(qIdx + 1)).get('return') || '')
-      : '';
+    const params = qIdx >= 0 ? new URLSearchParams(raw.slice(qIdx + 1)) : null;
+    this._returnRoute = params?.get('return') || '';
+    // `edit=<teamId>` (from Home «Plantilla») asks for the edit modal; any
+    // route without it drops a stale pending request.
+    this._pendingEditTeamId = params?.get('edit') || null;
     this.render();
     // F12: Deep-linking to #/onboard/teams bypasses the nav click that loads
     // the catalog — trigger the load here when club context is already set.
     const clubId = this._org?.club?.id;
     if (this._subRoute === 'teams' && clubId) {
       this._ensureTeamsData(clubId);
+      // Catalog may already be warm (no load started) — drain immediately.
+      this._maybeOpenPendingEdit();
     }
     // Phase 3: same for the Perfil club summary.
     if (this._subRoute === 'profile' && clubId && !this._clubSummary && !this._clubSummaryLoading) {
@@ -774,6 +782,7 @@ class BiqOnboardApp extends HTMLElement {
     } finally {
       this._myTeamsLoading = false;
       this.render();
+      this._maybeOpenPendingEdit();
     }
   }
 
@@ -884,6 +893,7 @@ class BiqOnboardApp extends HTMLElement {
     } finally {
       this._teamsLoading = false;
       this.render();
+      this._maybeOpenPendingEdit();
     }
   }
 
@@ -918,12 +928,50 @@ class BiqOnboardApp extends HTMLElement {
     this.render();
   }
 
+  // Consume the `?edit=<teamId>` deep-link intent once every teams feed has
+  // settled (self-scoped selection catalog for all roles + the management
+  // feed for ADMIN_ROLES). Fails closed: non-managers and unknown team ids
+  // just land on the Equipos list — the pending intent never lingers.
+  private _maybeOpenPendingEdit(): void {
+    const teamId = this._pendingEditTeamId;
+    if (!teamId) return;
+    if (this._myTeamsLoading || this._teamsLoading) return;
+    if (!this._myTeamsLoaded && this._teams.length === 0) {
+      // Managers wait for the management feed; if the self-scoped fetch
+      // already failed and no management load is possible, don't drain yet —
+      // the retry path will settle it. Only a confirmed empty catalog
+      // resolves to the plain list.
+      if (this._canManageTeams() && !this._teamsError) return;
+    }
+    this._pendingEditTeamId = null;
+    if (
+      this._canManageTeams() &&
+      this._mergedCatalog().some((t) => t.id === teamId)
+    ) {
+      // Same entry point as the «Plantilla» row action — roster focus.
+      this._openEditModal(teamId, true);
+    }
+  }
+
   private _closeEditModal(): void {
     this._editingTeamId = null;
     this._rosterDraft = [];
     this._rosterFocus = false;
     this._editError = null;
     this.render();
+    // The ?edit=<id> intent is consumed once — drop it from the hash so a
+    // refresh or back-forward doesn't reopen the modal (replaceState, no
+    // hashchange; same pattern biq-playbook uses for internal nav sync).
+    const hash = window.location.hash || '';
+    const qIdx = hash.indexOf('?');
+    if (qIdx >= 0) {
+      const params = new URLSearchParams(hash.slice(qIdx + 1));
+      if (params.has('edit')) {
+        params.delete('edit');
+        const query = params.toString();
+        history.replaceState(null, '', `${hash.slice(0, qIdx)}${query ? `?${query}` : ''}`);
+      }
+    }
   }
 
   // Flush the open modal's DOM into the draft fields — the single place

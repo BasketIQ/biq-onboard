@@ -57,7 +57,7 @@ async function stopServer() {
 // Seed teams returned by the mocked API.
 const SEED_TEAMS = [
   { id: 'team_club1_senior_m', club_id: 'club1', name: 'Senior Masculino', category: 'senior', gender: 'M', label: '', archived: false },
-  { id: 'team_club1_senior_f', club_id: 'club1', name: 'Senior Femenino', category: 'senior', gender: 'F', label: '', archived: false, competitive_level: 'Liga EBA' },
+  { id: 'team_club1_senior_f', club_id: 'club1', name: 'Senior Femenino', category: 'senior', gender: 'F', label: '', archived: false, competitive_level: 'Liga EBA', players: [{ name: 'Ana García', number: 7 }] },
   { id: 'team_club1_cadete_m', club_id: 'club1', name: 'Cadete Masculino', category: 'cadete', gender: 'M', label: '2011', archived: false },
   { id: 'team_club1_cadete_f', club_id: 'club1', name: 'Cadete Femenino', category: 'cadete', gender: 'F', label: '', archived: true },
 ];
@@ -484,6 +484,209 @@ test('Mi Club redesign: long team name never truncates at 360px', async () => {
   assert.equal(m.text, LONG_NAME, 'full name in the DOM');
   assert.ok(!m.clipped, `name clipped: scrollWidth overflow at 360px`);
   assert.ok(!m.ellipsis, 'name must not be ellipsis-truncated');
+
+  await browser.close();
+});
+
+test('Plantilla: roster modal prefills players, add-row survives re-render, PUT sends full roster', async () => {
+  const browser = await chromium.launch();
+  const { page, log } = await newPage(browser);
+
+  await page.evaluate(() => {
+    document.getElementById('app').shadowRoot.querySelector('[data-nav="teams"]').click();
+  });
+  await page.waitForFunction(() => {
+    const el = document.getElementById('app');
+    return !!(el.shadowRoot && el.shadowRoot.querySelector('[data-team-row="team_club1_senior_f"]'));
+  }, { timeout: 10000 });
+
+  // «Plantilla» opens the edit modal with the roster section prefilled.
+  await page.evaluate(() => {
+    document.getElementById('app').shadowRoot
+      .querySelector('[data-team-row="team_club1_senior_f"] [data-edit-roster]').click();
+  });
+  await page.waitForFunction(() => {
+    const sr = document.getElementById('app').shadowRoot;
+    return !!(sr.querySelector('[data-edit-modal]') && sr.querySelector('[data-player-name="0"]'));
+  }, { timeout: 10000 });
+
+  const prefilled = await page.evaluate(() => {
+    const sr = document.getElementById('app').shadowRoot;
+    return {
+      teamName: sr.querySelector('[data-edit-team-name]').value,
+      level: sr.querySelector('[data-edit-team-level]').value,
+      p0name: sr.querySelector('[data-player-name="0"]').value,
+      p0num: sr.querySelector('[data-player-number="0"]').value,
+      editingRowGone: !sr.querySelector('[data-team-row][data-editing]'),
+    };
+  });
+  assert.equal(prefilled.teamName, 'Senior Femenino');
+  assert.equal(prefilled.level, 'Liga EBA');
+  assert.equal(prefilled.p0name, 'Ana García');
+  assert.equal(prefilled.p0num, '7');
+  assert.ok(prefilled.editingRowGone, 'no inline editing row — edit lives in the modal');
+
+  // «Añadir jugador» appends a row; the prefilled values must survive the re-render.
+  await page.evaluate(() => {
+    document.getElementById('app').shadowRoot.querySelector('[data-add-player]').click();
+  });
+  await page.waitForFunction(() => {
+    return !!document.getElementById('app').shadowRoot.querySelector('[data-player-name="1"]');
+  }, { timeout: 10000 });
+  const survived = await page.evaluate(() => {
+    const sr = document.getElementById('app').shadowRoot;
+    return sr.querySelector('[data-player-name="0"]').value + '|' + sr.querySelector('[data-player-number="0"]').value;
+  });
+  assert.equal(survived, 'Ana García|7', 'existing roster row survives add-row re-render');
+
+  // Type into the new row, then save.
+  await page.evaluate(() => {
+    const sr = document.getElementById('app').shadowRoot;
+    const n = sr.querySelector('[data-player-name="1"]');
+    n.value = 'Luis Pérez';
+    n.dispatchEvent(new Event('input', { bubbles: true }));
+    const num = sr.querySelector('[data-player-number="1"]');
+    num.value = '12';
+    num.dispatchEvent(new Event('input', { bubbles: true }));
+    sr.querySelector('[data-save-team]').click();
+  });
+  await page.waitForTimeout(500);
+
+  const puts = log.filter((e) => e.method === 'PUT' && e.url.match(/\/teams\/[^/]+$/) && !e.url.includes('archive'));
+  assert.equal(puts.length, 1, 'exactly one update request');
+  const body = JSON.parse(puts[0].postData);
+  assert.equal(body.name, 'Senior Femenino');
+  assert.equal(body.competitive_level, 'Liga EBA');
+  assert.deepEqual(body.players, [
+    { name: 'Ana García', number: 7 },
+    { name: 'Luis Pérez', number: 12 },
+  ], 'PUT sends the complete roster');
+
+  await browser.close();
+});
+
+test('Plantilla: remove row and empty-name rows are dropped from the PUT body', async () => {
+  const browser = await chromium.launch();
+  const { page, log } = await newPage(browser);
+
+  await page.evaluate(() => {
+    document.getElementById('app').shadowRoot.querySelector('[data-nav="teams"]').click();
+  });
+  await page.waitForFunction(() => {
+    const el = document.getElementById('app');
+    return !!(el.shadowRoot && el.shadowRoot.querySelector('[data-team-row="team_club1_senior_m"]'));
+  }, { timeout: 10000 });
+
+  // Edit (pen) on Senior Masculino — no seeded roster.
+  await page.evaluate(() => {
+    document.getElementById('app').shadowRoot
+      .querySelector('[data-team-row="team_club1_senior_m"] [data-edit-team]').click();
+  });
+  await page.waitForFunction(() => {
+    return !!document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]');
+  }, { timeout: 10000 });
+
+  // Two added rows: one filled, one left blank — the blank row must not be sent.
+  for (let i = 0; i < 2; i++) {
+    await page.evaluate(() => {
+      document.getElementById('app').shadowRoot.querySelector('[data-add-player]').click();
+    });
+    await page.waitForFunction((idx) => {
+      return !!document.getElementById('app').shadowRoot.querySelector(`[data-player-name="${idx}"]`);
+    }, i, { timeout: 10000 });
+  }
+  await page.evaluate(() => {
+    const n = document.getElementById('app').shadowRoot.querySelector('[data-player-name="0"]');
+    n.value = 'Marta Ruiz';
+    n.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+
+  // Remove the first (filled) row — only the blank row remains → empty roster.
+  await page.evaluate(() => {
+    document.getElementById('app').shadowRoot.querySelector('[data-remove-player="0"]').click();
+  });
+  await page.waitForFunction(() => {
+    const sr = document.getElementById('app').shadowRoot;
+    return sr.querySelectorAll('[data-roster-row]').length === 1;
+  }, { timeout: 10000 });
+
+  await page.evaluate(() => {
+    document.getElementById('app').shadowRoot.querySelector('[data-save-team]').click();
+  });
+  await page.waitForTimeout(500);
+
+  const puts = log.filter((e) => e.method === 'PUT' && e.url.match(/\/teams\/[^/]+$/) && !e.url.includes('archive'));
+  assert.equal(puts.length, 1);
+  const body = JSON.parse(puts[0].postData);
+  assert.deepEqual(body.players, [], 'blank rows dropped — explicit clear is sent');
+
+  await browser.close();
+});
+
+test('Plantilla: dorsal out of range shows the error inside the modal and no PUT is sent', async () => {
+  const browser = await chromium.launch();
+  const { page, log } = await newPage(browser);
+
+  await page.evaluate(() => {
+    document.getElementById('app').shadowRoot.querySelector('[data-nav="teams"]').click();
+  });
+  await page.waitForFunction(() => {
+    const el = document.getElementById('app');
+    return !!(el.shadowRoot && el.shadowRoot.querySelector('[data-team-row="team_club1_senior_f"]'));
+  }, { timeout: 10000 });
+
+  await page.evaluate(() => {
+    document.getElementById('app').shadowRoot
+      .querySelector('[data-team-row="team_club1_senior_f"] [data-edit-roster]').click();
+  });
+  await page.waitForFunction(() => {
+    return !!document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]');
+  }, { timeout: 10000 });
+
+  // No error on open.
+  const openError = await page.evaluate(() => {
+    const m = document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]');
+    return m.querySelector('[role="alert"]')?.textContent ?? null;
+  });
+  assert.equal(openError, null, 'error cleared on open');
+
+  // Field sizing: the name input takes the free space; Nº stays ~2 chars wide.
+  const widths = await page.evaluate(() => {
+    const sr = document.getElementById('app').shadowRoot;
+    return {
+      name: sr.querySelector('[data-player-name="0"]').getBoundingClientRect().width,
+      num: sr.querySelector('[data-player-number="0"]').getBoundingClientRect().width,
+      numMaxLength: sr.querySelector('[data-player-number="0"]').getAttribute('maxlength'),
+    };
+  });
+  assert.ok(widths.num <= 72, `dorsal field is narrow (${widths.num}px)`);
+  assert.ok(widths.name >= widths.num * 2, 'name field takes the remaining width');
+  assert.equal(widths.numMaxLength, '2', 'dorsal limited to 2 characters');
+
+  // Set dorsal 100 (> 99) on the seeded row, then save.
+  await page.evaluate(() => {
+    const sr = document.getElementById('app').shadowRoot;
+    const num = sr.querySelector('[data-player-number="0"]');
+    num.value = '100';
+    num.dispatchEvent(new Event('input', { bubbles: true }));
+    sr.querySelector('[data-save-team]').click();
+  });
+  await page.waitForFunction(() => {
+    const m = document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]');
+    return !!(m && m.querySelector('[role="alert"]'));
+  }, { timeout: 10000 });
+
+  const alertText = await page.evaluate(() => {
+    const m = document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]');
+    return m.querySelector('[role="alert"]').textContent;
+  });
+  assert.match(alertText, /dorsal/i, 'in-modal alert explains the dorsal range');
+  const puts = log.filter((e) => e.method === 'PUT' && e.url.match(/\/teams\/[^/]+$/) && !e.url.includes('archive'));
+  assert.equal(puts.length, 0, 'invalid dorsal — no PUT sent');
+  const modalStillOpen = await page.evaluate(() => {
+    return !!document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]');
+  });
+  assert.ok(modalStillOpen, 'modal stays open for correction');
 
   await browser.close();
 });

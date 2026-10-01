@@ -514,14 +514,96 @@ def test_update_team_competitive_level_can_be_cleared(admin_client):
     assert r.json()["team"]["competitive_level"] == ""
 
 
+# ─── Team players — plantilla (roster: name + shirt number) ──────────────────
+
+
+def test_team_players_default_empty_in_list(admin_client):
+    _make_team(admin_client, "club_rp", "team_rp_1")
+    r = admin_client.get("/api/admin/clubs/club_rp/teams")
+    assert r.status_code == 200
+    assert r.json()["teams"][0]["players"] == []
+
+
+def test_update_team_players_roundtrips(admin_client):
+    _make_team(admin_client, "club_rt", "team_rt_1")
+    r = admin_client.put(
+        "/api/admin/clubs/club_rt/teams/team_rt_1",
+        json={
+            "players": [
+                {"name": "Ana García", "number": 7},
+                {"name": "Luis Pérez"},
+            ]
+        },
+    )
+    assert r.status_code == 200
+    assert r.json()["team"]["players"] == [
+        {"name": "Ana García", "number": 7},
+        {"name": "Luis Pérez", "number": None},
+    ]
+    listed = admin_client.get("/api/admin/clubs/club_rt/teams").json()["teams"][0]
+    assert listed["players"] == r.json()["team"]["players"]
+
+
+def test_update_team_omitting_players_preserves_roster(admin_client):
+    """Partial update: a PUT that doesn't resend players must not clear the
+    roster (same is-not-None merge as competitive_level)."""
+    _make_team(
+        admin_client, "club_ro", "team_ro_1",
+        players=[{"name": "Ana García", "number": 7}],
+    )
+    r = admin_client.put(
+        "/api/admin/clubs/club_ro/teams/team_ro_1",
+        json={"name": "Equipo Renombrado"},
+    )
+    assert r.status_code == 200
+    assert r.json()["team"]["players"] == [{"name": "Ana García", "number": 7}]
+
+
+def test_update_team_players_empty_list_clears(admin_client):
+    """Explicit ``players: []`` clears the roster — falsy-but-intended write."""
+    _make_team(
+        admin_client, "club_rc", "team_rc_1",
+        players=[{"name": "Ana García", "number": 7}],
+    )
+    r = admin_client.put(
+        "/api/admin/clubs/club_rc/teams/team_rc_1",
+        json={"players": []},
+    )
+    assert r.status_code == 200
+    assert r.json()["team"]["players"] == []
+
+
+def test_archive_team_preserves_roster(admin_client):
+    _make_team(
+        admin_client, "club_ra", "team_ra_1",
+        players=[{"name": "Ana García", "number": 7}],
+    )
+    admin_client.put("/api/admin/clubs/club_ra/teams/team_ra_1/archive")
+    listed = admin_client.get("/api/admin/clubs/club_ra/teams").json()["teams"][0]
+    assert listed["players"] == [{"name": "Ana García", "number": 7}]
+
+
+def test_roster_player_validation(admin_client):
+    _make_team(admin_client, "club_rv", "team_rv_1")
+    for bad in (
+        {"players": [{"name": "   "}]},          # blank after strip
+        {"players": [{"name": "Ana", "number": 100}]},  # shirt number > 99
+        {"players": [{"name": "Ana", "number": -1}]},
+    ):
+        r = admin_client.put(
+            "/api/admin/clubs/club_rv/teams/team_rv_1", json=bad
+        )
+        assert r.status_code == 422, bad
+
+
 # ─── Team archive / unarchive (business remediation B) ───────────────────────
 
 
-def _make_team(admin_client, club_id="club_arch", team_id="team_arch_1"):
+def _make_team(admin_client, club_id="club_arch", team_id="team_arch_1", **extra):
     admin_client.post("/api/admin/clubs", json={"id": club_id, "name": "Club Arch"})
     admin_client.post(
         f"/api/admin/clubs/{club_id}/teams",
-        json={"id": team_id, "club_id": club_id, "name": "Arch Team"},
+        json={"id": team_id, "club_id": club_id, "name": "Arch Team", **extra},
     )
     return club_id, team_id
 
@@ -819,6 +901,38 @@ def test_reseed_twice_is_idempotent(admin_client):
         assert r.status_code == 200
         assert r.json()["teams_written"] == 30
     assert len(org.get_registry().list_teams("club_r2")) == 30
+
+
+def test_reseed_preserves_roster(admin_client):
+    """A reseed upserts catalog teams without players in the payload — the
+    partial-write contract (exclude_unset + merge) must leave a roster the
+    director already entered untouched."""
+    admin_client.post(
+        "/api/admin/clubs/club_rs/onboard",
+        json={"club_id": "club_rs", "name": "Club RS", "slug": "rs", "season": "2026/27"},
+    )
+    r = admin_client.put(
+        "/api/admin/clubs/club_rs/teams/team_rs_senior_m",
+        json={
+            "players": [
+                {"name": "Ana García", "number": 7},
+                {"name": "Luis Pérez"},
+            ]
+        },
+    )
+    assert r.status_code == 200
+
+    r = admin_client.post("/api/admin/clubs/club_rs/teams/reseed")
+    assert r.status_code == 200
+    assert r.json()["teams_written"] == 30
+
+    from biq_onboard_server import org
+
+    team = org.get_registry().get_team("club_rs", "team_rs_senior_m")
+    assert [(p.name, p.number) for p in team.players] == [
+        ("Ana García", 7),
+        ("Luis Pérez", None),
+    ]
 
 
 def test_reseed_failure_persists_failed_job(admin_client, monkeypatch):

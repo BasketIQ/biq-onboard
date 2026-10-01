@@ -938,6 +938,73 @@
   justify-content: flex-end;
 }
 
+/* In-modal error for the edit dialog — the section-level onboard-error
+   banner would render behind the fixed overlay. */
+.onboard-modal-error {
+  margin-top: 16px;
+}
+
+/* Team edit modal — wider than the confirm dialog and scrollable on short
+   viewports so a long plantilla never pushes Guardar off-screen. */
+.onboard-modal-team {
+  max-width: 560px;
+  max-height: 90vh;
+  overflow-y: auto;
+}
+
+.onboard-modal-team .onboard-field-label {
+  display: block;
+  margin-top: 12px;
+  margin-bottom: 4px;
+}
+
+.onboard-roster {
+  margin-top: 16px;
+  border-top: 1px solid var(--biq-border, #e5e5e5);
+  padding-top: 12px;
+}
+
+.onboard-roster-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.onboard-roster-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.onboard-roster-empty {
+  margin: 4px 0;
+}
+
+.onboard-roster-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+/* The shared .onboard-input rule sets flex:1 + min-width:200px for stacked
+   forms — inside a roster row that floor would split the row in half, so
+   the name field gets all free space and the dorsal stays at ~2 chars. */
+.onboard-roster-row [data-player-name] {
+  flex: 1;
+  min-width: 0;
+}
+
+/* .onboard-input-sm sets width:auto later in the file — scope this rule to
+   the roster row so the narrow dorsal field survives the cascade. */
+.onboard-roster-row .onboard-player-num {
+  width: 56px;
+  min-width: 0;
+  flex: none;
+  text-align: center;
+}
+
 /* Mi Club Phase 4: Miembros tab */
 .onboard-invite-card {
   padding: 16px;

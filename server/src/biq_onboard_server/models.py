@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 
 
 # ─── Club ───────────────────────────────────────────────────────────────────
@@ -37,6 +37,26 @@ class ClubUpdate(BaseModel):
 # ─── Team ───────────────────────────────────────────────────────────────────
 
 
+class RosterPlayer(BaseModel):
+    """API-boundary shape for a plantilla entry (biq-core ``TeamPlayer``).
+
+    Validation lives here, not in the canonical model: ``name`` is stripped
+    and must be non-empty, ``number`` is the shirt number (0–99, optional —
+    amateur rosters do not always assign one).
+    """
+
+    name: str = Field(min_length=1, max_length=120)
+    number: int | None = Field(default=None, ge=0, le=99)
+
+    @field_validator("name")
+    @classmethod
+    def _strip_name(cls, value: str) -> str:
+        name = value.strip()
+        if not name:
+            raise ValueError("player name must not be blank")
+        return name
+
+
 class TeamCreate(BaseModel):
     id: str
     club_id: str
@@ -45,6 +65,7 @@ class TeamCreate(BaseModel):
     gender: str | None = None
     label: str | None = None
     competitive_level: str | None = None
+    players: list[RosterPlayer] | None = None
 
 
 class TeamUpdate(BaseModel):
@@ -55,6 +76,7 @@ class TeamUpdate(BaseModel):
     timezone: str | None = None
     staff_user_ids: list[str] | None = None
     competitive_level: str | None = None
+    players: list[RosterPlayer] | None = None
 
 
 # ─── User ───────────────────────────────────────────────────────────────────

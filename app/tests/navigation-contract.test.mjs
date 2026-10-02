@@ -329,3 +329,58 @@ test('§C subhead sticky offset follows shell chrome state (provider seam)', asy
     await browser.close();
   }
 });
+
+test('§C provider var --biq-shell-chrome-top wins over the measured-header fallback', async () => {
+  const browser = await chromium.launch();
+  try {
+    const page = await newPage(browser);
+    await mountAdmin(page);
+    await page.evaluate(() => {
+      // Legacy header present (would measure 64px) AND the provider's
+      // canonical var — the inherited value must win verbatim.
+      const header = document.createElement('header');
+      header.id = 'shell-header';
+      header.style.cssText = 'position:sticky;top:0;height:64px;display:block';
+      document.body.prepend(header);
+      document.body.style.setProperty('--biq-shell-chrome-top', '88px');
+      const el = document.getElementById('app');
+      el.route = 'teams?edit=team_club1_junior_f';
+    });
+    await page.waitForFunction(() =>
+      !!document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]'),
+    { timeout: 10000 });
+
+    const provided = await page.evaluate(() => {
+      const el = document.getElementById('app');
+      return getComputedStyle(el).getPropertyValue('--biq-subhead-top').trim();
+    });
+    assert.equal(provided, '88px', 'inherited provider value wins over measured header');
+
+    // Collapse: the provider publishes 0px — honored verbatim.
+    await page.evaluate(() => {
+      document.body.style.setProperty('--biq-shell-chrome-top', '0px');
+      document.body.dataset.shellChrome = 'collapsed';
+    });
+    // The data-shell-chrome MutationObserver re-syncs; give it a microtask.
+    await page.waitForTimeout(50);
+    const collapsedVar = await page.evaluate(() => {
+      const el = document.getElementById('app');
+      return getComputedStyle(el).getPropertyValue('--biq-subhead-top').trim();
+    });
+    assert.equal(collapsedVar, '0px', 'provider 0px on collapse is honored');
+
+    // Without the var, the collapse attribute alone still pins to top:0.
+    // Re-render via the route setter to force a fresh _syncSubheadTop.
+    await page.evaluate(() => {
+      document.body.style.removeProperty('--biq-shell-chrome-top');
+      document.getElementById('app').route = 'teams';
+    });
+    const collapsedAttr = await page.evaluate(() => {
+      const el = document.getElementById('app');
+      return getComputedStyle(el).getPropertyValue('--biq-subhead-top').trim();
+    });
+    assert.equal(collapsedAttr, '0px', 'attr-only collapse still yields 0px');
+  } finally {
+    await browser.close();
+  }
+});

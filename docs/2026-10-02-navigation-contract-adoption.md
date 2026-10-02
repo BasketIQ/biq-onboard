@@ -28,10 +28,11 @@
 
 `position: sticky` on `.onboard-subhead` resolves its top offset from:
 
-1. `--biq-shell-chrome-height` (published by the shell provider once
-   Developer 3's PR lands — chrome height while shown, `0` collapsed);
-2. `body[data-shell-chrome="collapsed"]` → `0px` (MutationObserver on the
-   contract attribute, read-only);
+1. `--biq-shell-chrome-top` (published by the shell provider on `body` —
+   chrome height while shown, `0` while collapsed/hidden; the inherited
+   value wins verbatim since it already carries the collapse math);
+2. `body[data-shell-chrome="collapsed"|"hidden"]` → `0px` (MutationObserver
+   on the contract attribute, read-only);
 3. measured `#shell-header` height — today's always-visible legacy shell
    header, so the subhead sits below it until the provider ships;
 4. standalone/dev fallback → `env(safe-area-inset-top)` (the only context

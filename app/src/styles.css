@@ -52,15 +52,15 @@
 
 /* ─── Section submenu (global navigation contract §C) ──────────────────
    Nested detail/editor subscreens carry one sticky orange subheader.
-   Sticky offset: the shell provider publishes --biq-shell-chrome-height
-   (chrome height while shown, 0 while collapsed). Until it lands, the
-   element measures the legacy shell header itself and sets
+   Sticky offset: the shell provider publishes --biq-shell-chrome-top on
+   body (header height while shown, 0 while collapsed/hidden). Until it
+   lands, the element measures the legacy shell header itself and sets
    --biq-subhead-top on :host; standalone falls back to the safe-area
    top inset (the only context where the module owns the viewport). */
 
 .onboard-subhead {
   position: sticky;
-  top: var(--biq-shell-chrome-height, var(--biq-subhead-top, env(safe-area-inset-top, 0px)));
+  top: var(--biq-shell-chrome-top, var(--biq-subhead-top, env(safe-area-inset-top, 0px)));
   z-index: 30;
   display: flex;
   align-items: center;

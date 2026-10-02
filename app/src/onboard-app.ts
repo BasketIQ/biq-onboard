@@ -1012,19 +1012,20 @@ class BiqOnboardApp extends HTMLElement {
   }
 
   // Global nav contract §C — the section subhead's sticky top offset.
-  // Priority: the shell provider's --biq-shell-chrome-height custom
-  // property (chrome height while shown, 0 while collapsed) >
-  // body[data-shell-chrome="collapsed"] → 0 > the measured legacy sticky
-  // header > standalone env(safe-area-inset-top) via the CSS fallback.
-  // Read-only on shell DOM — the module never manipulates shell chrome.
+  // Priority: the shell provider's --biq-shell-chrome-top custom property
+  // (chrome height while shown, 0 while collapsed/hidden — it already
+  // carries the collapsed math, so an inherited value wins verbatim) >
+  // body[data-shell-chrome="collapsed"|"hidden"] → 0 > the measured
+  // legacy sticky header > standalone env(safe-area-inset-top) via the
+  // CSS fallback. Read-only on shell DOM — never manipulates chrome.
   private _syncSubheadTop(): void {
     const provided = getComputedStyle(this)
-      .getPropertyValue('--biq-shell-chrome-height').trim();
+      .getPropertyValue('--biq-shell-chrome-top').trim();
     const chrome = document.body?.dataset.shellChrome || '';
     const header = document.getElementById('shell-header');
     if (provided) {
       this.style.setProperty('--biq-subhead-top', provided);
-    } else if (chrome === 'collapsed') {
+    } else if (chrome === 'collapsed' || chrome === 'hidden') {
       this.style.setProperty('--biq-subhead-top', '0px');
     } else if (!header || header.hidden) {
       // No visible shell header: standalone/dev keeps the device inset;

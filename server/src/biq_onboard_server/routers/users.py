@@ -234,6 +234,10 @@ def update_user(club_id: str, user_id: str, payload: UserUpdate, request: Reques
     if new_role not in ROLES:
         raise HTTPException(status_code=400, detail=f"Unknown role: {new_role}")
 
+    # Carry fields this endpoint does not edit: a generic PUT update must
+    # never implicitly reactivate a deactivated member (only the audited
+    # PATCH .../status endpoint governs status) nor unlink a bound Apple
+    # identity. Model defaults would silently reset both.
     user = User(
         id=user_id,
         club_id=club_id,
@@ -242,6 +246,10 @@ def update_user(club_id: str, user_id: str, payload: UserUpdate, request: Reques
         email=payload.email or existing.email,
         default_team_id=payload.default_team_id or existing.default_team_id,
         password_hash=existing.password_hash,
+        # Forward-compatible: absent on biq-core <0.23 (ignored by the
+        # model), carried automatically once the pinned version models it.
+        apple_sub=getattr(existing, "apple_sub", None),
+        status=existing.status,
     )
     registry.upsert_user(user)
 

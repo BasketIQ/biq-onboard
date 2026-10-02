@@ -8,19 +8,24 @@
   replacement chrome (no header/nav/footer) and no longer reserves a top
   gap for absent shell chrome (`.onboard-clubstep` `padding-top: 32px`
   removed). The flow fills the safe viewport edge to edge.
-- **§C section submenu** — team edit/Plantilla and member edit are now
-  in-page **subscreens** that replace the section Home list, headed by the
-  canonical sticky orange subheader (`.onboard-subhead`):
-  - back chevron (`data-section-back`, ≥44×44, visible focus);
-  - bold title `Club – <team name>` / `Club – <member context>`,
-    truncating safely via ellipsis.
-  - The sibling tab bar (`.onboard-nav`) is hidden while a subscreen is
-    active — the subheader is the subscreen's only navigation.
-- **Back semantics** — the section back control is wired to the same
-  deterministic close paths as the in-form buttons:
+- **§C section submenu (Product addendum 2026-10-02)** — the canonical
+  sticky orange subheader (`.onboard-subhead`) renders on **every**
+  club-selected Mi Club view, emitted once at `render()` level:
+  - titles: `Mi Club` on the landing (bare `#/onboard`, no section-back),
+    `Mi Club: Estilo` / `Mi Club: Equipos` / `Mi Club: Miembros` /
+    `Mi Club: Perfil` on the section views;
+  - editor subscreens (team edit/Plantilla, member edit) keep the bold
+    parent title (`Mi Club: Equipos` / `Mi Club: Miembros`) — the
+    team/member name rides as compact secondary context
+    (`.onboard-subhead-context`), never replacing it;
+  - the sibling tab bar (`.onboard-nav`) stays below the subheader on
+    landing/list views and is hidden on editor subscreens.
+- **Back semantics** — `_sectionBack()` resolves the destination from
+  live state:
   - team edit → `_closeEditModal()` → Equipos list; clears `?edit=` from
     the hash via `history.replaceState` (no-reopen preserved, #57);
-  - member edit → clears `_editingMemberId` → Miembros list.
+  - member edit → clears `_editingMemberId` → Miembros list;
+  - list sections → `_subRoute = ''` → Mi Club landing (`#/onboard`).
   - Neither path uses `history.back()` nor navigates to app Home (`#/`).
 - **No submenu footer** — no module-owned bottom chrome is emitted.
 
@@ -59,8 +64,10 @@ for the provider without a follow-up change.
 
 ## Tests
 
-`app/tests/navigation-contract.test.mjs` — 5 Playwright-driven tests:
-no-club zero-chrome + no reserved spacing; team-edit subhead title/color/
-sticky/back-size/back-→list + `?edit=` cleanup; Plantilla entry + roster
-focus; member-edit subhead + back → Miembros; `--biq-subhead-top` /
-`data-shell-chrome` seam.
+`app/tests/navigation-contract.test.mjs` — 7 Playwright-driven tests:
+no-club zero-chrome + no reserved spacing; team-edit subhead
+(`Mi Club: Equipos` + secondary context)/color/sticky/back-size/back→list
++ `?edit=` cleanup; Plantilla entry + roster focus; member-edit subhead +
+back → Miembros; addendum title matrix across all five views + list
+back → landing + no submenu footer; `--biq-shell-chrome-top` /
+`--biq-subhead-top` / `data-shell-chrome` seams.

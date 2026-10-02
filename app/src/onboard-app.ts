@@ -1055,15 +1055,73 @@ class BiqOnboardApp extends HTMLElement {
     return null;
   }
 
-  // Canonical orange section subheader for detail/editor subscreens.
-  // [data-section-back] is wired per section to the deterministic list
-  // route — never history.back() and never app Home (contract §C).
-  private _renderSectionSubhead(title: string, backAriaLabel: string): string {
+  // Canonical orange section subheader — present on EVERY club-selected
+  // Mi Club view (Product addendum 2026-10-02 §2), absent in no-club.
+  // `context` carries secondary identity (team/member name) on editor
+  // subscreens without replacing the bold parent title. `backAriaLabel`
+  // is null on the Mi Club landing (already at the section Home).
+  // [data-section-back] is wired centrally in render() to the
+  // deterministic list route — never history.back() and never app Home
+  // (contract §C).
+  private _renderSectionSubhead(spec: { title: string; context: string; backLabel: string | null }): string {
+    const back = spec.backLabel === null ? '' : `<button type="button" class="onboard-subhead-back" data-section-back
+        title="${escapeHtml(spec.backLabel)}" aria-label="${escapeHtml(spec.backLabel)}">${ICON_BACK}</button>`;
+    const context = spec.context ? `<span class="onboard-subhead-context">${escapeHtml(spec.context)}</span>` : '';
     return `<header class="onboard-subhead" data-section-subhead>
-      <button type="button" class="onboard-subhead-back" data-section-back
-        title="${escapeHtml(backAriaLabel)}" aria-label="${escapeHtml(backAriaLabel)}">${ICON_BACK}</button>
-      <span class="onboard-subhead-title"><strong>${escapeHtml(title)}</strong></span>
+      ${back}
+      <span class="onboard-subhead-title"><strong>${escapeHtml(spec.title)}</strong>${context}</span>
     </header>`;
+  }
+
+  // Product addendum title matrix: «Mi Club» on the landing (bare
+  // #/onboard) and «Mi Club: <section>» on Estilo/Equipos/Miembros/
+  // Perfil. Editor subscreens keep the parent title; the team/member
+  // name rides as secondary context.
+  private _subheadSpec(section: string, canManageMembers: boolean): { title: string; context: string; backLabel: string | null } {
+    const sub = this._activeSubscreen();
+    if (sub === 'team-edit') {
+      const team = this._mergedCatalog().find((t) => t.id === this._editingTeamId);
+      return { title: 'Mi Club: Equipos', context: team?.name || '', backLabel: 'Volver a Equipos' };
+    }
+    if (sub === 'member-edit') {
+      const member = (this._members || []).find((m) => m.id === this._editingMemberId);
+      return { title: 'Mi Club: Miembros', context: member?.display_name || member?.email || member?.id || '', backLabel: 'Volver a Miembros' };
+    }
+    const view = this._subRoute === '' ? 'landing'
+      : section === 'teams' ? 'teams'
+      : section === 'members' && canManageMembers ? 'members'
+      : section === 'profile' ? 'profile'
+      : 'club-details';
+    const title = {
+      landing: 'Mi Club',
+      'club-details': 'Mi Club: Estilo',
+      teams: 'Mi Club: Equipos',
+      members: 'Mi Club: Miembros',
+      profile: 'Mi Club: Perfil',
+    }[view]!;
+    return { title, context: '', backLabel: view === 'landing' ? null : 'Volver a Mi Club' };
+  }
+
+  // Section back semantics (addendum §3): editors return to their section
+  // list through the existing close paths; list views return to the Mi
+  // Club landing. Module-local + deterministic — never history.back()
+  // and never app Home («#/»).
+  private _sectionBack(): void {
+    const sub = this._activeSubscreen();
+    if (sub === 'team-edit') {
+      this._closeEditModal();
+      return;
+    }
+    if (sub === 'member-edit') {
+      this._editingMemberId = null;
+      this.render();
+      return;
+    }
+    this._subRoute = '';
+    this.render();
+    if ((window.location.hash || '') !== '#/onboard') {
+      history.replaceState(null, '', '#/onboard');
+    }
   }
 
   // F12: Mirror of _maybeStartPolling for the seeding job — same 3s initial
@@ -1579,6 +1637,7 @@ class BiqOnboardApp extends HTMLElement {
 
     this.shadow.innerHTML = `<style>${styles}</style>
       <div class="onboard-app">
+        ${this._renderSectionSubhead(this._subheadSpec(section, canManageMembers))}
         ${inSubscreen ? '' : `<nav class="onboard-nav">
           <button class="onboard-nav-item ${section === 'club-details' ? 'active' : ''}" data-nav="club-details">Estilo</button>
           <button class="onboard-nav-item ${section === 'teams' ? 'active' : ''}" data-nav="teams">Equipos</button>
@@ -1587,6 +1646,9 @@ class BiqOnboardApp extends HTMLElement {
         </nav>`}
         ${content}
       </div>`;
+    // One subhead per render — the back wiring resolves the destination
+    // from live state (editor close paths vs. list → Mi Club landing).
+    this.shadow.querySelector('[data-section-back]')?.addEventListener('click', () => this._sectionBack());
     if (section === 'teams') {
       this.wireTeamsEvents(club.id);
       this._maybeFocusRoster();
@@ -2402,7 +2464,6 @@ class BiqOnboardApp extends HTMLElement {
         <button class="onboard-icon-btn onboard-icon-btn-danger" data-remove-player="${i}" type="button" title="Quitar jugador" aria-label="Quitar jugador">${ICON_TRASH}</button>
       </div>`).join('');
     return `<section class="onboard-section onboard-subscreen" data-edit-modal aria-labelledby="edit-team-title">
-      ${this._renderSectionSubhead(`Club – ${team.name}`, 'Volver a Equipos')}
       <div class="onboard-subscreen-card">
         <h3 class="onboard-card-title" id="edit-team-title">Editar equipo</h3>
         <label class="onboard-field-label" for="edit-team-name">Nombre del equipo</label>
@@ -2599,7 +2660,6 @@ class BiqOnboardApp extends HTMLElement {
       </select>` : '';
 
     return `<section class="onboard-section onboard-subscreen" data-member-edit-screen>
-      ${this._renderSectionSubhead(`Club – ${m.display_name || m.email || m.id}`, 'Volver a Miembros')}
       <div class="onboard-subscreen-card" data-member-row="${escapeHtml(m.id)}">
         <div class="onboard-member-edit">
           ${identityFields}
@@ -2675,14 +2735,6 @@ class BiqOnboardApp extends HTMLElement {
     this.shadow.querySelector('[data-member-cancel]')?.addEventListener('click', () => {
       this._editingMemberId = null;
       this.render();
-    });
-
-    // Section-subheader back → Miembros Home (same path as Cancelar).
-    this.shadow.querySelectorAll('[data-section-back]').forEach(btn => {
-      btn.addEventListener('click', () => {
-        this._editingMemberId = null;
-        this.render();
-      });
     });
 
     this.shadow.querySelectorAll('[data-member-status]').forEach(btn => {
@@ -2975,12 +3027,6 @@ class BiqOnboardApp extends HTMLElement {
         this._closeEditModal();
       });
     }
-
-    // Section-subheader back → Equipos Home via the same close path —
-    // clears ?edit= through history.replaceState, never history.back().
-    this.shadow.querySelectorAll('[data-section-back]').forEach(btn => {
-      btn.addEventListener('click', () => this._closeEditModal());
-    });
 
     // Roster editor — add/remove re-render from the draft, so the DOM is
     // flushed into _rosterDraft first and nothing typed is lost.

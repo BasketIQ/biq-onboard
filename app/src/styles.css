@@ -50,8 +50,12 @@
   gap: var(--onboard-gap);
 }
 
-/* ─── Section submenu (global navigation contract §C) ──────────────────
-   Nested detail/editor subscreens carry one sticky orange subheader.
+/* ─── Section submenu (global navigation contract §C + Product addendum
+   2026-10-02) ──────────────────────────────────────────────────────────
+   Every club-selected Mi Club view carries one sticky orange subheader:
+   «Mi Club» on the landing, «Mi Club: <section>» on the tab/list views,
+   and the same parent title plus secondary team/member context on
+   editor subscreens. No subheader is rendered in the no-club step.
    Sticky offset: the shell provider publishes --biq-shell-chrome-top on
    body (header height while shown, 0 while collapsed/hidden). Until it
    lands, the element measures the legacy shell header itself and sets
@@ -107,6 +111,18 @@
   padding-right: 4px;
   font-size: 16px;
   font-weight: 800;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Secondary identity on editor subscreens (team/member name) — compact
+   context next to the bold «Mi Club: <section>» parent title. */
+.onboard-subhead-context {
+  font-size: 13px;
+  font-weight: 600;
+  opacity: 0.85;
+  margin-left: 6px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;

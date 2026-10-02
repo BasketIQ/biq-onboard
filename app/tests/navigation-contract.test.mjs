@@ -7,10 +7,13 @@
  *
  *   §A  no-club state emits no module-owned replacement chrome and keeps
  *       no reserved top gap for absent shell chrome;
- *   §C  team edit/Plantilla and member edit render one sticky orange
- *       section subheader titled «Club – <context>»; its back control
- *       returns to the section Home/list through the deterministic close
- *       path (clears ?edit= via replaceState) — never history.back();
+ *   §C  the orange section submenu renders on EVERY club-selected view:
+ *       «Mi Club» on the landing (no section-back), «Mi Club: <section>»
+ *       on Estilo/Equipos/Miembros/Perfil, and the same parent title plus
+ *       secondary team/member context on editor subscreens (Product
+ *       addendum 2026-10-02); its back control returns to the section
+ *       Home/list through the deterministic close path (clears ?edit=
+ *       via replaceState) — never history.back();
  *   no  submenu footer anywhere;
  *   #55/#57 deep-link, authorization fail-closed and roster focus stay
  *   intact.
@@ -124,16 +127,18 @@ const subheadState = () => {
   if (!subhead) return { present: false };
   const cs = getComputedStyle(subhead);
   const back = subhead.querySelector('[data-section-back]');
-  const r = back.getBoundingClientRect();
+  const r = back ? back.getBoundingClientRect() : null;
   return {
     present: true,
-    title: subhead.querySelector('.onboard-subhead-title').textContent.trim(),
+    title: subhead.querySelector('.onboard-subhead-title strong')?.textContent.trim(),
+    context: subhead.querySelector('.onboard-subhead-context')?.textContent.trim() || null,
     position: cs.position,
     background: cs.backgroundColor,
     color: cs.color,
-    backSize: { w: r.width, h: r.height },
-    backLabel: back.getAttribute('aria-label'),
-    usesHistoryBack: back.outerHTML.includes('history.back'),
+    hasBack: !!back,
+    backSize: r ? { w: r.width, h: r.height } : null,
+    backLabel: back ? back.getAttribute('aria-label') : null,
+    usesHistoryBack: back ? back.outerHTML.includes('history.back') : false,
   };
 };
 
@@ -178,7 +183,7 @@ test('§A no-club: no replacement chrome, no reserved top gap', async () => {
   }
 });
 
-test('§C team edit subscreen: orange sticky subhead «Club – <team>», back → list clears ?edit=', async () => {
+test('§C team edit subscreen: «Mi Club: Equipos» + secondary context, back → list clears ?edit=', async () => {
   const browser = await chromium.launch();
   try {
     const page = await newPage(browser);
@@ -195,7 +200,8 @@ test('§C team edit subscreen: orange sticky subhead «Club – <team>», back �
 
     const view = await page.evaluate(subheadState);
     assert.equal(view.present, true, 'team edit must render the section subheader');
-    assert.equal(view.title, 'Club – Junior Femenino');
+    assert.equal(view.title, 'Mi Club: Equipos', 'editor keeps the bold parent title');
+    assert.equal(view.context, 'Junior Femenino', 'team name is secondary context only');
     assert.equal(view.position, 'sticky');
     assert.equal(view.background, 'rgb(255, 90, 0)', 'subhead must be brand orange (#FF5A00)');
     assert.ok(view.backSize.w >= 44 && view.backSize.h >= 44,
@@ -216,10 +222,11 @@ test('§C team edit subscreen: orange sticky subhead «Club – <team>», back �
     const after = await page.evaluate(() => ({
       hash: location.hash,
       modal: !!document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]'),
-      subhead: !!document.getElementById('app').shadowRoot.querySelector('[data-section-subhead]'),
+      title: document.getElementById('app').shadowRoot
+        .querySelector('.onboard-subhead-title strong')?.textContent.trim(),
     }));
     assert.equal(after.modal, false);
-    assert.equal(after.subhead, false, 'subheader only exists inside subscreens');
+    assert.equal(after.title, 'Mi Club: Equipos', 'Equipos list keeps the parent section title');
     assert.equal(after.hash, '#/onboard/teams', 'back clears ?edit= and stays on the section Home');
     assert.ok(!after.hash.includes('edit='), 'no ?edit= survives the back navigation');
   } finally {
@@ -245,19 +252,21 @@ test('§C Plantilla entry lands on the same subscreen with roster focus', async 
     const view = await page.evaluate(() => {
       const sr = document.getElementById('app').shadowRoot;
       return {
-        title: sr.querySelector('.onboard-subhead-title').textContent.trim(),
+        title: sr.querySelector('.onboard-subhead-title strong')?.textContent.trim(),
+        context: sr.querySelector('.onboard-subhead-context')?.textContent.trim() || null,
         rosterFocus: sr.activeElement?.hasAttribute('data-player-name')
           || sr.activeElement?.hasAttribute('data-add-player'),
       };
     });
-    assert.equal(view.title, 'Club – Junior Femenino');
+    assert.equal(view.title, 'Mi Club: Equipos');
+    assert.equal(view.context, 'Junior Femenino', 'team identity stays secondary context');
     assert.equal(view.rosterFocus, true, 'Plantilla must land focus on the roster editor');
   } finally {
     await browser.close();
   }
 });
 
-test('§C member edit subscreen: «Club – <member>», back → Miembros Home', async () => {
+test('§C member edit subscreen: «Mi Club: Miembros» + member context, back → Miembros Home', async () => {
   const browser = await chromium.launch();
   try {
     const page = await newPage(browser);
@@ -273,7 +282,8 @@ test('§C member edit subscreen: «Club – <member>», back → Miembros Home',
       !!document.getElementById('app').shadowRoot.querySelector('[data-member-edit-screen]'),
     { timeout: 5000 });
     const view = await page.evaluate(subheadState);
-    assert.equal(view.title, 'Club – Ana Pérez');
+    assert.equal(view.title, 'Mi Club: Miembros', 'editor keeps the bold parent title');
+    assert.equal(view.context, 'Ana Pérez', 'member name is secondary context only');
     assert.equal(view.backLabel, 'Volver a Miembros');
     assert.equal(view.position, 'sticky');
     assert.equal(view.background, 'rgb(255, 90, 0)');
@@ -286,9 +296,64 @@ test('§C member edit subscreen: «Club – <member>», back → Miembros Home',
     const after = await page.evaluate(() => ({
       hash: location.hash,
       editor: !!document.getElementById('app').shadowRoot.querySelector('[data-edit-name]'),
+      title: document.getElementById('app').shadowRoot
+        .querySelector('.onboard-subhead-title strong')?.textContent.trim(),
     }));
     assert.equal(after.editor, false, 'member editor closed');
+    assert.equal(after.title, 'Mi Club: Miembros', 'Miembros list keeps the parent section title');
     assert.ok(!after.hash.startsWith('#/'), 'section back never navigates to app Home route');
+  } finally {
+    await browser.close();
+  }
+});
+
+test('addendum §2/§3: submenu title matrix on every club-selected view; list back → landing', async () => {
+  const browser = await chromium.launch();
+  try {
+    const page = await newPage(browser);
+    await mountAdmin(page);
+
+    // Mi Club landing (bare #/onboard): «Mi Club», no section-back.
+    const landing = await page.evaluate(subheadState);
+    assert.equal(landing.present, true, 'landing renders the section submenu');
+    assert.equal(landing.title, 'Mi Club');
+    assert.equal(landing.hasBack, false, 'landing has no section-back — it IS the section Home');
+    assert.equal(landing.context, null);
+
+    // Section lists: exact titles + «Volver a Mi Club» → landing.
+    for (const [route, title, marker] of [
+      ['club-details', 'Mi Club: Estilo', '.onboard-card'],
+      ['teams', 'Mi Club: Equipos', '.onboard-team-list'],
+      ['members', 'Mi Club: Miembros', '[data-member-row]'],
+      ['profile', 'Mi Club: Perfil', '.onboard-profile-card'],
+    ]) {
+      await page.evaluate((r) => { document.getElementById('app').route = r; }, route);
+      await page.waitForFunction((sel) =>
+        !!document.getElementById('app').shadowRoot.querySelector(sel),
+      marker, { timeout: 10000 });
+      const view = await page.evaluate(subheadState);
+      assert.equal(view.title, title, `${route} carries «${title}»`);
+      assert.equal(view.hasBack, true, `${route} list offers section-back to landing`);
+      assert.equal(view.backLabel, 'Volver a Mi Club');
+      assert.equal(view.context, null);
+      // Section back returns to the Mi Club landing, not app Home.
+      await page.evaluate(() =>
+        document.getElementById('app').shadowRoot.querySelector('[data-section-back]').click());
+      await page.waitForFunction(() =>
+        document.getElementById('app').shadowRoot
+          .querySelector('.onboard-subhead-title strong')?.textContent.trim() === 'Mi Club',
+      { timeout: 5000 });
+      const back = await page.evaluate(() => ({
+        hash: location.hash,
+        historyBack: false,
+      }));
+      assert.equal(back.hash, '#/onboard', `${route} back lands on the Mi Club landing`);
+    }
+
+    // No submenu footer anywhere.
+    const footer = await page.evaluate(() =>
+      !!document.getElementById('app').shadowRoot.querySelector('footer, [class*="footer"]'));
+    assert.equal(footer, false, 'no submenu footer on any Mi Club view');
   } finally {
     await browser.close();
   }

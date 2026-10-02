@@ -195,6 +195,7 @@ const ICON_CHECK = '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><pat
 const ICON_CANCEL = '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>';
 // Plantilla — roster icon (two person silhouettes)
 const ICON_USERS = '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="9" cy="8" r="3.2" stroke="currentColor" stroke-width="1.9"/><path d="M3.5 19.5c.6-3.2 2.9-5 5.5-5s4.9 1.8 5.5 5" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/><circle cx="16.5" cy="9" r="2.4" stroke="currentColor" stroke-width="1.7"/><path d="M16 14.7c2.4.2 4 1.7 4.5 4.3" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>';
+const ICON_BACK = '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M15 18l-6-6 6-6" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 
 // ─── Helpers ────────────────────────────────────────────────────────────
 
@@ -430,6 +431,9 @@ class BiqOnboardApp extends HTMLElement {
   private _clubSummaryLoading = false;
   private _clubSummaryError: string | null = null;
   private _clubSummaryClubId: string | null = null;
+  // Watches body[data-shell-chrome] (global nav contract §2) so the section
+  // subhead's sticky offset follows the shell chrome's shown/collapsed state.
+  private _shellChromeObserver: MutationObserver | null = null;
 
   constructor() {
     super();
@@ -1007,6 +1011,119 @@ class BiqOnboardApp extends HTMLElement {
     target?.focus();
   }
 
+  // Global nav contract §C — the section subhead's sticky top offset.
+  // Priority: the shell provider's --biq-shell-chrome-top custom property
+  // (chrome height while shown, 0 while collapsed/hidden — it already
+  // carries the collapsed math, so an inherited value wins verbatim) >
+  // body[data-shell-chrome="collapsed"|"hidden"] → 0 > the measured
+  // legacy sticky header > standalone env(safe-area-inset-top) via the
+  // CSS fallback. Read-only on shell DOM — never manipulates chrome.
+  private _syncSubheadTop(): void {
+    const provided = getComputedStyle(this)
+      .getPropertyValue('--biq-shell-chrome-top').trim();
+    const chrome = document.body?.dataset.shellChrome || '';
+    const header = document.getElementById('shell-header');
+    if (provided) {
+      this.style.setProperty('--biq-subhead-top', provided);
+    } else if (chrome === 'collapsed' || chrome === 'hidden') {
+      this.style.setProperty('--biq-subhead-top', '0px');
+    } else if (!header || header.hidden) {
+      // No visible shell header: standalone/dev keeps the device inset;
+      // embedded chrome-free states (no-club) pin to the viewport top.
+      this.style.setProperty('--biq-subhead-top', !header && !chrome
+        ? 'env(safe-area-inset-top, 0px)'
+        : '0px');
+    } else {
+      this.style.setProperty('--biq-subhead-top',
+        `${Math.ceil(header.getBoundingClientRect().height)}px`);
+    }
+  }
+
+  // Which detail/editor subscreen (if any) is currently paintable. Single
+  // fail-closed resolver shared by render() and the section renderers —
+  // unresolved ids or unauthorized roles never produce a subscreen.
+  private _activeSubscreen(): 'team-edit' | 'member-edit' | null {
+    if (this._subRoute === 'teams' && this._canManageTeams() && this._editingTeamId
+        && this._mergedCatalog().some((t) => t.id === this._editingTeamId)) {
+      return 'team-edit';
+    }
+    if (this._subRoute === 'members' && this._canManageMembers() && this._editingMemberId
+        && (this._members || []).some(
+          (m) => m.id === this._editingMemberId && this._memberCanEdit(m))) {
+      return 'member-edit';
+    }
+    return null;
+  }
+
+  // Canonical orange section subheader — present on EVERY club-selected
+  // Mi Club view (Product addendum 2026-10-02 §2), absent in no-club.
+  // `context` carries secondary identity (team/member name) on editor
+  // subscreens without replacing the bold parent title. `backAriaLabel`
+  // is null on the Mi Club landing (already at the section Home).
+  // [data-section-back] is wired centrally in render() to the
+  // deterministic list route — never history.back() and never app Home
+  // (contract §C).
+  private _renderSectionSubhead(spec: { title: string; context: string; backLabel: string | null }): string {
+    const back = spec.backLabel === null ? '' : `<button type="button" class="onboard-subhead-back" data-section-back
+        title="${escapeHtml(spec.backLabel)}" aria-label="${escapeHtml(spec.backLabel)}">${ICON_BACK}</button>`;
+    const context = spec.context ? `<span class="onboard-subhead-context">${escapeHtml(spec.context)}</span>` : '';
+    return `<header class="onboard-subhead" data-section-subhead>
+      ${back}
+      <span class="onboard-subhead-title"><strong>${escapeHtml(spec.title)}</strong>${context}</span>
+    </header>`;
+  }
+
+  // Product addendum title matrix: «Mi Club» on the landing (bare
+  // #/onboard) and «Mi Club: <section>» on Estilo/Equipos/Miembros/
+  // Perfil. Editor subscreens keep the parent title; the team/member
+  // name rides as secondary context.
+  private _subheadSpec(section: string, canManageMembers: boolean): { title: string; context: string; backLabel: string | null } {
+    const sub = this._activeSubscreen();
+    if (sub === 'team-edit') {
+      const team = this._mergedCatalog().find((t) => t.id === this._editingTeamId);
+      return { title: 'Mi Club: Equipos', context: team?.name || '', backLabel: 'Volver a Equipos' };
+    }
+    if (sub === 'member-edit') {
+      const member = (this._members || []).find((m) => m.id === this._editingMemberId);
+      return { title: 'Mi Club: Miembros', context: member?.display_name || member?.email || member?.id || '', backLabel: 'Volver a Miembros' };
+    }
+    const view = this._subRoute === '' ? 'landing'
+      : section === 'teams' ? 'teams'
+      : section === 'members' && canManageMembers ? 'members'
+      : section === 'profile' ? 'profile'
+      : 'club-details';
+    const title = {
+      landing: 'Mi Club',
+      'club-details': 'Mi Club: Estilo',
+      teams: 'Mi Club: Equipos',
+      members: 'Mi Club: Miembros',
+      profile: 'Mi Club: Perfil',
+    }[view]!;
+    return { title, context: '', backLabel: view === 'landing' ? null : 'Volver a Mi Club' };
+  }
+
+  // Section back semantics (addendum §3): editors return to their section
+  // list through the existing close paths; list views return to the Mi
+  // Club landing. Module-local + deterministic — never history.back()
+  // and never app Home («#/»).
+  private _sectionBack(): void {
+    const sub = this._activeSubscreen();
+    if (sub === 'team-edit') {
+      this._closeEditModal();
+      return;
+    }
+    if (sub === 'member-edit') {
+      this._editingMemberId = null;
+      this.render();
+      return;
+    }
+    this._subRoute = '';
+    this.render();
+    if ((window.location.hash || '') !== '#/onboard') {
+      history.replaceState(null, '', '#/onboard');
+    }
+  }
+
   // F12: Mirror of _maybeStartPolling for the seeding job — same 3s initial
   // backoff, ×1.5 bounded at 30s, and the same staleness threshold.
   private _maybeStartSeedingPolling(clubId: string): void {
@@ -1147,6 +1264,10 @@ class BiqOnboardApp extends HTMLElement {
       document.removeEventListener('visibilitychange', this._visibilityHandler);
       this._visibilityHandler = null;
     }
+    if (this._shellChromeObserver) {
+      this._shellChromeObserver.disconnect();
+      this._shellChromeObserver = null;
+    }
   }
 
   connectedCallback(): void {
@@ -1177,6 +1298,15 @@ class BiqOnboardApp extends HTMLElement {
       }
     };
     document.addEventListener('visibilitychange', this._visibilityHandler);
+    // Global nav contract §2 — follow the shell provider's chrome state so
+    // the section subhead stays below the header while shown and pins to
+    // the viewport top once chrome collapses (read-only observation).
+    if (!this._shellChromeObserver && document.body) {
+      this._shellChromeObserver = new MutationObserver(() => this._syncSubheadTop());
+      this._shellChromeObserver.observe(document.body, {
+        attributes: true, attributeFilter: ['data-shell-chrome'],
+      });
+    }
   }
 
   private async _pollTheme(clubId: string): Promise<void> {
@@ -1491,6 +1621,9 @@ class BiqOnboardApp extends HTMLElement {
     // Route determines which view to show
     const section = this._subRoute || 'club-details';
     const canManageMembers = ADMIN_ROLES.includes(this._org?.role || '');
+    // Detail/editor subscreens replace the section nav with the sticky
+    // orange subheader (contract §C) — the sibling tab bar must not show.
+    const inSubscreen = this._activeSubscreen() !== null;
     let content = '';
     if (section === 'profile') {
       content = this.renderProfile();
@@ -1504,14 +1637,18 @@ class BiqOnboardApp extends HTMLElement {
 
     this.shadow.innerHTML = `<style>${styles}</style>
       <div class="onboard-app">
-        <nav class="onboard-nav">
+        ${this._renderSectionSubhead(this._subheadSpec(section, canManageMembers))}
+        ${inSubscreen ? '' : `<nav class="onboard-nav">
           <button class="onboard-nav-item ${section === 'club-details' ? 'active' : ''}" data-nav="club-details">Estilo</button>
           <button class="onboard-nav-item ${section === 'teams' ? 'active' : ''}" data-nav="teams">Equipos</button>
           ${canManageMembers ? `<button class="onboard-nav-item ${section === 'members' ? 'active' : ''}" data-nav="members">Miembros</button>` : ''}
           <button class="onboard-nav-item ${section === 'profile' ? 'active' : ''}" data-nav="profile">Perfil</button>
-        </nav>
+        </nav>`}
         ${content}
       </div>`;
+    // One subhead per render — the back wiring resolves the destination
+    // from live state (editor close paths vs. list → Mi Club landing).
+    this.shadow.querySelector('[data-section-back]')?.addEventListener('click', () => this._sectionBack());
     if (section === 'teams') {
       this.wireTeamsEvents(club.id);
       this._maybeFocusRoster();
@@ -1520,6 +1657,7 @@ class BiqOnboardApp extends HTMLElement {
     } else {
       this.wireEvents(club.id);
     }
+    this._syncSubheadTop();
   }
 
   private renderClubDetails(club: { id: string; name?: string; website?: string }): string {
@@ -2113,6 +2251,12 @@ class BiqOnboardApp extends HTMLElement {
   private renderTeamsTab(): string {
     const canPick = this._canPickTeams();
     const canManage = this._canManageTeams();
+    // Section subscreen (global nav contract §C): the editor replaces the
+    // Equipos list. Resolution stays fail-closed in _activeSubscreen.
+    if (this._activeSubscreen() === 'team-edit') {
+      const editing = this._mergedCatalog().find((t) => t.id === this._editingTeamId)!;
+      return this._renderTeamEditScreen(editing);
+    }
     const myTeamsBlock = this._renderMyTeamsBlock(canPick);
 
     // Team-seeding job states — pending shows "generating", failed (or a
@@ -2272,41 +2416,6 @@ class BiqOnboardApp extends HTMLElement {
       </div>`;
     }).join('');
 
-    // Team edit modal (management only): name + competition level + plantilla.
-    // Values render from the draft state — input events keep the draft in
-    // sync, so re-renders from add/remove-player never lose typed text.
-    const editModal = canManage && this._editingTeamId ? (() => {
-      const team = this._mergedCatalog().find((t) => t.id === this._editingTeamId);
-      if (!team) return '';
-      const rosterRows = this._rosterDraft.map((p, i) => `
-        <div class="onboard-roster-row" data-roster-row>
-          <input type="text" class="onboard-input onboard-input-sm" data-player-name="${i}" placeholder="Nombre y apellidos" aria-label="Nombre y apellidos del jugador" value="${escapeHtml(p.name)}" />
-          <input type="text" class="onboard-input onboard-input-sm onboard-player-num" data-player-number="${i}" placeholder="Nº" aria-label="Dorsal" inputmode="numeric" maxlength="2" value="${escapeHtml(p.number)}" />
-          <button class="onboard-icon-btn onboard-icon-btn-danger" data-remove-player="${i}" type="button" title="Quitar jugador" aria-label="Quitar jugador">${ICON_TRASH}</button>
-        </div>`).join('');
-      return `<div class="onboard-modal-overlay" role="dialog" aria-modal="true" aria-labelledby="edit-team-modal-title" data-edit-modal>
-        <div class="onboard-modal onboard-modal-team">
-          <h3 id="edit-team-modal-title">Editar equipo</h3>
-          <label class="onboard-field-label" for="edit-team-name">Nombre del equipo</label>
-          <input id="edit-team-name" type="text" class="onboard-input" data-edit-team-name value="${escapeHtml(this._editNameDraft)}" />
-          <label class="onboard-field-label" for="edit-team-level">Nivel de competición</label>
-          <select id="edit-team-level" class="onboard-input" data-edit-team-level>${competitiveLevelOptionsHtml(this._editLevelDraft)}</select>
-          <div class="onboard-roster">
-            <div class="onboard-roster-head">
-              <h4 class="onboard-roster-title">Plantilla</h4>
-              <button class="onboard-linkbtn" data-add-player type="button">+ Añadir jugador</button>
-            </div>
-            ${rosterRows || '<p class="onboard-card-desc onboard-roster-empty">Sin jugadores todavía — añade el primero con «Añadir jugador».</p>'}
-          </div>
-          ${this._editError ? `<div class="onboard-error onboard-modal-error" role="alert">${escapeHtml(this._editError)}</div>` : ''}
-          <div class="onboard-team-actions">
-            <button class="onboard-btn onboard-btn-primary" data-save-team="${escapeHtml(team.id)}" type="button">Guardar</button>
-            <button class="onboard-btn onboard-btn-secondary" data-cancel-edit type="button">Cancelar</button>
-          </div>
-        </div>
-      </div>`;
-    })() : '';
-
     // Delete confirmation modal (management only)
     const deleteModal = canManage && this._deleteConfirmTeamId ? (() => {
       const team = this._mergedCatalog().find(t => t.id === this._deleteConfirmTeamId);
@@ -2339,8 +2448,41 @@ class BiqOnboardApp extends HTMLElement {
       ${seedingBanner}
       ${this._teamsError ? `<div class="onboard-error" role="alert">${escapeHtml(this._teamsError)}</div>` : ''}
       ${sections || '<p class="onboard-card-desc">No hay equipos.</p>'}
-      ${editModal}
       ${deleteModal}
+    </section>`;
+  }
+
+  // Team edit/Plantilla subscreen (global nav contract §C): replaces the
+  // Equipos list, carries the sticky orange section subheader titled
+  // «Club – <team name>», and keeps the full draft/focus contract of the
+  // previous modal (data-edit-modal keeps _maybeFocusRoster's anchor).
+  private _renderTeamEditScreen(team: TeamRow): string {
+    const rosterRows = this._rosterDraft.map((p, i) => `
+      <div class="onboard-roster-row" data-roster-row>
+        <input type="text" class="onboard-input onboard-input-sm" data-player-name="${i}" placeholder="Nombre y apellidos" aria-label="Nombre y apellidos del jugador" value="${escapeHtml(p.name)}" />
+        <input type="text" class="onboard-input onboard-input-sm onboard-player-num" data-player-number="${i}" placeholder="Nº" aria-label="Dorsal" inputmode="numeric" maxlength="2" value="${escapeHtml(p.number)}" />
+        <button class="onboard-icon-btn onboard-icon-btn-danger" data-remove-player="${i}" type="button" title="Quitar jugador" aria-label="Quitar jugador">${ICON_TRASH}</button>
+      </div>`).join('');
+    return `<section class="onboard-section onboard-subscreen" data-edit-modal aria-labelledby="edit-team-title">
+      <div class="onboard-subscreen-card">
+        <h3 class="onboard-card-title" id="edit-team-title">Editar equipo</h3>
+        <label class="onboard-field-label" for="edit-team-name">Nombre del equipo</label>
+        <input id="edit-team-name" type="text" class="onboard-input" data-edit-team-name value="${escapeHtml(this._editNameDraft)}" />
+        <label class="onboard-field-label" for="edit-team-level">Nivel de competición</label>
+        <select id="edit-team-level" class="onboard-input" data-edit-team-level>${competitiveLevelOptionsHtml(this._editLevelDraft)}</select>
+        <div class="onboard-roster">
+          <div class="onboard-roster-head">
+            <h4 class="onboard-roster-title">Plantilla</h4>
+            <button class="onboard-linkbtn" data-add-player type="button">+ Añadir jugador</button>
+          </div>
+          ${rosterRows || '<p class="onboard-card-desc onboard-roster-empty">Sin jugadores todavía — añade el primero con «Añadir jugador».</p>'}
+        </div>
+        ${this._editError ? `<div class="onboard-error onboard-modal-error" role="alert">${escapeHtml(this._editError)}</div>` : ''}
+        <div class="onboard-team-actions">
+          <button class="onboard-btn onboard-btn-primary" data-save-team="${escapeHtml(team.id)}" type="button">Guardar</button>
+          <button class="onboard-btn onboard-btn-secondary" data-cancel-edit type="button">Cancelar</button>
+        </div>
+      </div>
     </section>`;
   }
 
@@ -2418,6 +2560,13 @@ class BiqOnboardApp extends HTMLElement {
     const isAdminTier = myRole === 'administrator' || myRole === 'super_administrator';
     const roleOptions = this._memberAssignableRoles();
 
+    // Section subscreen (global nav contract §C): member editing replaces
+    // the Miembros list. Resolution stays fail-closed in _activeSubscreen.
+    if (this._activeSubscreen() === 'member-edit') {
+      const editingMember = members.find((m) => m.id === this._editingMemberId)!;
+      return this._renderMemberEditScreen(editingMember, isAdminTier, roleOptions);
+    }
+
     let body: string;
     if (this._membersError) {
       body = `<p class="onboard-error" data-members-error>No se pudo cargar la lista de miembros (${escapeHtml(this._membersError)}).</p><button class="onboard-btn onboard-btn-sm" data-members-retry type="button">Reintentar</button>`;
@@ -2428,7 +2577,7 @@ class BiqOnboardApp extends HTMLElement {
     } else if (members.length === 0) {
       body = '<p class="onboard-muted">Aún no hay miembros en este club.</p>';
     } else {
-      body = `<div class="onboard-member-list">${members.map((m) => this._renderMemberRow(m, isAdminTier, roleOptions)).join('')}</div>`;
+      body = `<div class="onboard-member-list">${members.map((m) => this._renderMemberRow(m, isAdminTier)).join('')}</div>`;
     }
 
     return `<section class="onboard-section" data-testid="members-tab">
@@ -2448,43 +2597,44 @@ class BiqOnboardApp extends HTMLElement {
     </section>`;
   }
 
-  private _renderMemberRow(m: MemberRow, isAdminTier: boolean, roleOptions: string[]): string {
+  private _renderMemberRow(m: MemberRow, isAdminTier: boolean): string {
     const deactivated = m.status === 'deactivated';
     const canEdit = this._memberCanEdit(m);
-    // Edit mode also requires the CURRENT role to permit editing this member —
-    // a stale _editingMemberId must never paint controls from an older tier.
-    const editing = canEdit && this._editingMemberId === m.id;
     const secondary = (m.roles || []).filter((r) => r !== m.role);
     const roleBadges = [m.role, ...secondary]
       .map((r) => `<span class="onboard-role-badge">${escapeHtml(ROLE_LABELS[r] || r)}</span>`)
       .join('');
 
-    if (!editing) {
-      const statusBadge = deactivated
-        ? '<span class="onboard-status-badge off">Desactivado</span>' : '';
-      const actions = canEdit ? `
-        <button class="onboard-btn onboard-btn-sm" data-member-edit="${escapeHtml(m.id)}">Editar</button>
-        <button class="onboard-btn onboard-btn-sm" data-member-status="${escapeHtml(m.id)}"
-          data-status="${deactivated ? 'active' : 'deactivated'}">
-          ${deactivated ? 'Reactivar' : 'Desactivar'}</button>
-        ${isAdminTier ? (this._deleteConfirmUserId === m.id
-          ? `<button class="onboard-btn onboard-btn-sm onboard-btn-danger" data-member-delete="${escapeHtml(m.id)}">Confirmar</button>`
-          : `<button class="onboard-btn onboard-btn-sm onboard-btn-danger" data-member-delete="${escapeHtml(m.id)}">Eliminar</button>`)
-        : ''}` : '';
-      return `<div class="onboard-member-row${deactivated ? ' off' : ''}" data-member-row="${escapeHtml(m.id)}">
-        <div class="onboard-member-line1">
-          <span class="onboard-member-name">${escapeHtml(m.display_name || m.email || m.id)}</span>
-          ${statusBadge}
-        </div>
-        <div class="onboard-member-line2">
-          <span class="onboard-member-email">${escapeHtml(m.email || '')}</span>
-          <span class="onboard-member-roles">${roleBadges}</span>
-          <span class="onboard-member-actions">${actions}</span>
-        </div>
-      </div>`;
-    }
+    const statusBadge = deactivated
+      ? '<span class="onboard-status-badge off">Desactivado</span>' : '';
+    const actions = canEdit ? `
+      <button class="onboard-btn onboard-btn-sm" data-member-edit="${escapeHtml(m.id)}">Editar</button>
+      <button class="onboard-btn onboard-btn-sm" data-member-status="${escapeHtml(m.id)}"
+        data-status="${deactivated ? 'active' : 'deactivated'}">
+        ${deactivated ? 'Reactivar' : 'Desactivar'}</button>
+      ${isAdminTier ? (this._deleteConfirmUserId === m.id
+        ? `<button class="onboard-btn onboard-btn-sm onboard-btn-danger" data-member-delete="${escapeHtml(m.id)}">Confirmar</button>`
+        : `<button class="onboard-btn onboard-btn-sm onboard-btn-danger" data-member-delete="${escapeHtml(m.id)}">Eliminar</button>`)
+      : ''}` : '';
+    return `<div class="onboard-member-row${deactivated ? ' off' : ''}" data-member-row="${escapeHtml(m.id)}">
+      <div class="onboard-member-line1">
+        <span class="onboard-member-name">${escapeHtml(m.display_name || m.email || m.id)}</span>
+        ${statusBadge}
+      </div>
+      <div class="onboard-member-line2">
+        <span class="onboard-member-email">${escapeHtml(m.email || '')}</span>
+        <span class="onboard-member-roles">${roleBadges}</span>
+        <span class="onboard-member-actions">${actions}</span>
+      </div>
+    </div>`;
+  }
 
-    // Edit mode: identity fields are admin-only; role chips for everyone who
+  // Member detail/editing subscreen (global nav contract §C): the sticky
+  // orange subheader carries «Club – <member context>»; back resolves to
+  // the Miembros list — never history.back(), never app Home.
+  private _renderMemberEditScreen(m: MemberRow, isAdminTier: boolean, roleOptions: string[]): string {
+    const secondary = (m.roles || []).filter((r) => r !== m.role);
+    // Identity fields are admin-only; role chips for everyone who
     // passed _memberCanEdit.
     const identityFields = isAdminTier ? `
       <input class="onboard-input" data-edit-name="${escapeHtml(m.id)}"
@@ -2502,24 +2652,26 @@ class BiqOnboardApp extends HTMLElement {
         <button class="onboard-chip-x" data-member-role-remove="${escapeHtml(m.id)}" data-role="${escapeHtml(r)}"
           title="Quitar rol">×</button>
       </span>`).join('');
-    const addable = roleOptions.filter((r) => r !== m.role && !secondary.includes(r));
-    const addSelect = addable.length ? `
+    const addableRoles = roleOptions.filter((r) => r !== m.role && !secondary.includes(r));
+    const addSelect = addableRoles.length ? `
       <select class="onboard-input onboard-input-sm" data-member-role-add="${escapeHtml(m.id)}">
         <option value="">Añadir rol…</option>
-        ${addable.map((r) => `<option value="${r}">${escapeHtml(ROLE_LABELS[r] || r)}</option>`).join('')}
+        ${addableRoles.map((r) => `<option value="${r}">${escapeHtml(ROLE_LABELS[r] || r)}</option>`).join('')}
       </select>` : '';
 
-    return `<div class="onboard-member-row editing" data-member-row="${escapeHtml(m.id)}">
-      <div class="onboard-member-edit">
-        ${identityFields}
-        ${primarySelect}
-        <div class="onboard-member-roles-edit">${secondaryChips}${addSelect}</div>
-        <div class="onboard-member-edit-actions">
-          <button class="onboard-btn onboard-btn-sm onboard-btn-primary" data-member-save="${escapeHtml(m.id)}">Guardar</button>
-          <button class="onboard-btn onboard-btn-sm" data-member-cancel>Cancelar</button>
+    return `<section class="onboard-section onboard-subscreen" data-member-edit-screen>
+      <div class="onboard-subscreen-card" data-member-row="${escapeHtml(m.id)}">
+        <div class="onboard-member-edit">
+          ${identityFields}
+          ${primarySelect}
+          <div class="onboard-member-roles-edit">${secondaryChips}${addSelect}</div>
+          <div class="onboard-member-edit-actions">
+            <button class="onboard-btn onboard-btn-sm onboard-btn-primary" data-member-save="${escapeHtml(m.id)}">Guardar</button>
+            <button class="onboard-btn onboard-btn-sm" data-member-cancel>Cancelar</button>
+          </div>
         </div>
       </div>
-    </div>`;
+    </section>`;
   }
 
   private wireMembersEvents(clubId: string): void {

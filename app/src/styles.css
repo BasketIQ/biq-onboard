@@ -50,6 +50,94 @@
   gap: var(--onboard-gap);
 }
 
+/* ─── Section submenu (global navigation contract §C + Product addendum
+   2026-10-02) ──────────────────────────────────────────────────────────
+   Every club-selected Mi Club view carries one sticky orange subheader:
+   «Mi Club» on the landing, «Mi Club: <section>» on the tab/list views,
+   and the same parent title plus secondary team/member context on
+   editor subscreens. No subheader is rendered in the no-club step.
+   Sticky offset: the shell provider publishes --biq-shell-chrome-top on
+   body (header height while shown, 0 while collapsed/hidden). Until it
+   lands, the element measures the legacy shell header itself and sets
+   --biq-subhead-top on :host; standalone falls back to the safe-area
+   top inset (the only context where the module owns the viewport). */
+
+.onboard-subhead {
+  position: sticky;
+  top: var(--biq-shell-chrome-top, var(--biq-subhead-top, env(safe-area-inset-top, 0px)));
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 52px;
+  /* Bleed across the app column padding so the bar spans the module. */
+  margin: -16px -16px 0;
+  padding: 4px 12px;
+  background: var(--biq-color-action-primary, var(--biq-orange, #FF5A00));
+  color: var(--biq-color-on-action-primary, var(--biq-on-orange, #FFFFFF));
+}
+
+.onboard-subhead-back {
+  flex: 0 0 auto;
+  width: 44px;
+  height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.onboard-subhead-back:hover {
+  background: rgba(255, 255, 255, 0.18);
+}
+
+.onboard-subhead-back:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: -3px;
+}
+
+.onboard-subhead-back svg {
+  width: 22px;
+  height: 22px;
+}
+
+.onboard-subhead-title {
+  flex: 1;
+  min-width: 0;
+  padding-right: 4px;
+  font-size: 16px;
+  font-weight: 800;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Secondary identity on editor subscreens (team/member name) — compact
+   context next to the bold «Mi Club: <section>» parent title. */
+.onboard-subhead-context {
+  font-size: 13px;
+  font-weight: 600;
+  opacity: 0.85;
+  margin-left: 6px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.onboard-subscreen-card {
+  background: var(--biq-surface-1);
+  border: 1px solid var(--biq-line);
+  border-radius: var(--onboard-radius);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--onboard-gap);
+}
+
 .onboard-section-title {
   margin: 0;
   font-size: 22px;
@@ -504,7 +592,8 @@
 
 .onboard-clubstep {
   gap: 20px;
-  padding-top: 32px;
+  /* Global nav contract §A — authenticated no-club owns the viewport: no
+     reserved top gap for shell chrome that must not exist in this state. */
 }
 
 .onboard-step-head {
@@ -944,18 +1033,11 @@
   margin-top: 16px;
 }
 
-/* Team edit modal — wider than the confirm dialog and scrollable on short
-   viewports so a long plantilla never pushes Guardar off-screen. */
-.onboard-modal-team {
-  max-width: 560px;
-  max-height: 90vh;
-  overflow-y: auto;
-}
-
-.onboard-modal-team .onboard-field-label {
+/* Section-subscreen field labels pair tightly with their control inside
+   the card's 16px flex rhythm. */
+.onboard-subscreen-card .onboard-field-label {
   display: block;
-  margin-top: 12px;
-  margin-bottom: 4px;
+  margin-bottom: -10px;
 }
 
 .onboard-roster {

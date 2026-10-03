@@ -173,6 +173,102 @@ def test_status_idempotent_noop(app_and_client):
     assert after == before
 
 
+def test_update_preserves_deactivated_status(app_and_client):
+    """Regression: a generic PUT user update on a deactivated member must
+    never implicitly reactivate — only the audited PATCH status endpoint
+    may change status (2026-09-30 A3 follow-up)."""
+    _, client = app_and_client
+    _create_club(client, "club_p4l")
+    _create_member(client, "club_p4l", "m1", role="coach")
+    client.patch("/api/admin/clubs/club_p4l/users/m1/status",
+                 json={"status": "deactivated"})
+    reg = org.get_registry()
+    assert reg.get_user("m1").status == "deactivated"
+
+    # Authorized admin edits name + role — the intended fields change,
+    # but the member must stay deactivated through the registry round-trip.
+    r = client.put("/api/admin/clubs/club_p4l/users/m1",
+                   json={"display_name": "Renamed Coach", "role": "coordinator"})
+    assert r.status_code == 200
+    u = reg.get_user("m1")
+    assert u.display_name == "Renamed Coach"
+    assert u.role == "coordinator"
+    assert u.status == "deactivated", (
+        "generic PUT update implicitly reactivated a deactivated member"
+    )
+
+
+def test_update_preserves_apple_sub(app_and_client):
+    """Same defect class: the reconstructed User must carry apple_sub —
+    an admin field edit must never unlink a bound Apple identity.
+    Forward-compatible: biq-core <0.23 does not model the field, so the
+    carry is a no-op there and the assertion only applies when present."""
+    from biq_core.org.models import User as _User
+    if "apple_sub" not in _User.model_fields:
+        pytest.skip("pinned biq-core does not model User.apple_sub")
+    _, client = app_and_client
+    _create_club(client, "club_p4m")
+    _create_member(client, "club_p4m", "m1", role="coach")
+    reg = org.get_registry()
+    m1 = reg.get_user("m1")
+    reg.upsert_user(m1.model_copy(update={"apple_sub": "001122.apple.sub"}))
+
+    r = client.put("/api/admin/clubs/club_p4m/users/m1",
+                   json={"display_name": "Apple Coach"})
+    assert r.status_code == 200
+    u = reg.get_user("m1")
+    assert u.display_name == "Apple Coach"
+    assert u.apple_sub == "001122.apple.sub", (
+        "generic PUT update silently unlinked the member's apple_sub"
+    )
+
+
+def test_explicit_status_endpoint_still_governs(app_and_client):
+    """After a field edit on a deactivated member, only PATCH /status can
+    reactivate — and the earlier edits survive."""
+    _, client = app_and_client
+    _create_club(client, "club_p4n")
+    _create_member(client, "club_p4n", "m1", role="coach")
+    client.patch("/api/admin/clubs/club_p4n/users/m1/status",
+                 json={"status": "deactivated"})
+    client.put("/api/admin/clubs/club_p4n/users/m1",
+               json={"display_name": "Still Inactive"})
+    reg = org.get_registry()
+    assert reg.get_user("m1").status == "deactivated"
+
+    r = client.patch("/api/admin/clubs/club_p4n/users/m1/status",
+                     json={"status": "active"})
+    assert r.status_code == 200
+    u = reg.get_user("m1")
+    assert u.status == "active"
+    assert u.display_name == "Still Inactive"
+
+    audits = org.get_audit_log().list_for_scope("club:club_p4n")
+    assert "reactivate" in [a.action for a in audits]
+
+
+def test_sd_cannot_use_generic_update_path(app_and_client):
+    """Boundary preserved: the generic PUT update stays administrator-
+    gated (``roles.manage``/``club.admin``) — a Sports Director holding
+    only ``roles.manage.sporting`` gets 403 and therefore can never reach
+    the implicit-reactivation path at all."""
+    _, client = app_and_client
+    _create_club(client, "club_p4o")
+    _create_member(client, "club_p4o", "sd", role="sports_director")
+    _create_member(client, "club_p4o", "coach1", role="coach")
+    client.patch("/api/admin/clubs/club_p4o/users/coach1/status",
+                 json={"status": "deactivated"})
+    client.post("/api/auth/logout")
+    client.post("/api/auth/login", json={"username": "sd", "password": "pw-1234"})
+
+    r = client.put("/api/admin/clubs/club_p4o/users/coach1",
+                   json={"display_name": "SD Renamed"})
+    assert r.status_code == 403
+    u = org.get_registry().get_user("coach1")
+    assert u.display_name != "SD Renamed"
+    assert u.status == "deactivated"
+
+
 def test_member_endpoints_s2s_acting_identity(app_and_client, monkeypatch):
     """The whole member surface resolves identity via S2S acting headers —
     the biq-app proxy path sends Bearer + X-BIQ-Acting-User-Id, not a session.

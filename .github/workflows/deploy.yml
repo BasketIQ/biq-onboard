@@ -301,8 +301,11 @@ jobs:
               echo "::error::BIQ_INTERNAL_TOKEN_VERSION must be a numeric Secret Manager version, got '${INTERNAL_TOKEN_VERSION}' — refusing to deploy"
               exit 1 ;;
           esac
+          # || true: a missing secret makes gcloud exit non-zero; under
+          # `bash -e` a failing command substitution aborts the script
+          # silently, before the explicit ::error:: guard below can run.
           TOKEN_VERSION_STATE="$(gcloud secrets versions describe "${INTERNAL_TOKEN_VERSION}" \
-            --secret=BIQ_INTERNAL_TOKEN --project="${PROJECT_ID}" --format='value(state)' 2>/dev/null)"
+            --secret=BIQ_INTERNAL_TOKEN --project="${PROJECT_ID}" --format='value(state)' 2>/dev/null || true)"
           test "${TOKEN_VERSION_STATE}" = "ENABLED" \
             || { echo "::error::BIQ_INTERNAL_TOKEN version ${INTERNAL_TOKEN_VERSION} is ${TOKEN_VERSION_STATE:-unreadable} — refusing to deploy"; exit 1; }
 
@@ -313,7 +316,7 @@ jobs:
           # closed on metadata: without it every entry proof is rejected.
           EMBED_VERSION_STATE="$(gcloud secrets versions list "BIQ_EMBED_JWT_SECRET" \
             --project "${PROJECT_ID}" \
-            --filter='state=ENABLED' --limit=1 --format='value(state)' 2>/dev/null)"
+            --filter='state=ENABLED' --limit=1 --format='value(state)' 2>/dev/null || true)"
           test -n "${EMBED_VERSION_STATE}" \
             || { echo "::error::BIQ_EMBED_JWT_SECRET has no enabled Secret Manager version — refusing to deploy (entry proofs would fail closed)"; exit 1; }
 

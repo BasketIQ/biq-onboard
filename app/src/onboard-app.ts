@@ -52,6 +52,7 @@ interface ClubTheme {
   };
   logo?: {
     url: string | null;
+    onLight: string | null;
     rightsConfirmedAt: string | null;
     status: 'awaiting_rights' | 'confirmed' | 'rejected';
   } | null;
@@ -61,7 +62,15 @@ interface ClubTheme {
   };
   gate?: {
     passed: boolean;
-    failures: string[];
+    failures: Array<{
+      error?: string;
+      fg?: string;
+      bg?: string;
+      ratio?: number;
+      required?: number;
+      fgHex?: string;
+      bgHex?: string;
+    }>;
   };
   activation?: {
     themeStatus: string;
@@ -70,7 +79,10 @@ interface ClubTheme {
 }
 
 interface ThemeJob {
-  status: 'pending' | 'running' | 'completed' | 'failed' | 'reverted';
+  // Canonical states (B10) — the server has no "completed" vocabulary.
+  status: 'pending' | 'running' | 'succeeded' | 'uncertain' |
+    'rejected_not_a_club' | 'unsupported_source' | 'unreachable' |
+    'failed' | 'reverted';
   sourceUrl: string;
   requestedAt: string;
   finishedAt: string | null;
@@ -80,39 +92,6 @@ interface ThemeJob {
     score: number;
   } | null;
 }
-
-// ─── Per-verdict Spanish copy (ADDENDUM-04 §5) ──────────────────────────
-
-const VERDICT_COPY: Record<string, { title: string; description: string; action?: string }> = {
-  club_confirmed: {
-    title: 'Club confirmado',
-    description: 'Hemos detectado la web de tu club y generado los colores del estilo.',
-  },
-  uncertain: {
-    title: 'No estamos seguros',
-    description: 'La web parece legítima pero no tenemos suficiente confianza para aplicar los colores automáticamente. Puedes revisarlos y activarlos manualmente.',
-    action: 'Revisar colores',
-  },
-  not_a_club: {
-    title: 'No parece un club',
-    description: 'La URL indicada no corresponde a un club de baloncesto. Revisa la dirección e inténtalo de nuevo.',
-  },
-  unsupported_source: {
-    title: 'Fuente no soportada',
-    description: 'No podemos extraer colores de este tipo de página (redes sociales, PDFs, etc.). Introduce la URL de la web del club.',
-  },
-  unreachable: {
-    title: 'No se pudo acceder',
-    description: 'La web del club no respondió o no es accesible públicamente. Verifica la URL e inténtalo de nuevo.',
-  },
-};
-
-const THEME_STATUS_COPY: Record<string, { label: string; color: string }> = {
-  active: { label: 'Activo', color: 'var(--biq-green)' },
-  draft: { label: 'Borrador', color: 'var(--biq-amber)' },
-  rejected: { label: 'Rechazado', color: 'var(--biq-red)' },
-  pending: { label: 'Pendiente', color: 'var(--biq-blue)' },
-};
 
 // B14: themeJob state matrix — presentation + action per canonical state
 const THEME_JOB_COPY: Record<string, { title: string; description: string; action?: string }> = {
@@ -342,6 +321,7 @@ interface ContextDescriptor {
 interface ContextCandidate {
   kind: string;
   owner_scope: Record<string, string>;
+  name?: string;
   requires_verification: boolean;
 }
 
@@ -514,7 +494,6 @@ class BiqOnboardApp extends HTMLElement {
   } | null = null;
   private _clubSummaryLoading = false;
   private _clubSummaryError: string | null = null;
-  private _clubSummaryClubId: string | null = null;
   // Watches body[data-shell-chrome] (global nav contract §2) so the section
   // subhead's sticky offset follows the shell chrome's shown/collapsed state.
   private _shellChromeObserver: MutationObserver | null = null;
@@ -577,7 +556,6 @@ class BiqOnboardApp extends HTMLElement {
       this._stopSeedingPolling();
       // Phase 3: club summary belongs to the previous club — drop it.
       this._clubSummary = null;
-      this._clubSummaryClubId = null;
       this._clubSummaryError = null;
       // Consolidated Equipos: selection + management catalog are club-scoped.
       this._teams = [];
@@ -836,7 +814,6 @@ class BiqOnboardApp extends HTMLElement {
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       this._clubSummary = await res.json();
-      this._clubSummaryClubId = clubId;
     } catch (err) {
       this._clubSummaryError = (err as Error).message;
     } finally {
@@ -1457,7 +1434,6 @@ class BiqOnboardApp extends HTMLElement {
 
   // C11: Lifecycle — stop polling on disconnect, resume on reconnect
   disconnectedCallback(): void {
-    super.disconnectedCallback?.();
     this._stopPolling();
     this._stopSeedingPolling();
     // D20: invalidate in-flight submissions and abort stale responses.
@@ -1478,7 +1454,6 @@ class BiqOnboardApp extends HTMLElement {
   }
 
   connectedCallback(): void {
-    super.connectedCallback?.();
     // C11: Resume polling on visibility/entry if theme job is pending/running
     this._visibilityHandler = () => {
       if (document.visibilityState === 'visible') {
@@ -1609,29 +1584,6 @@ class BiqOnboardApp extends HTMLElement {
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ homepage_url: url }),
-      });
-      if (!res.ok) {
-        const data = await res.json().catch(() => null);
-        throw new Error(data?.detail || `HTTP ${res.status}`);
-      }
-      await this.loadThemeData(clubId);
-    } catch (err) {
-      this._error = (err as Error).message;
-      this._loading = false;
-      this.render();
-    }
-  }
-
-  private async saveManualTheme(clubId: string, brand: string, brandAlt: string | null): Promise<void> {
-    this._loading = true;
-    this._error = null;
-    this.render();
-    try {
-      const res = await fetch(`/api/clubs/${clubId}/theme`, {
-        method: 'PUT',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ seed_brand: brand, seed_brand_alt: brandAlt }),
       });
       if (!res.ok) {
         const data = await res.json().catch(() => null);
@@ -1961,12 +1913,12 @@ class BiqOnboardApp extends HTMLElement {
 
         ${this._loading && !theme && !jobCopy ? '<div class="onboard-loading">Cargando…</div>' : ''}
 
-        ${theme ? this.renderActivationToggle(club.id, theme, isPolling) : ''}
+        ${theme ? this.renderActivationToggle(theme, isPolling) : ''}
         ${theme ? this.renderLogoSection(theme) : ''}
       </section>`;
   }
 
-  private renderActivationToggle(clubId: string, theme: ClubTheme, isPolling: boolean = false): string {
+  private renderActivationToggle(theme: ClubTheme, isPolling: boolean = false): string {
     const isActive = theme.status === 'active';
     const gateFailed = theme.gate && theme.gate.passed === false;
     if (gateFailed) {
@@ -2013,12 +1965,12 @@ class BiqOnboardApp extends HTMLElement {
 
   private renderLogoSection(theme: ClubTheme): string {
     const logo = theme.logo;
-    const hasLogo = logo && logo.onLight;
+    const logoSrc = logo?.onLight ?? null;
     const awaitingRights = logo && logo.rightsConfirmedAt === null;
     return `
       <div class="onboard-card">
         <h3 class="onboard-card-title">Logo del club</h3>
-        ${hasLogo ? `<img class="onboard-logo-preview" src="${escapeHtml(logo.onLight)}" alt="Logo" />` : '<p class="onboard-card-desc">No se encontró logo automáticamente.</p>'}
+        ${logoSrc ? `<img class="onboard-logo-preview" src="${escapeHtml(logoSrc)}" alt="Logo" />` : '<p class="onboard-card-desc">No se encontró logo automáticamente.</p>'}
         <div class="onboard-logo-input-group">
           <input type="url" class="onboard-logo-input" data-logo-url-input placeholder="https://www.club.com/logo.png" />
           <button class="onboard-btn onboard-btn-primary" data-logo-url-btn ${this._loading ? 'disabled' : ''}>Actualizar logo</button>
@@ -2029,7 +1981,7 @@ class BiqOnboardApp extends HTMLElement {
             <span class="onboard-btn">Subir archivo</span>
           </label>
         </div>
-        ${hasLogo && awaitingRights ? `
+        ${logoSrc && awaitingRights ? `
           <div class="onboard-rights">
             <p class="onboard-rights-text">Para mostrar el logo necesitas confirmar que el club tiene derecho a usarlo.</p>
             <label class="onboard-rights-label">
@@ -2038,7 +1990,7 @@ class BiqOnboardApp extends HTMLElement {
             </label>
             <button class="onboard-btn onboard-btn-primary" data-affirm-rights-btn disabled>Confirmar</button>
           </div>
-        ` : (hasLogo ? `
+        ` : (logoSrc ? `
           <p class="onboard-rights-confirmed">Derechos de uso confirmados.</p>
         ` : '')}
       </div>`;

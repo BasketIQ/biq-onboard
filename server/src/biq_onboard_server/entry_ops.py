@@ -28,8 +28,14 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from biq_core.roles import can_assign_role, effective_capabilities
+
 from . import entry_proof, invitations, org
-from .auth import _s2s_secret, require_roles_admin_acting
+from .auth import (
+    _is_break_glass_admin,
+    _s2s_secret,
+    require_roles_admin_acting,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +43,7 @@ router = APIRouter()  # ops: S2S + entry proof
 staff_router = APIRouter()  # staff-scoped issue endpoint
 
 _MEMBER_ROLES = ("administrator", "sports_director", "coach", "assistant", "coordinator")
+_MAX_INVITATION_TTL_DAYS = 14
 
 
 def _require_s2s(request: Request) -> None:
@@ -48,12 +55,40 @@ def _require_s2s(request: Request) -> None:
         raise HTTPException(status_code=401, detail="invalid service token")
 
 
-def _account_from_proof(request: Request) -> str:
+def _proof_claims(request: Request) -> dict:
     try:
-        claims = entry_proof.proof_from_request(request)
+        return entry_proof.proof_from_request(request)
     except entry_proof.EntryProofError as exc:
         raise HTTPException(status_code=401, detail="invalid entry proof") from exc
-    return claims["sub"]
+
+
+def _account_from_proof(request: Request) -> str:
+    return _proof_claims(request)["sub"]
+
+
+def _issuer_still_grants(inv: invitations.Invitation, roles: list[str]) -> bool:
+    """Live issuer check (R5): the invite dies when the issuer no longer
+    holds the authority it minted under — an invitation survives neither
+    the issuer's membership loss nor a capability downgrade. Platform
+    break-glass issuers are env-bound, not memberships, so they are
+    evaluated against the platform gate instead."""
+    issuer = inv.issuer_membership_id
+    if not issuer:
+        return False
+    if _is_break_glass_admin(issuer):
+        return True
+    try:
+        record = org.get_registry().get_user(issuer)
+    except Exception:
+        raise HTTPException(status_code=503, detail="registry unavailable")
+    if (
+        record is None
+        or getattr(record, "club_id", None) != inv.club_id
+        or getattr(record, "status", None) != "active"
+    ):
+        return False
+    caps = effective_capabilities(issuer, f"club:{inv.club_id}", org.get_roles())
+    return all(can_assign_role(caps, role) for role in roles)
 
 
 def _now_iso() -> str:
@@ -79,12 +114,20 @@ def _public_invitation(inv: invitations.Invitation) -> dict[str, Any]:
 # ── ops endpoints (S2S + entry proof) ────────────────────────────────────
 
 
-@router.get("/api/ops/invitations/{token}/preview")
-def invitation_preview(token: str, request: Request) -> dict:
+class PreviewBody(BaseModel):
+    # The token travels in the body — never in the URL path where access
+    # logs and proxies would capture it (R5).
+    token: str = Field(default="", max_length=512)
+
+
+@router.post("/api/ops/invitations/preview")
+def invitation_preview(body: PreviewBody, request: Request) -> dict:
     _require_s2s(request)
     _account_from_proof(request)
+    if not body.token.strip():
+        raise HTTPException(status_code=400, detail="token required")
     store = invitations.get_invitation_store()
-    inv = store.get_by_digest(invitations.token_digest(token.strip()))
+    inv = store.get_by_digest(invitations.token_digest(body.token.strip()))
     if inv is None or not inv.is_live(_now_iso()):
         raise HTTPException(status_code=404, detail="invitation not found")
     return _public_invitation(inv)
@@ -103,11 +146,39 @@ async def invitation_redeem(request: Request) -> dict:
         raise HTTPException(status_code=400, detail="invalid body")
     if not body.token.strip():
         raise HTTPException(status_code=400, detail="token required")
-    account_id = _account_from_proof(request)
+    claims = _proof_claims(request)
+    account_id = claims["sub"]
     store = invitations.get_invitation_store()
     inv = store.get_by_digest(invitations.token_digest(body.token.strip()))
     if inv is None:
         raise HTTPException(status_code=404, detail="invitation not found")
+
+    # Verified recipient binding (R5): when the issuer targeted a mailbox,
+    # the claimant must hold a cryptographically-bound proof of that same
+    # mailbox — a membership-scope proof or a different verified mailbox
+    # can never claim it. Untargeted invitations stay claim-by-possession.
+    recipient = (inv.recipient_email or "").strip().lower()
+    if recipient:
+        proven = (
+            str(claims.get("vemail") or "").strip().lower()
+            if claims.get("scope") == "verified"
+            else ""
+        )
+        if proven != recipient:
+            raise HTTPException(status_code=403, detail="invitation unavailable")
+
+    # Stored roles must be a strict subset of the assignable set — an
+    # out-of-band edit is corrupt data, not a reason to silently mint a
+    # coach (fail closed, no default-role widening).
+    roles = [r for r in inv.proposed_roles if r in _MEMBER_ROLES]
+    if not roles or len(roles) != len(inv.proposed_roles):
+        raise HTTPException(status_code=409, detail="invitation unavailable")
+
+    # Live issuer check: the grant the issuer minted must still match the
+    # issuer's live authority — demotions and membership loss kill the
+    # outstanding invitation.
+    if not _issuer_still_grants(inv, roles):
+        raise HTTPException(status_code=409, detail="invitation unavailable")
 
     # Deterministic membership id: concurrent claims upsert the same row,
     # the transact() gate picks exactly one winner — no duplicate members.
@@ -124,7 +195,17 @@ async def invitation_redeem(request: Request) -> dict:
         return current
 
     claimed = store.transact(inv.invitation_id, _claim)
-    if claimed is None or claimed.redeemed_account_id != account_id:
+    if claimed is None:
+        raise HTTPException(status_code=404, detail="invitation not found")
+    # One gate covers every dead end: revoked (absolute — even the original
+    # claimer cannot replay), expired/still-pending, and a claim owned by
+    # a different account. A same-account replay of its own redemption is
+    # the single idempotent re-answer allowed through.
+    if (
+        claimed.status != "redeemed"
+        or claimed.redeemed_account_id != account_id
+        or claimed.membership_subject_id != membership_id
+    ):
         raise HTTPException(status_code=409, detail="invitation unavailable")
 
     try:
@@ -132,7 +213,6 @@ async def invitation_redeem(request: Request) -> dict:
         from biq_core.roles import RoleAssignment
 
         registry = org.get_registry()
-        roles = [r for r in inv.proposed_roles if r in _MEMBER_ROLES] or ["coach"]
         membership = User(
             id=membership_id,
             club_id=inv.club_id,
@@ -175,9 +255,15 @@ class ClubCreateBody(BaseModel):
 @router.post("/api/ops/clubs", status_code=201)
 def ops_create_club(body: ClubCreateBody, request: Request) -> dict:
     """PC-01 transport — App has already gated the account; this service
-    runs the idempotent creation and returns the creator membership."""
+    runs the idempotent creation and returns the creator membership.
+
+    Idempotency is actor- AND payload-bound (R5): the deterministic ids
+    derive from ``(account_id, key)`` so one account's key can never
+    collide with another's, and a replayed key carrying a different
+    name/website conflicts (409) instead of silently overwriting the
+    club document."""
     _require_s2s(request)
-    _account_from_proof(request)
+    account_id = _account_from_proof(request)
 
     name = body.name.strip()
     if len(name) < 2:
@@ -192,9 +278,35 @@ def ops_create_club(body: ClubCreateBody, request: Request) -> dict:
     registry = org.get_registry()
     idem = (body.idempotency_key or "").strip()
     if idem:
-        digest = hashlib.sha256(idem.encode()).hexdigest()[:12]
+        digest = hashlib.sha256(f"{account_id}|{idem}".encode()).hexdigest()[:12]
         club_id = f"f1f2_{digest}"
         membership_id = f"f1f2m_{digest}"
+        try:
+            existing = registry.get_club(club_id)
+            existing_member = registry.get_user(membership_id)
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail="registry unavailable") from exc
+        if existing is not None:
+            same = (
+                getattr(existing, "name", "") == name
+                and (getattr(existing, "website", None) or "") == website
+                and (
+                    existing_member is None
+                    or getattr(existing_member, "email", "")
+                    == (body.email or "").strip().lower()
+                )
+            )
+            if not same:
+                raise HTTPException(
+                    status_code=409,
+                    detail="idempotency key already used with different payload",
+                )
+            return {
+                "club": {"id": club_id, "name": name, "website": website or None},
+                "membership_subject_id": membership_id,
+                "idempotent": True,
+                "teams_seeded": 0,
+            }
     else:
         club_id = registry.next_club_id()
         membership_id = registry.next_user_id()
@@ -254,13 +366,46 @@ class IssueBody(BaseModel):
     expires_at: str | None = Field(default=None)
 
 
+def _bounded_expiry(raw: str | None) -> str:
+    """Bounded lifetime (R5): caller-supplied expiry must be a valid
+    future ISO timestamp and may not exceed the product ceiling."""
+    from datetime import UTC, datetime, timedelta
+
+    now = datetime.now(UTC)
+    ceiling = now + timedelta(days=_MAX_INVITATION_TTL_DAYS)
+    if not raw or not raw.strip():
+        return ceiling.isoformat()
+    try:
+        parsed = datetime.fromisoformat(raw.strip())
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="malformed expires_at") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    if parsed <= now or parsed > ceiling:
+        raise HTTPException(
+            status_code=422,
+            detail=f"expires_at must be within {_MAX_INVITATION_TTL_DAYS} days",
+        )
+    return parsed.isoformat()
+
+
 @staff_router.post("/api/admin/clubs/{club_id}/invitations", status_code=201)
 def issue_invitation(club_id: str, body: IssueBody, request: Request) -> dict:
-    """Issue a tokenized invitation — requires role-management capability."""
+    """Issue a tokenized invitation — requires role-management capability
+    and the live per-role right to grant every proposed role (R5)."""
     issuer = require_roles_admin_acting(request, club_id)
     roles = [r for r in body.proposed_roles if r in _MEMBER_ROLES]
-    if not roles:
-        raise HTTPException(status_code=422, detail="proposed_roles required")
+    if not roles or len(roles) != len({r for r in body.proposed_roles if r}):
+        raise HTTPException(status_code=422, detail="unsupported proposed_roles")
+    caps = (
+        ["platform.admin"]
+        if _is_break_glass_admin(issuer)
+        else effective_capabilities(issuer, f"club:{club_id}", org.get_roles())
+    )
+    if not all(can_assign_role(caps, role) for role in roles):
+        # A Sports Director cannot mint administrator invites — the grant
+        # must never exceed the issuer's live assignable set.
+        raise HTTPException(status_code=403, detail="proposed role not assignable")
     inv = invitations.Invitation(
         invitation_id=invitations.new_id(),
         club_id=club_id,
@@ -268,7 +413,7 @@ def issue_invitation(club_id: str, body: IssueBody, request: Request) -> dict:
         proposed_roles=roles,
         recipient_email=(body.recipient_email or "").strip().lower(),
         issuer_membership_id=issuer,
-        expires_at=(body.expires_at or "").strip() or invitations.default_expiry(),
+        expires_at=_bounded_expiry(body.expires_at),
         created_at=_now_iso(),
     )
     token = invitations.new_token()
@@ -283,3 +428,26 @@ def issue_invitation(club_id: str, body: IssueBody, request: Request) -> dict:
         "club_id": club_id,
         "expires_at": inv.expires_at,
     }
+
+
+@staff_router.delete("/api/admin/clubs/{club_id}/invitations/{invitation_id}")
+def revoke_invitation(club_id: str, invitation_id: str, request: Request) -> dict:
+    """Revoke a pending invitation — same role-management gate as issue.
+    Revocation is absolute at redeem, including for the original claimer."""
+    require_roles_admin_acting(request, club_id)
+    store = invitations.get_invitation_store()
+
+    def _revoke(current: invitations.Invitation | None) -> invitations.Invitation | None:
+        if current is None or current.club_id != club_id:
+            return None
+        if current.status == "pending":
+            current.status = "revoked"
+        return current
+
+    try:
+        inv = store.transact(invitation_id, _revoke)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="invitation store unavailable") from exc
+    if inv is None:
+        raise HTTPException(status_code=404, detail="invitation not found")
+    return {"invitation_id": invitation_id, "status": inv.status}

@@ -2375,10 +2375,13 @@ class BiqOnboardApp extends HTMLElement {
     this._inviteLoading = true;
     this._entryError = null;
     try {
-      const res = await fetch(
-        `/api/context/v1/invitations/${encodeURIComponent(this._inviteToken)}/preview`,
-        { credentials: 'include', cache: 'no-store' }
-      );
+      const res = await fetch('/api/context/v1/invitations/preview', {
+        method: 'POST',
+        credentials: 'include',
+        cache: 'no-store',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: this._inviteToken }),
+      });
       if (!res.ok) throw new Error('Invitación no válida o caducada');
       this._invitePreview = await res.json();
     } catch (err) {

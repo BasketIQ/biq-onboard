@@ -1256,3 +1256,15 @@
 .entry-field label { font-size: 0.85rem; font-weight: 600; }
 .entry-field input, .entry-field select { padding: 8px 10px; border: 1px solid var(--biq-border, #e0e0e0); border-radius: 8px; font-size: 0.9rem; }
 .entry-invite { padding: 10px; border: 1px solid var(--biq-border, #e0e0e0); border-radius: 8px; display: flex; flex-direction: column; gap: 8px; max-width: 320px; }
+.entry-head { display: flex; align-items: center; justify-content: space-between; }
+.entry-head .entry-h { margin: 0; }
+.entry-help { border: 0; background: transparent; padding: 4px; cursor: pointer; display: inline-flex; align-items: center; border-radius: 50%; }
+.entry-help:hover { background: var(--biq-hover, rgba(0,0,0,0.06)); }
+.entry-help .nav-chispa { display: block; width: 24px; height: 24px; }
+.entry-help .entry-chispa-dark { display: none; }
+:host-context([data-theme="dark"]) .entry-help .entry-chispa-light { display: none; }
+:host-context([data-theme="dark"]) .entry-help .entry-chispa-dark { display: block; }
+.entry-modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.45); display: flex; align-items: center; justify-content: center; z-index: 60; padding: 24px; }
+.entry-modal { background: var(--biq-surface, #fff); color: var(--biq-text, #111); border-radius: 12px; padding: 20px; max-width: 340px; display: flex; flex-direction: column; gap: 14px; box-shadow: 0 8px 32px rgba(0,0,0,0.28); }
+.entry-modal p { margin: 0; font-size: 0.95rem; line-height: 1.5; }
+:host-context([data-theme="dark"]) .entry-modal { --biq-surface: #1e1e1e; --biq-text: #eee; }

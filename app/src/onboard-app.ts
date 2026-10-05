@@ -399,6 +399,8 @@ class BiqOnboardApp extends HTMLElement {
   private _inviteToken = '';
   private _invitePreview: { club_id: string; club_name: string } | null = null;
   private _inviteLoading = false;
+  private _helpOpen: '' | 'personal' | 'club' = '';
+  private _clubCreateOpen = false;
   private _entryError: string | null = null;
   private _entryBusy = false;
   private _subRoute = '';
@@ -2217,7 +2219,6 @@ class BiqOnboardApp extends HTMLElement {
     const active = boot.active;
     const actions = boot.entry_actions || {};
     const clubs = (boot.contexts || []).filter((c) => c.kind === 'club');
-    const personalOk = boot.identity_verified;
     const createAllowed = actions['club.create']?.allowed === true;
 
     const activeLabel = active
@@ -2226,17 +2227,30 @@ class BiqOnboardApp extends HTMLElement {
         : `Club ${(clubs.find((c) => c.owner_scope.club_id === active.owner_scope.club_id) as ContextCandidate | undefined)?.name || active.owner_scope.club_id}`
       : '';
 
+    const helpIcon = (tab: string) => `
+      <button class="entry-help" type="button" data-entry-help="${tab}" aria-label="Ayuda" aria-haspopup="dialog">
+        <img class="nav-chispa entry-chispa-light" src="/assets/basketiq-mobile-assets-v2/svg/light/heads/chispa-speaking.svg" alt="" aria-hidden="true">
+        <img class="nav-chispa entry-chispa-dark" src="/assets/basketiq-mobile-assets-v2/svg/dark/heads/chispa-speaking.svg" alt="" aria-hidden="true">
+      </button>`;
+
     const personalTab = `
       <section class="entry-panel">
-        <h3 class="entry-h">Espacio personal</h3>
-        <p class="entry-p">Espacio personal para preparar entrenamientos semanales y partidos.</p>
+        <div class="entry-head"><h3 class="entry-h">Espacio personal</h3>${helpIcon('personal')}</div>
         <button class="onboard-btn onboard-btn-primary" data-entry-personal-enter ${this._entryBusy ? 'disabled' : ''}>Entrar</button>
       </section>`;
 
     const clubTab = `
       <section class="entry-panel">
-        <h3 class="entry-h">Mi club</h3>
-        <p class="entry-p">Espacio de gestión del club que engloba todas las capacidades de planificación e interacción entre miembros del staff deportivo.</p>
+        <div class="entry-head"><h3 class="entry-h">Mi club</h3>${helpIcon('club')}</div>
+        ${createAllowed ? `
+          <button class="onboard-btn" data-entry-club-create-toggle ${this._entryBusy ? 'disabled' : ''}>+ Crear club</button>
+          ${this._clubCreateOpen ? `
+            <form class="entry-form" data-entry-club-create>
+              <div class="entry-field"><label>Nombre del club</label>
+                <input type="text" name="name" maxlength="200" required /></div>
+              <button class="onboard-btn onboard-btn-primary" type="submit" ${this._entryBusy ? 'disabled' : ''}>Crear</button>
+            </form>` : ''}
+        ` : ''}
         ${this._invitePreview ? `
           <div class="entry-invite">
             <p>Invitación para <strong>${escapeHtml(this._invitePreview.club_name || this._invitePreview.club_id)}</strong></p>
@@ -2252,14 +2266,18 @@ class BiqOnboardApp extends HTMLElement {
                 </button>
               </li>`).join('')}
           </ul>` : ''}
-        ${createAllowed ? `
-          <form class="entry-form" data-entry-club-create>
-            <div class="entry-field"><label>Nombre del club</label>
-              <input type="text" name="name" maxlength="200" required /></div>
-            <button class="onboard-btn onboard-btn-primary" type="submit" ${this._entryBusy ? 'disabled' : ''}>Crear</button>
-          </form>
-        ` : ''}
       </section>`;
+
+    const helpModal = this._helpOpen
+      ? `<div class="entry-modal-backdrop" data-entry-help-close>
+          <div class="entry-modal" role="dialog" aria-modal="true" aria-label="Ayuda">
+            <p>${this._helpOpen === 'personal'
+              ? 'Espacio personal para preparar entrenamientos semanales y partidos.'
+              : 'Espacio de gestión del club que engloba todas las capacidades de planificación e interacción entre miembros del staff deportivo.'}</p>
+            <button class="onboard-btn" data-entry-help-close>Cerrar</button>
+          </div>
+        </div>`
+      : '';
 
     return `
       <div class="entry-step">
@@ -2271,6 +2289,7 @@ class BiqOnboardApp extends HTMLElement {
           <button class="onboard-nav-item ${this._entryTab === 'club' ? 'active' : ''}" data-entry-tab="club">Mi club</button>
         </nav>
         ${this._entryTab === 'personal' ? personalTab : clubTab}
+        ${helpModal}
       </div>`;
   }
 
@@ -2318,6 +2337,30 @@ class BiqOnboardApp extends HTMLElement {
 
     this.shadow.querySelector('[data-entry-personal-enter]')?.addEventListener('click', () => {
       this.activateContext('personal');
+    });
+
+    this.shadow.querySelectorAll('[data-entry-help]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        this._helpOpen = (btn as HTMLElement).dataset.entryHelp as 'personal' | 'club';
+        this.render();
+      });
+    });
+    this.shadow.querySelectorAll('[data-entry-help-close]').forEach((el) => {
+      el.addEventListener('click', (ev) => {
+        // Backdrop closes only on a direct backdrop hit — clicks inside the
+        // dialog must not bubble-close it.
+        if ((el as HTMLElement).classList.contains('entry-modal-backdrop') && ev.target !== el) return;
+        this._helpOpen = '';
+        this.render();
+      });
+    });
+    this.shadow.querySelector('[data-entry-club-create-toggle]')?.addEventListener('click', () => {
+      this._clubCreateOpen = !this._clubCreateOpen;
+      this.render();
+      if (this._clubCreateOpen) {
+        const input = this.shadow.querySelector('[data-entry-club-create] input') as HTMLInputElement | null;
+        input?.focus();
+      }
     });
 
     this.shadow.querySelectorAll('[data-entry-club-activate]').forEach((btn) => {

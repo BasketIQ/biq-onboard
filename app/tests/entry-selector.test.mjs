@@ -374,6 +374,53 @@ test('Mi equipo with zero teams offers no Entrar — first entry requires creati
   }
 });
 
+test('archived-only owner still gets Entrar — restore path is not a forced create (A3 D3)', async () => {
+  // The server gate allows re-entry for has-ever-team accounts; a returning
+  // owner whose teams are ALL archived must be able to enter (empty working
+  // set) and restore from «Mis equipos» — not be funnelled into create.
+  const browser = await chromium.launch();
+  try {
+    const { page, log } = await newEntryPage(browser, {
+      personalTeams: [{ ...PERSONAL_TEAMS[0], archived: true }],
+    });
+    await page.evaluate(() => {
+      const el = document.getElementById('app');
+      el.shadowRoot.querySelector('[data-entry-tab="personal"]').click();
+    });
+    const state = await page.evaluate(() => {
+      const el = document.getElementById('app');
+      const panel = el.shadowRoot.querySelector('.entry-panel');
+      return {
+        enter: !!panel.querySelector('[data-entry-personal-enter]'),
+        enterLabel: panel.querySelector('[data-entry-personal-enter]')?.textContent.trim(),
+        teamRows: panel.querySelectorAll('[data-entry-personal-enter-team]').length,
+        createToggle: !!panel.querySelector('[data-entry-team-create-toggle]'),
+        archivedNote: /archivados/i.test(panel.textContent),
+      };
+    });
+    assert.ok(state.enter, 'archived-only history must still offer Entrar');
+    assert.equal(state.enterLabel, 'Entrar', 'single Enter affordance (no per-team row)');
+    assert.equal(state.teamRows, 0, 'archived rows stay out of the active list');
+    assert.ok(state.createToggle, 'create remains available below the cap');
+    assert.ok(state.archivedNote, 'the note explains the restore path');
+
+    // Entrar activates the personal context — no working-set narrowing.
+    log.length = 0;
+    await page.evaluate(() => {
+      const el = document.getElementById('app');
+      el.shadowRoot.querySelector('[data-entry-personal-enter]').click();
+    });
+    await new Promise((r) => setTimeout(r, 300));
+    const activate = log.find((r) => r.url.includes('/api/context/v1/activate'));
+    assert.ok(activate, 'activation must fire for the archived-only owner');
+    assert.deepEqual(JSON.parse(activate.postData), { kind: 'personal' });
+    assert.ok(!log.some((r) => r.url.includes('/active/working-teams')),
+      'no working-set narrowing when every team is archived');
+  } finally {
+    await browser.close();
+  }
+});
+
 test('archived teams do not appear and do not count against the cap', async () => {
   const browser = await chromium.launch();
   try {

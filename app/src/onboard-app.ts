@@ -2282,6 +2282,7 @@ class BiqOnboardApp extends HTMLElement {
       </button>`;
 
     const personalTeams = (this._personalTeams || []).filter((t) => !t.archived);
+    const archivedTeams = (this._personalTeams || []).filter((t) => t.archived);
     const atTeamCap = personalTeams.length >= 2;
     const teamMeta = (t: PersonalTeamRow) =>
       `${escapeHtml(t.category_label || t.category_key)}${t.gender && t.gender !== 'X' ? ` · ${escapeHtml(t.gender)}` : ''}${t.age_band ? ` · ${escapeHtml(t.age_band)}` : ''}`;
@@ -2316,6 +2317,9 @@ class BiqOnboardApp extends HTMLElement {
               </form>` : ''}`}
         ${personalTeams.length ? `
           <button class="onboard-btn" data-entry-personal-enter ${this._entryBusy ? 'disabled' : ''}>Entrar con todos los equipos</button>
+        ` : archivedTeams.length ? `
+          <p class="entry-note">Tus equipos están archivados — entra para restaurarlos desde «Mis equipos», o crea uno nuevo.</p>
+          <button class="onboard-btn" data-entry-personal-enter ${this._entryBusy ? 'disabled' : ''}>Entrar</button>
         ` : ''}
       </section>`;
 

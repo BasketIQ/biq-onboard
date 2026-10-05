@@ -91,12 +91,18 @@ def invitation_preview(token: str, request: Request) -> dict:
 
 
 class RedeemBody(BaseModel):
-    token: str = Field(max_length=512)
+    token: str = Field(default="", max_length=512)
 
 
 @router.post("/api/ops/invitations/redeem")
-def invitation_redeem(body: RedeemBody, request: Request) -> dict:
+async def invitation_redeem(request: Request) -> dict:
     _require_s2s(request)
+    try:
+        body = RedeemBody(**(await request.json()))
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid body")
+    if not body.token.strip():
+        raise HTTPException(status_code=400, detail="token required")
     account_id = _account_from_proof(request)
     store = invitations.get_invitation_store()
     inv = store.get_by_digest(invitations.token_digest(body.token.strip()))

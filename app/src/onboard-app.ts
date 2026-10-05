@@ -2218,11 +2218,13 @@ class BiqOnboardApp extends HTMLElement {
         : `Club ${(clubs.find((c) => c.owner_scope.club_id === active.owner_scope.club_id) as ContextCandidate | undefined)?.name || active.owner_scope.club_id}`
       : '';
 
+    const sessionEmail = (this._org?.email || '').trim();
+
     const personalTab = `
       <section class="entry-panel">
+        <h3 class="entry-h">Espacio personal</h3>
+        <p class="entry-p">Espacio personal para preparar entrenamientos semanales y partidos.</p>
         ${personalOk ? `
-          <h3 class="entry-h">Tu espacio personal</h3>
-          <p class="entry-p">Crea equipos privados y trabaja sin vincularlos a ningún club.</p>
           ${this._personalTeams === null
             ? `<p class="entry-loading">Cargando equipos…</p>`
             : this._personalTeams.length
@@ -2248,12 +2250,15 @@ class BiqOnboardApp extends HTMLElement {
             ? `<button class="onboard-btn" data-entry-personal-enter ${this._entryBusy ? 'disabled' : ''}>Entrar al espacio personal</button>`
             : ''}
         ` : `
-          <h3 class="entry-h">Espacio personal</h3>
-          <p class="entry-p">Para abrir tu espacio personal primero verifica tu correo — así vinculamos tu identidad entre sesiones y dispositivos sin mezclar datos de nadie más.</p>
+          <p class="entry-p">Solo falta verificar tu correo una vez — así vinculamos tu identidad entre sesiones y dispositivos sin mezclar datos de nadie más.</p>
           <form class="entry-form" data-entry-verify>
-            <div class="entry-field"><label>Tu correo</label>
-              <input type="email" name="email" required placeholder="tu@correo.com" /></div>
-            <button class="onboard-btn onboard-btn-primary" type="submit" ${this._entryBusy ? 'disabled' : ''}>Enviar enlace de verificación</button>
+            ${sessionEmail
+              ? `<input type="hidden" name="email" value="${escapeHtml(sessionEmail)}" />`
+              : `<div class="entry-field"><label>Tu correo</label>
+                  <input type="email" name="email" required placeholder="tu@correo.com" /></div>`}
+            <button class="onboard-btn onboard-btn-primary" type="submit" ${this._entryBusy ? 'disabled' : ''}>
+              ${sessionEmail ? `Enviar enlace de verificación a ${escapeHtml(sessionEmail)}` : 'Enviar enlace de verificación'}
+            </button>
           </form>
           <p class="entry-note">Al abrir el enlace se verificará tu correo y podrás continuar aquí.</p>
         `}

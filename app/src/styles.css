@@ -1258,6 +1258,10 @@
 .entry-invite { padding: 10px; border: 1px solid var(--biq-border, #e0e0e0); border-radius: 8px; display: flex; flex-direction: column; gap: 8px; max-width: 320px; }
 .entry-head { display: flex; align-items: center; justify-content: space-between; }
 .entry-head .entry-h { margin: 0; }
+.entry-tab { flex: 1; display: flex; align-items: center; border-radius: 8px; transition: background 0.15s, color 0.15s; }
+.entry-tab.active { background: var(--biq-surface-1); box-shadow: var(--biq-shadow-sm); }
+.entry-tab-btn { flex: 1; padding: 10px 4px 10px 16px; border: 0; background: transparent; color: var(--biq-muted); font: inherit; font-size: 14px; font-weight: 600; text-align: left; cursor: pointer; border-radius: 8px; }
+.entry-tab.active .entry-tab-btn { color: var(--biq-text); }
 .entry-help { border: 0; background: transparent; padding: 4px; cursor: pointer; display: inline-flex; align-items: center; border-radius: 50%; }
 .entry-help:hover { background: var(--biq-hover, rgba(0,0,0,0.06)); }
 .entry-help .nav-chispa { display: block; width: 24px; height: 24px; }

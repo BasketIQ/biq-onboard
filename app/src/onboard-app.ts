@@ -2282,7 +2282,6 @@ class BiqOnboardApp extends HTMLElement {
 
     const personalTab = `
       <section class="entry-panel">
-        <div class="entry-head"><h3 class="entry-h">Mi equipo</h3>${helpIcon('personal')}</div>
         ${this._personalTeams === null ? '<p class="entry-loading">Cargando equipos…</p>' : ''}
         ${personalTeams.length ? `
           <ul class="entry-teams">
@@ -2314,7 +2313,6 @@ class BiqOnboardApp extends HTMLElement {
 
     const clubTab = `
       <section class="entry-panel">
-        <div class="entry-head"><h3 class="entry-h">Mi club</h3>${helpIcon('club')}</div>
         ${createAllowed ? `
           <button class="onboard-btn" data-entry-club-create-toggle ${this._entryBusy ? 'disabled' : ''}>+ Crear club</button>
           ${this._clubCreateOpen ? `
@@ -2358,8 +2356,14 @@ class BiqOnboardApp extends HTMLElement {
         ${activeLabel ? `<p class="entry-active">Trabajando en <strong>${escapeHtml(activeLabel)}</strong></p>` : ''}
         ${this._entryError ? `<p class="entry-error" role="alert">${escapeHtml(this._entryError)}</p>` : ''}
         <nav class="onboard-nav entry-tabs">
-          <button class="onboard-nav-item ${this._entryTab === 'personal' ? 'active' : ''}" data-entry-tab="personal">Mi equipo</button>
-          <button class="onboard-nav-item ${this._entryTab === 'club' ? 'active' : ''}" data-entry-tab="club">Mi club</button>
+          <span class="entry-tab ${this._entryTab === 'personal' ? 'active' : ''}">
+            <button class="entry-tab-btn" data-entry-tab="personal">Mi equipo</button>
+            ${helpIcon('personal')}
+          </span>
+          <span class="entry-tab ${this._entryTab === 'club' ? 'active' : ''}">
+            <button class="entry-tab-btn" data-entry-tab="club">Mi club</button>
+            ${helpIcon('club')}
+          </span>
         </nav>
         ${this._entryTab === 'personal' ? personalTab : clubTab}
         ${helpModal}

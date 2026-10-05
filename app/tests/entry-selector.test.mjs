@@ -190,19 +190,24 @@ test('Mi club has a help button with the footer chispa icon and + Crear club on 
       const el = document.getElementById('app');
       const panel = el.shadowRoot.querySelector('.entry-panel');
       const children = [...panel.children].map((n) =>
-        n.classList.contains('entry-head') ? 'head'
-          : n.hasAttribute('data-entry-club-create-toggle') ? 'create-toggle'
+        n.hasAttribute('data-entry-club-create-toggle') ? 'create-toggle'
           : n.classList.contains('entry-h') ? n.textContent.trim()
           : n.querySelector('h3')?.textContent || n.className || n.tagName);
-      const helpBtn = panel.querySelector('[data-entry-help="club"]');
-      const imgs = [...helpBtn.querySelectorAll('img')].map((i) => i.getAttribute('src'));
-      return { children, imgs, helpAria: helpBtn.getAttribute('aria-label') };
+      // Help lives INSIDE the tab title — not in the panel.
+      const tab = el.shadowRoot.querySelector('[data-entry-tab="club"]').closest('.entry-tab');
+      const helpBtn = tab.querySelector('[data-entry-help="club"]');
+      const imgs = helpBtn ? [...helpBtn.querySelectorAll('img')].map((i) => i.getAttribute('src')) : [];
+      const dupTitle = !!panel.querySelector('.entry-head');
+      return { children, imgs, helpInTab: !!helpBtn, helpAria: helpBtn?.getAttribute('aria-label'), dupTitle };
     });
+    assert.ok(order.helpInTab, 'help button must sit inside the Mi club tab title');
     assert.equal(order.helpAria, 'Ayuda');
     assert.ok(order.imgs.some((s) => s.includes('chispa-speaking')), 'help button must use the footer chispa icon');
-    assert.ok(
-      order.children.indexOf('create-toggle') > order.children.indexOf('head'),
-      '+ Crear club must render at the top of the Mi club tab (right under the header)',
+    assert.equal(order.dupTitle, false, 'the duplicate "Mi club" panel title must be gone');
+    assert.equal(
+      order.children[0],
+      'create-toggle',
+      '+ Crear club must be the first element of the Mi club tab container',
     );
     assert.ok(
       order.children.indexOf('create-toggle') < order.children.findIndex((c) => String(c).includes('Tus clubes')),
@@ -257,8 +262,9 @@ test('Mi equipo lists personal teams each with Entrar — no email field', async
       const el = document.getElementById('app');
       const panel = el.shadowRoot.querySelector('.entry-panel');
       const row = panel.querySelector('[data-entry-personal-enter-team]');
+      const tab = el.shadowRoot.querySelector('[data-entry-tab="personal"]').closest('.entry-tab');
       return {
-        help: !!panel.querySelector('[data-entry-help="personal"]'),
+        help: !!tab.querySelector('[data-entry-help="personal"]'),
         enter: !!panel.querySelector('[data-entry-personal-enter]'),
         teamRow: !!row,
         teamLabel: row?.textContent.trim() || '',

@@ -651,7 +651,34 @@ class BiqOnboardApp extends HTMLElement {
       this._personalTeams = null;
     } finally {
       this._personalTeamsLoading = false;
+      this._maybeOpenPendingPersonalEdit();
       this.render();
+    }
+  }
+
+  // Drains `?edit=<id>` on the spaces route into the personal team edit form —
+  // mirrors _maybeOpenPendingEdit for the club catalog, once per intent.
+  private _maybeOpenPendingPersonalEdit(): void {
+    const teamId = this._pendingEditTeamId;
+    if (!teamId || this._subRoute !== 'spaces' || this._personalTeamsLoading) return;
+    if (this._personalTeams === null) {
+      this.loadPersonalTeams();
+      return;
+    }
+    this._pendingEditTeamId = null;
+    if (this._personalTeams.some((t) => t.team_id === teamId && !t.archived)) {
+      this._editingPersonalTeamId = teamId;
+    }
+    // Consume-once: drop the intent from the hash like the club path does.
+    const hash = window.location.hash || '';
+    const qIdx = hash.indexOf('?');
+    if (qIdx >= 0) {
+      const params = new URLSearchParams(hash.slice(qIdx + 1));
+      if (params.has('edit')) {
+        params.delete('edit');
+        const query = params.toString();
+        history.replaceState(null, '', `${hash.slice(0, qIdx)}${query ? `?${query}` : ''}`);
+      }
     }
   }
 
@@ -746,6 +773,12 @@ class BiqOnboardApp extends HTMLElement {
       this._ensureTeamsData(clubId);
       // Catalog may already be warm (no load started) — drain immediately.
       this._maybeOpenPendingEdit();
+    }
+    // «Plantilla» on a personal team (footer action dialog) deep-links to
+    // #/onboard/spaces?edit=<id> — the personal edit form opens once the
+    // teams feed confirms the id exists.
+    if (this._subRoute === 'spaces') {
+      this._maybeOpenPendingPersonalEdit();
     }
     // Phase 3: same for the Perfil club summary.
     if (this._subRoute === 'profile' && clubId && !this._clubSummary && !this._clubSummaryLoading) {

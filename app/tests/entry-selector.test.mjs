@@ -351,6 +351,29 @@ test('at the 2-team cap the create affordance is replaced by the cap note', asyn
   }
 });
 
+test('Mi equipo with zero teams offers no Entrar — first entry requires creating one (PO gate)', async () => {
+  const browser = await chromium.launch();
+  try {
+    const { page } = await newEntryPage(browser, { personalTeams: [] });
+    await page.evaluate(() => {
+      const el = document.getElementById('app');
+      el.shadowRoot.querySelector('[data-entry-tab="personal"]').click();
+    });
+    const state = await page.evaluate(() => {
+      const el = document.getElementById('app');
+      const panel = el.shadowRoot.querySelector('.entry-panel');
+      return {
+        enter: !!panel.querySelector('[data-entry-personal-enter]'),
+        createToggle: !!panel.querySelector('[data-entry-team-create-toggle]'),
+      };
+    });
+    assert.equal(state.enter, false, 'no bare Entrar without teams — a first team is required');
+    assert.ok(state.createToggle, 'create affordance remains the only entry path');
+  } finally {
+    await browser.close();
+  }
+});
+
 test('archived teams do not appear and do not count against the cap', async () => {
   const browser = await chromium.launch();
   try {

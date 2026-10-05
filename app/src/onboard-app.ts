@@ -2314,7 +2314,9 @@ class BiqOnboardApp extends HTMLElement {
                   <input type="text" name="age_band" maxlength="32" placeholder="Opcional" /></div>
                 <button class="onboard-btn onboard-btn-primary" type="submit" ${this._entryBusy ? 'disabled' : ''}>Crear y entrar</button>
               </form>` : ''}`}
-        <button class="onboard-btn${personalTeams.length ? '' : ' onboard-btn-primary'}" data-entry-personal-enter ${this._entryBusy ? 'disabled' : ''}>${personalTeams.length ? 'Entrar con todos los equipos' : 'Entrar'}</button>
+        ${personalTeams.length ? `
+          <button class="onboard-btn" data-entry-personal-enter ${this._entryBusy ? 'disabled' : ''}>Entrar con todos los equipos</button>
+        ` : ''}
       </section>`;
 
     const clubTab = `

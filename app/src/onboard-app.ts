@@ -315,12 +315,91 @@ function normaliseWebsiteUrl(raw: string): string | null {
   return 'https://' + v;
 }
 
+// ─── Working-context entry (BIQ-PERSONAL-CLUB-CONTEXT/1.0.0) ────────────
+// The shell injects `el.context` when a context-aware module runs inside an
+// active working context. Without it (or while the bootstrap resolves) the
+// module falls back to the legacy club step.
+
+interface OwnerScope {
+  kind: string;
+  workspace_id?: string;
+  account_id?: string;
+  club_id?: string;
+}
+
+interface ContextDescriptor {
+  token?: string;
+  context_id: string;
+  context_epoch: number;
+  owner_scope: OwnerScope;
+  team_ids: string[];
+  archived_team_ids?: string[];
+  working_team_ids: string[];
+  active_team_id?: string;
+  status?: string;
+}
+
+interface ContextCandidate {
+  kind: string;
+  owner_scope: Record<string, string>;
+  requires_verification: boolean;
+}
+
+interface BootstrapPayload {
+  schema_version: string;
+  state: string;
+  account_id: string;
+  identity_verified: boolean;
+  contexts: ContextCandidate[];
+  active: ContextDescriptor | null;
+  entry_actions: Record<string, { allowed: boolean; requires_verification: boolean }>;
+}
+
+interface PersonalTeamRow {
+  team_id: string;
+  name: string;
+  category_key: string;
+  category_label: string;
+  age_band: string;
+  gender: string;
+  section_applicability: string;
+  timezone: string;
+  season: string;
+  archived: boolean;
+  team_revision: number;
+}
+
+// Category vocabulary mirrors biq-core CATEGORIES (slug → display label).
+const PERSONAL_CATEGORIES: Array<{ key: string; label: string }> = [
+  { key: 'babybasket', label: 'Babybasket' },
+  { key: 'prebenjamin', label: 'Prebenjamín' },
+  { key: 'benjamin', label: 'Benjamín' },
+  { key: 'alevin', label: 'Alevín' },
+  { key: 'infantil', label: 'Infantil' },
+  { key: 'cadete', label: 'Cadete' },
+  { key: 'junior', label: 'Junior' },
+  { key: 'senior', label: 'Senior' },
+  { key: 'veteranos', label: 'Veteranos' },
+];
+
 // ─── Main component ─────────────────────────────────────────────────────
 
 class BiqOnboardApp extends HTMLElement {
   private shadow: ShadowRoot;
   private _org: OrgContext | null = null;
   private _user: string | null = null;
+  // Working-context entry state (BIQ-PERSONAL-CLUB-CONTEXT)
+  private _context: ContextDescriptor | null = null;
+  private _bootstrap: BootstrapPayload | null = null;
+  private _bootstrapLoading = false;
+  private _bootstrapFailed = false;
+  private _entryTab: 'personal' | 'club' = 'personal';
+  private _personalTeams: PersonalTeamRow[] | null = null;
+  private _personalTeamsLoading = false;
+  private _inviteToken = '';
+  private _invitePreview: { club_id: string; club_name: string } | null = null;
+  private _entryError: string | null = null;
+  private _entryBusy = false;
   private _subRoute = '';
   private _theme: ClubTheme | null = null;
   private _themeJob: ThemeJob | null = null;
@@ -539,6 +618,80 @@ class BiqOnboardApp extends HTMLElement {
     }
   }
   get user(): string | null { return this._user; }
+
+  // Working context (BIQ-PERSONAL-CLUB-CONTEXT): the shell injects the
+  // active-context descriptor before connecting the element.
+  set context(value: ContextDescriptor | null) {
+    this._context = value;
+    this.render();
+  }
+  get context(): ContextDescriptor | null { return this._context; }
+
+  // Bootstrap the entry surface: decides whether this module renders the
+  // context entry selector or the legacy club step. A failed/absent
+  // endpoint means the context feature is off — legacy path preserved.
+  private async loadBootstrap(): Promise<void> {
+    if (this._bootstrapLoading || this._bootstrap || this._bootstrapFailed) return;
+    this._bootstrapLoading = true;
+    try {
+      const res = await fetch('/api/context/v1/bootstrap', { credentials: 'include', cache: 'no-store' });
+      if (!res.ok) { this._bootstrapFailed = true; return; }
+      const data = await res.json().catch(() => null);
+      if (!data || typeof data.state !== 'string') { this._bootstrapFailed = true; return; }
+      this._bootstrap = data as BootstrapPayload;
+      // Default the tab: club candidates land on the club tab.
+      const hasClub = (data.contexts || []).some((c: ContextCandidate) => c.kind === 'club');
+      this._entryTab = hasClub ? 'club' : 'personal';
+    } catch (err) {
+      this._bootstrapFailed = true;
+    } finally {
+      this._bootstrapLoading = false;
+      this.render();
+    }
+  }
+
+  private async loadPersonalTeams(): Promise<void> {
+    if (this._personalTeamsLoading) return;
+    this._personalTeamsLoading = true;
+    try {
+      const res = await fetch('/api/context/v1/personal-teams', { credentials: 'include', cache: 'no-store' });
+      if (res.ok) {
+        const data = await res.json().catch(() => null);
+        this._personalTeams = Array.isArray(data?.teams) ? data.teams : [];
+      } else {
+        this._personalTeams = null;
+      }
+    } catch (err) {
+      this._personalTeams = null;
+    } finally {
+      this._personalTeamsLoading = false;
+      this.render();
+    }
+  }
+
+  private async activateContext(kind: 'personal' | 'club', clubId?: string): Promise<void> {
+    this._entryBusy = true;
+    this._entryError = null;
+    this.render();
+    try {
+      const res = await fetch('/api/context/v1/activate', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(clubId ? { kind, club_id: clubId } : { kind }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        throw new Error(body?.detail || `No se pudo activar el contexto (${res.status})`);
+      }
+      this.dispatchEvent(new CustomEvent('biq-context:activated', { bubbles: true, composed: true }));
+    } catch (err) {
+      this._entryError = (err as Error).message;
+    } finally {
+      this._entryBusy = false;
+      this.render();
+    }
+  }
 
   set route(value: string) {
     // Deep links may carry a query ("teams?return=cycle" from the mandatory
@@ -1609,7 +1762,35 @@ class BiqOnboardApp extends HTMLElement {
 
   private render(): void {
     const club = this._org?.club;
+    // Working context (BIQ-PERSONAL-CLUB-CONTEXT): con contexto activo el
+    // módulo refleja su ámbito — personal muestra el espacio privado; club
+    // sigue el Mi Club de siempre.
+    if (this._context?.owner_scope?.kind === 'personal') {
+      this.shadow.innerHTML = `<style>${styles}</style>
+        <div class="onboard-app">${this.renderPersonalPanel()}</div>`;
+      this.wirePersonalEvents();
+      return;
+    }
     if (!club) {
+      if (this._bootstrapLoading) {
+        this.shadow.innerHTML = `<style>${styles}</style>
+          <div class="onboard-app onboard-clubstep"><p class="entry-loading">Cargando…</p></div>`;
+        return;
+      }
+      if (this._bootstrap && !this._bootstrapFailed) {
+        // Context entry selector: dos pestañas (personal / club) sobre el
+        // bootstrap autoritativo — no hay club resuelto pero sí estado.
+        this.shadow.innerHTML = `<style>${styles}</style>
+          <div class="onboard-app onboard-clubstep">${this.renderEntryStep()}</div>`;
+        this.wireEntryEvents();
+        return;
+      }
+      if (!this._bootstrapFailed) {
+        this.loadBootstrap();
+        this.shadow.innerHTML = `<style>${styles}</style>
+          <div class="onboard-app onboard-clubstep"><p class="entry-loading">Cargando…</p></div>`;
+        return;
+      }
       // ADDENDUM-07 §6 — paso de club: sin club resuelto este módulo ES el
       // paso 2 del onboarding (picker / unirse por ID / crear club).
       this.shadow.innerHTML = `<style>${styles}</style>
@@ -2015,6 +2196,348 @@ class BiqOnboardApp extends HTMLElement {
     const message =
       (data && (data as { detail?: string }).detail) || `Error ${res.status}`;
     this._recoverSubmission(scope, message, seq);
+  }
+
+  // ─── Working-context entry selector ─────────────────────────────────
+  // Two tabs per the contract: "Solo entrenador" (personal workspace) and
+  // "Club actual" (memberships / invitation / gated club create). All
+  // authority lives server-side; this view only reflects entry_actions.
+
+  private renderEntryStep(): string {
+    const boot = this._bootstrap!;
+    const active = boot.active;
+    const actions = boot.entry_actions || {};
+    const clubs = (boot.contexts || []).filter((c) => c.kind === 'club');
+    const personalOk = boot.identity_verified;
+    const inviteAllowed = actions['club.invitation.redeem']?.allowed !== false;
+    const createAllowed = actions['club.create']?.allowed === true;
+
+    const activeLabel = active
+      ? active.owner_scope.kind === 'personal'
+        ? 'Espacio personal'
+        : `Club ${(clubs.find((c) => c.owner_scope.club_id === active.owner_scope.club_id) as ContextCandidate | undefined)?.name || active.owner_scope.club_id}`
+      : '';
+
+    const personalTab = `
+      <section class="entry-panel">
+        ${personalOk ? `
+          <h3 class="entry-h">Tu espacio personal</h3>
+          <p class="entry-p">Crea equipos privados y trabaja sin vincularlos a ningún club.</p>
+          ${this._personalTeams === null
+            ? `<p class="entry-loading">Cargando equipos…</p>`
+            : this._personalTeams.length
+              ? `<ul class="entry-teams">${this._personalTeams.map((t) => `
+                  <li class="entry-team"><strong>${escapeHtml(t.name)}</strong>
+                    <span>${escapeHtml(t.category_label || t.category_key)}${t.gender && t.gender !== 'X' ? ` · ${escapeHtml(t.gender)}` : ''}${t.age_band ? ` · ${escapeHtml(t.age_band)}` : ''}</span>
+                  </li>`).join('')}</ul>`
+              : ''}
+          <form class="entry-form" data-entry-personal-create>
+            <div class="entry-field"><label>Nombre del equipo</label>
+              <input type="text" name="name" maxlength="120" required placeholder="Ej. Cadete 2012" /></div>
+            <div class="entry-field"><label>Categoría</label>
+              <select name="category_key">${PERSONAL_CATEGORIES.map((c) => `<option value="${c.key}">${c.label}</option>`).join('')}</select></div>
+            <div class="entry-field"><label>Género</label>
+              <select name="gender"><option value="X">Mixto</option><option value="F">Femenino</option><option value="M">Masculino</option></select></div>
+            <div class="entry-field"><label>Edad / banda</label>
+              <input type="text" name="age_band" maxlength="32" placeholder="Opcional — ej. U14" /></div>
+            <button class="onboard-btn onboard-btn-primary" type="submit" ${this._entryBusy ? 'disabled' : ''}>
+              ${this._personalTeams && this._personalTeams.length ? 'Crear otro equipo y entrar' : 'Crear equipo y entrar'}
+            </button>
+          </form>
+          ${this._personalTeams && this._personalTeams.length
+            ? `<button class="onboard-btn" data-entry-personal-enter ${this._entryBusy ? 'disabled' : ''}>Entrar al espacio personal</button>`
+            : ''}
+        ` : `
+          <h3 class="entry-h">Espacio personal</h3>
+          <p class="entry-p">Para abrir tu espacio personal primero verifica tu correo — así vinculamos tu identidad entre sesiones y dispositivos sin mezclar datos de nadie más.</p>
+          <form class="entry-form" data-entry-verify>
+            <div class="entry-field"><label>Tu correo</label>
+              <input type="email" name="email" required placeholder="tu@correo.com" /></div>
+            <button class="onboard-btn onboard-btn-primary" type="submit" ${this._entryBusy ? 'disabled' : ''}>Enviar enlace de verificación</button>
+          </form>
+          <p class="entry-note">Al abrir el enlace se verificará tu correo y podrás continuar aquí.</p>
+        `}
+      </section>`;
+
+    const clubTab = `
+      <section class="entry-panel">
+        ${clubs.length ? `
+          <h3 class="entry-h">Tus clubes</h3>
+          <ul class="entry-teams">
+            ${clubs.map((c) => `
+              <li class="entry-team entry-team-action">
+                <button class="onboard-btn" data-entry-club-activate="${escapeHtml(c.owner_scope.club_id || '')}" ${this._entryBusy ? 'disabled' : ''}>
+                  Entrar como ${escapeHtml((c as ContextCandidate & { name?: string }).name || c.owner_scope.club_id || '')}
+                </button>
+              </li>`).join('')}
+          </ul>` : ''}
+        ${inviteAllowed ? `
+          <h3 class="entry-h">Tengo una invitación</h3>
+          <form class="entry-form" data-entry-invite-preview>
+            <div class="entry-field"><label>Código de invitación</label>
+              <input type="text" name="token" value="${escapeHtml(this._inviteToken)}" placeholder="inv_…" /></div>
+            <button class="onboard-btn" type="submit" ${this._entryBusy ? 'disabled' : ''}>Comprobar</button>
+          </form>
+          ${this._invitePreview ? `
+            <div class="entry-invite">
+              <p>Invitación para <strong>${escapeHtml(this._invitePreview.club_name || this._invitePreview.club_id)}</strong></p>
+              <button class="onboard-btn onboard-btn-primary" data-entry-invite-redeem ${this._entryBusy ? 'disabled' : ''}>Unirme al club</button>
+            </div>` : ''}
+        ` : ''}
+        ${createAllowed ? `
+          <h3 class="entry-h">Crear un club nuevo</h3>
+          <form class="entry-form" data-entry-club-create>
+            <div class="entry-field"><label>Nombre del club</label>
+              <input type="text" name="name" maxlength="200" required /></div>
+            <div class="entry-field"><label>Web (opcional)</label>
+              <input type="text" name="website" maxlength="512" placeholder="https://…" /></div>
+            <button class="onboard-btn onboard-btn-primary" type="submit" ${this._entryBusy ? 'disabled' : ''}>Crear club</button>
+          </form>
+        ` : ''}
+      </section>`;
+
+    return `
+      <div class="entry-step">
+        <h2 class="entry-title">Elige tu espacio de trabajo</h2>
+        ${activeLabel ? `<p class="entry-active">Trabajando en <strong>${escapeHtml(activeLabel)}</strong></p>` : ''}
+        ${this._entryError ? `<p class="entry-error" role="alert">${escapeHtml(this._entryError)}</p>` : ''}
+        <nav class="onboard-nav entry-tabs">
+          <button class="onboard-nav-item ${this._entryTab === 'personal' ? 'active' : ''}" data-entry-tab="personal">Solo entrenador</button>
+          <button class="onboard-nav-item ${this._entryTab === 'club' ? 'active' : ''}" data-entry-tab="club">Club actual</button>
+        </nav>
+        ${this._entryTab === 'personal' ? personalTab : clubTab}
+      </div>`;
+  }
+
+  private wireEntryEvents(): void {
+    this.shadow.querySelectorAll('[data-entry-tab]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        this._entryTab = (btn as HTMLElement).dataset.entryTab as 'personal' | 'club';
+        if (this._entryTab === 'personal' && this._bootstrap?.identity_verified && this._personalTeams === null && !this._personalTeamsLoading) {
+          this.loadPersonalTeams();
+        }
+        this.render();
+      });
+    });
+    if (this._entryTab === 'personal' && this._bootstrap?.identity_verified && this._personalTeams === null && !this._personalTeamsLoading) {
+      this.loadPersonalTeams();
+    }
+
+    this.shadow.querySelector('[data-entry-personal-create]')?.addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      const form = ev.target as HTMLFormElement;
+      const fd = new FormData(form);
+      this._entryBusy = true;
+      this._entryError = null;
+      this.render();
+      try {
+        const res = await fetch('/api/context/v1/personal-teams', {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json', 'Idempotency-Key': `entry-${Date.now()}` },
+          body: JSON.stringify({
+            name: String(fd.get('name') || '').trim(),
+            category_key: String(fd.get('category_key') || ''),
+            gender: String(fd.get('gender') || 'X'),
+            age_band: String(fd.get('age_band') || '').trim(),
+          }),
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => null);
+          throw new Error(body?.detail || `No se pudo crear el equipo (${res.status})`);
+        }
+        this._personalTeams = null;
+        await this.activateContext('personal');
+      } catch (err) {
+        this._entryError = (err as Error).message;
+      } finally {
+        this._entryBusy = false;
+        this.render();
+      }
+    });
+
+    this.shadow.querySelector('[data-entry-personal-enter]')?.addEventListener('click', () => {
+      this.activateContext('personal');
+    });
+
+    this.shadow.querySelector('[data-entry-verify]')?.addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      const fd = new FormData(ev.target as HTMLFormElement);
+      this._entryBusy = true;
+      this._entryError = null;
+      this.render();
+      try {
+        const res = await fetch('/api/auth/magic-link/request', {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: String(fd.get('email') || '').trim() }),
+        });
+        if (!res.ok) throw new Error(`No se pudo enviar el enlace (${res.status})`);
+        this._entryError = null;
+        this._invitePreview = null;
+        this._entryError = 'Revisa tu correo: te enviamos el enlace de verificación.';
+      } catch (err) {
+        this._entryError = (err as Error).message;
+      } finally {
+        this._entryBusy = false;
+        this.render();
+      }
+    });
+
+    this.shadow.querySelectorAll('[data-entry-club-activate]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        this.activateContext('club', (btn as HTMLElement).dataset.entryClubActivate || '');
+      });
+    });
+
+    this.shadow.querySelector('[data-entry-invite-preview]')?.addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      const fd = new FormData(ev.target as HTMLFormElement);
+      const token = String(fd.get('token') || '').trim();
+      this._inviteToken = token;
+      this._invitePreview = null;
+      if (!token) return;
+      this._entryBusy = true;
+      this._entryError = null;
+      this.render();
+      try {
+        const res = await fetch(`/api/context/v1/invitations/${encodeURIComponent(token)}/preview`, { credentials: 'include', cache: 'no-store' });
+        if (!res.ok) throw new Error('Invitación no válida o caducada');
+        this._invitePreview = await res.json();
+      } catch (err) {
+        this._entryError = (err as Error).message;
+      } finally {
+        this._entryBusy = false;
+        this.render();
+      }
+    });
+
+    this.shadow.querySelector('[data-entry-invite-redeem]')?.addEventListener('click', async () => {
+      if (!this._inviteToken) return;
+      this._entryBusy = true;
+      this._entryError = null;
+      this.render();
+      try {
+        const res = await fetch('/api/context/v1/invitations/redeem', {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token: this._inviteToken }),
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => null);
+          throw new Error(body?.detail || `No se pudo canjear la invitación (${res.status})`);
+        }
+        const data = await res.json();
+        this._invitePreview = null;
+        this._inviteToken = '';
+        await this.activateContext('club', data.club_id);
+      } catch (err) {
+        this._entryError = (err as Error).message;
+      } finally {
+        this._entryBusy = false;
+        this.render();
+      }
+    });
+
+    this.shadow.querySelector('[data-entry-club-create]')?.addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      const fd = new FormData(ev.target as HTMLFormElement);
+      this._entryBusy = true;
+      this._entryError = null;
+      this.render();
+      try {
+        const res = await fetch('/api/context/v1/clubs', {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name: String(fd.get('name') || '').trim(),
+            website: String(fd.get('website') || '').trim() || null,
+            idempotency_key: `entry-club-${Date.now()}`,
+          }),
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => null);
+          throw new Error(body?.detail || `No se pudo crear el club (${res.status})`);
+        }
+        const data = await res.json();
+        await this.activateContext('club', data?.club?.id || '');
+      } catch (err) {
+        this._entryError = (err as Error).message;
+      } finally {
+        this._entryBusy = false;
+        this.render();
+      }
+    });
+  }
+
+  // Personal workspace panel (Mi espacio) when the active context is
+  // private — teams list + create + switch affordance.
+  private renderPersonalPanel(): string {
+    const teams = this._personalTeams;
+    return `
+      <div class="entry-step">
+        <h2 class="entry-title">Mi espacio personal</h2>
+        ${this._entryError ? `<p class="entry-error" role="alert">${escapeHtml(this._entryError)}</p>` : ''}
+        ${teams === null
+          ? `<p class="entry-loading">Cargando equipos…</p>`
+          : teams.length
+            ? `<ul class="entry-teams">${teams.map((t) => `
+                <li class="entry-team"><strong>${escapeHtml(t.name)}</strong>
+                  <span>${escapeHtml(t.category_label || t.category_key)}${t.gender && t.gender !== 'X' ? ` · ${escapeHtml(t.gender)}` : ''}${t.age_band ? ` · ${escapeHtml(t.age_band)}` : ''}</span>
+                </li>`).join('')}</ul>`
+            : '<p class="entry-p">Todavía no tienes equipos personales.</p>'}
+        <form class="entry-form" data-entry-personal-create>
+          <div class="entry-field"><label>Nombre del equipo</label>
+            <input type="text" name="name" maxlength="120" required /></div>
+          <div class="entry-field"><label>Categoría</label>
+            <select name="category_key">${PERSONAL_CATEGORIES.map((c) => `<option value="${c.key}">${c.label}</option>`).join('')}</select></div>
+          <div class="entry-field"><label>Género</label>
+            <select name="gender"><option value="X">Mixto</option><option value="F">Femenino</option><option value="M">Masculino</option></select></div>
+          <div class="entry-field"><label>Edad / banda</label>
+            <input type="text" name="age_band" maxlength="32" placeholder="Opcional" /></div>
+          <button class="onboard-btn onboard-btn-primary" type="submit" ${this._entryBusy ? 'disabled' : ''}>Crear equipo</button>
+        </form>
+      </div>`;
+  }
+
+  private wirePersonalEvents(): void {
+    if (this._personalTeams === null && !this._personalTeamsLoading) {
+      this.loadPersonalTeams();
+    }
+    this.shadow.querySelector('[data-entry-personal-create]')?.addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      const fd = new FormData(ev.target as HTMLFormElement);
+      this._entryBusy = true;
+      this._entryError = null;
+      this.render();
+      try {
+        const res = await fetch('/api/context/v1/personal-teams', {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json', 'Idempotency-Key': `panel-${Date.now()}` },
+          body: JSON.stringify({
+            name: String(fd.get('name') || '').trim(),
+            category_key: String(fd.get('category_key') || ''),
+            gender: String(fd.get('gender') || 'X'),
+            age_band: String(fd.get('age_band') || '').trim(),
+          }),
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => null);
+          throw new Error(body?.detail || `No se pudo crear el equipo (${res.status})`);
+        }
+        this._personalTeams = null;
+        this.loadPersonalTeams();
+      } catch (err) {
+        this._entryError = (err as Error).message;
+      } finally {
+        this._entryBusy = false;
+        this.render();
+      }
+    });
   }
 
   private renderClubStep(): string {

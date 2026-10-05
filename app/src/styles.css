@@ -1236,3 +1236,23 @@
   display: flex;
   gap: 8px;
 }
+
+/* ─── Working-context entry selector (BIQ-PERSONAL-CLUB-CONTEXT) ─────── */
+.entry-step { display: flex; flex-direction: column; gap: 12px; }
+.entry-title { font-size: 1.25rem; font-weight: 700; margin: 0; }
+.entry-h { font-size: 0.95rem; font-weight: 600; margin: 12px 0 6px; }
+.entry-p, .entry-note { color: var(--biq-muted, #666); font-size: 0.9rem; margin: 4px 0; }
+.entry-active { font-size: 0.9rem; }
+.entry-error { color: #b3261e; font-size: 0.9rem; margin: 4px 0; }
+.entry-loading { color: var(--biq-muted, #666); font-size: 0.9rem; }
+.entry-tabs { margin-bottom: 8px; }
+.entry-panel { display: flex; flex-direction: column; gap: 8px; }
+.entry-teams { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.entry-team { display: flex; align-items: baseline; gap: 8px; padding: 8px 10px; border: 1px solid var(--biq-border, #e0e0e0); border-radius: 8px; }
+.entry-team span { color: var(--biq-muted, #666); font-size: 0.85rem; }
+.entry-team-action { padding: 4px 6px; }
+.entry-form { display: flex; flex-direction: column; gap: 10px; max-width: 320px; }
+.entry-field { display: flex; flex-direction: column; gap: 4px; }
+.entry-field label { font-size: 0.85rem; font-weight: 600; }
+.entry-field input, .entry-field select { padding: 8px 10px; border: 1px solid var(--biq-border, #e0e0e0); border-radius: 8px; font-size: 0.9rem; }
+.entry-invite { padding: 10px; border: 1px solid var(--biq-border, #e0e0e0); border-radius: 8px; display: flex; flex-direction: column; gap: 8px; max-width: 320px; }

@@ -18,7 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import auth
+from . import auth, entry_ops
 from .routers import clubs, club_profile, members, onboarding, onboarding_flow, roles, season, teams, theme, users
 
 
@@ -65,6 +65,11 @@ def create_app() -> FastAPI:
     app.include_router(season.router, prefix="/api/admin", tags=["admin-season"])
     app.include_router(theme.router, prefix="/api/admin", tags=["admin-theme"])
     app.include_router(members.router, prefix="/api/admin", tags=["admin-members"])
+
+    # Authorized entry ops (BIQ-PERSONAL-CLUB-CONTEXT/1.0.0): invitations +
+    # gated club create, consumed by biq-app over S2S + entry proof.
+    app.include_router(entry_ops.router, tags=["entry-ops"])
+    app.include_router(entry_ops.staff_router, tags=["admin-invitations"])
 
     # Static file serving — front-end app and embeddable library.
     # API routes are registered above; the catch-all below serves

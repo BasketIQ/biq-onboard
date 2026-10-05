@@ -19,17 +19,15 @@ Backend: all three stores on ``firestore`` + a monkeypatched
 
 from __future__ import annotations
 
-import os
 import threading
 from typing import Any
 
 import pytest
 
-os.environ.setdefault("BIQ_ONBOARD_HTTPS_ONLY", "0")
-os.environ.setdefault("BIQ_ONBOARD_SESSION_SECRET", "test-secret")
-os.environ.setdefault("BIQ_ONBOARD_S2S_SECRET", "test-s2s-secret")
-os.environ.setdefault("BIQ_EMBED_JWT_SECRET", "test-embed-secret")
-
+# NOTE: no module-level env writes — BIQ_ONBOARD_S2S_SECRET /
+# BIQ_EMBED_JWT_SECRET configured globally at collection time switch every
+# endpoint in OTHER test modules to fail-closed S2S auth. They are set
+# inside the fixture via monkeypatch, like test_entry_ops.
 from google.api_core import exceptions as gexc  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
@@ -229,6 +227,8 @@ def fx(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("BIQ_ORG_STORE", "firestore")
     monkeypatch.setenv("BIQ_ROLES_STORE", "firestore")
     monkeypatch.setenv("BIQ_INVITATION_STORE", "firestore")
+    monkeypatch.setenv("BIQ_ONBOARD_S2S_SECRET", "test-s2s-secret")
+    monkeypatch.setenv("BIQ_EMBED_JWT_SECRET", "test-embed-secret")
     monkeypatch.setattr(org, "_get_firestore_client", lambda: fake)
     org.reset_for_tests()
     invitations.reset_invitation_store()

@@ -396,6 +396,7 @@ class BiqOnboardApp extends HTMLElement {
   private _entryTab: 'personal' | 'club' = 'personal';
   private _personalTeams: PersonalTeamRow[] | null = null;
   private _personalTeamsLoading = false;
+  private _editingPersonalTeamId: string | null = null;
   private _inviteToken = '';
   private _invitePreview: { club_id: string; club_name: string } | null = null;
   private _inviteLoading = false;
@@ -1815,6 +1816,25 @@ class BiqOnboardApp extends HTMLElement {
 
   private render(): void {
     const club = this._org?.club;
+    // R6: el selector de espacios es alcanzable en TODAS las cohortes —
+    // un miembro con club activo o una sesión con contexto personal
+    // también puede cambiar de espacio desde #/onboard/spaces. Solo la
+    // ausencia real de autoridad cae a la vista legacy.
+    if (this._subRoute === 'spaces') {
+      if (this._bootstrap && !this._bootstrapFailed) {
+        this.shadow.innerHTML = `<style>${styles}</style>
+          <div class="onboard-app onboard-clubstep">${this.renderEntryStep()}</div>`;
+        this.wireEntryEvents();
+        return;
+      }
+      if (!this._bootstrapFailed) {
+        if (!this._bootstrapLoading) this.loadBootstrap();
+        this.shadow.innerHTML = `<style>${styles}</style>
+          <div class="onboard-app onboard-clubstep"><p class="entry-loading">Cargando…</p></div>`;
+        return;
+      }
+      // Sin autoridad de contexto no hay selector — la vista legacy sigue.
+    }
     // Working context (BIQ-PERSONAL-CLUB-CONTEXT): con contexto activo el
     // módulo refleja su ámbito — personal muestra el espacio privado; club
     // sigue el Mi Club de siempre.
@@ -1877,6 +1897,7 @@ class BiqOnboardApp extends HTMLElement {
           <button class="onboard-nav-item ${section === 'teams' ? 'active' : ''}" data-nav="teams">Equipos</button>
           ${canManageMembers ? `<button class="onboard-nav-item ${section === 'members' ? 'active' : ''}" data-nav="members">Miembros</button>` : ''}
           <button class="onboard-nav-item ${section === 'profile' ? 'active' : ''}" data-nav="profile">Perfil</button>
+          <button class="onboard-nav-item" data-nav="spaces">Espacios</button>
         </nav>`}
         ${content}
       </div>`;
@@ -2556,21 +2577,47 @@ class BiqOnboardApp extends HTMLElement {
   // Personal workspace panel (Mi espacio) when the active context is
   // private — teams list + create + switch affordance.
   private renderPersonalPanel(): string {
-    const teams = (this._personalTeams || []).filter((t) => !t.archived);
+    const all = this._personalTeams || [];
+    const teams = all.filter((t) => !t.archived);
+    const archived = all.filter((t) => t.archived);
     const atCap = teams.length >= 2;
+    const teamRow = (t: PersonalTeamRow) => this._editingPersonalTeamId === t.team_id ? `
+      <li class="entry-team">
+        <form class="entry-form" data-personal-team-edit="${escapeHtml(t.team_id)}" data-revision="${t.team_revision}">
+          <div class="entry-field"><label>Nombre del equipo</label>
+            <input type="text" name="name" maxlength="120" required value="${escapeHtml(t.name)}" /></div>
+          <div class="entry-field"><label>Categoría</label>
+            <select name="category_key">${PERSONAL_CATEGORIES.map((c) => `<option value="${c.key}"${c.key === t.category_key ? ' selected' : ''}>${c.label}</option>`).join('')}</select></div>
+          <div class="entry-field"><label>Género</label>
+            <select name="gender">${['X', 'F', 'M'].map((g) => `<option value="${g}"${g === t.gender ? ' selected' : ''}>${g === 'X' ? 'Mixto' : g === 'F' ? 'Femenino' : 'Masculino'}</option>`).join('')}</select></div>
+          <div class="entry-field"><label>Edad / banda</label>
+            <input type="text" name="age_band" maxlength="32" value="${escapeHtml(t.age_band || '')}" /></div>
+          <button class="onboard-btn onboard-btn-primary" type="submit" ${this._entryBusy ? 'disabled' : ''}>Guardar</button>
+          <button class="onboard-btn" type="button" data-personal-team-edit-cancel ${this._entryBusy ? 'disabled' : ''}>Cancelar</button>
+        </form>
+      </li>` : `
+      <li class="entry-team"><strong>${escapeHtml(t.name)}</strong>
+        <span>${escapeHtml(t.category_label || t.category_key)}${t.gender && t.gender !== 'X' ? ` · ${escapeHtml(t.gender)}` : ''}${t.age_band ? ` · ${escapeHtml(t.age_band)}` : ''}</span>
+        <button class="onboard-btn" data-personal-team-edit-open="${escapeHtml(t.team_id)}" ${this._entryBusy ? 'disabled' : ''}>Editar</button>
+        <button class="onboard-btn entry-team-delete" data-personal-team-delete="${escapeHtml(t.team_id)}" ${this._entryBusy ? 'disabled' : ''}>Eliminar</button>
+      </li>`;
     return `
       <div class="entry-step">
         <h2 class="entry-title">Mi espacio personal</h2>
+        <button class="onboard-btn" data-personal-switch-space>Cambiar de espacio</button>
         ${this._entryError ? `<p class="entry-error" role="alert">${escapeHtml(this._entryError)}</p>` : ''}
         ${this._personalTeams === null
           ? `<p class="entry-loading">Cargando equipos…</p>`
           : teams.length
-            ? `<ul class="entry-teams">${teams.map((t) => `
-                <li class="entry-team"><strong>${escapeHtml(t.name)}</strong>
-                  <span>${escapeHtml(t.category_label || t.category_key)}${t.gender && t.gender !== 'X' ? ` · ${escapeHtml(t.gender)}` : ''}${t.age_band ? ` · ${escapeHtml(t.age_band)}` : ''}</span>
-                  <button class="onboard-btn entry-team-delete" data-personal-team-delete="${escapeHtml(t.team_id)}" ${this._entryBusy ? 'disabled' : ''}>Eliminar</button>
-                </li>`).join('')}</ul>`
+            ? `<ul class="entry-teams">${teams.map(teamRow).join('')}</ul>`
             : '<p class="entry-p">Todavía no tienes equipos personales.</p>'}
+        ${archived.length ? `
+          <h3 class="entry-h">Archivados</h3>
+          <ul class="entry-teams">${archived.map((t) => `
+            <li class="entry-team"><strong>${escapeHtml(t.name)}</strong>
+              <span>${escapeHtml(t.category_label || t.category_key)}</span>
+              <button class="onboard-btn" data-personal-team-restore="${escapeHtml(t.team_id)}" ${this._entryBusy || atCap ? 'disabled' : ''}>Restaurar</button>
+            </li>`).join('')}</ul>` : ''}
         ${atCap
           ? '<p class="entry-note">Puedes tener hasta 2 equipos personales. Elimina uno para crear otro.</p>'
           : `<form class="entry-form" data-entry-personal-create>
@@ -2591,6 +2638,11 @@ class BiqOnboardApp extends HTMLElement {
     if (this._personalTeams === null && !this._personalTeamsLoading) {
       this.loadPersonalTeams();
     }
+    // R6: el conmutador de espacios también es accesible desde el modo
+    // personal — navega al selector autoritativo.
+    this.shadow.querySelector('[data-personal-switch-space]')?.addEventListener('click', () => {
+      location.hash = '#/onboard/spaces';
+    });
     this.shadow.querySelector('[data-entry-personal-create]')?.addEventListener('submit', async (ev) => {
       ev.preventDefault();
       const fd = new FormData(ev.target as HTMLFormElement);
@@ -2639,6 +2691,81 @@ class BiqOnboardApp extends HTMLElement {
           if (!res.ok) {
             const body = await res.json().catch(() => null);
             throw new Error(body?.detail || `No se pudo eliminar el equipo (${res.status})`);
+          }
+          this._personalTeams = null;
+          this.loadPersonalTeams();
+        } catch (err) {
+          this._entryError = (err as Error).message;
+        } finally {
+          this._entryBusy = false;
+          this.render();
+        }
+      });
+    });
+    // Editar — formulario inline por equipo; PATCH con expected_revision
+    // para que una edición sobre una versión vieja conflicte (409).
+    this.shadow.querySelectorAll('[data-personal-team-edit-open]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        this._editingPersonalTeamId = (btn as HTMLElement).dataset.personalTeamEditOpen || null;
+        this.render();
+      });
+    });
+    this.shadow.querySelector('[data-personal-team-edit-cancel]')?.addEventListener('click', () => {
+      this._editingPersonalTeamId = null;
+      this.render();
+    });
+    this.shadow.querySelector('[data-personal-team-edit]')?.addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      const form = ev.target as HTMLFormElement;
+      const teamId = form.dataset.personalTeamEdit || '';
+      const revision = parseInt(form.dataset.revision || '', 10);
+      const fd = new FormData(form);
+      this._entryBusy = true;
+      this._entryError = null;
+      this.render();
+      try {
+        const res = await fetch(`/api/context/v1/personal-teams/${encodeURIComponent(teamId)}`, {
+          method: 'PATCH',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name: String(fd.get('name') || '').trim(),
+            category_key: String(fd.get('category_key') || ''),
+            gender: String(fd.get('gender') || 'X'),
+            age_band: String(fd.get('age_band') || '').trim(),
+            ...(Number.isFinite(revision) ? { expected_revision: revision } : {}),
+          }),
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => null);
+          throw new Error(body?.detail || `No se pudo guardar el equipo (${res.status})`);
+        }
+        this._editingPersonalTeamId = null;
+        this._personalTeams = null;
+        this.loadPersonalTeams();
+      } catch (err) {
+        this._entryError = (err as Error).message;
+      } finally {
+        this._entryBusy = false;
+        this.render();
+      }
+    });
+    // Restaurar un equipo archivado (bloqueado cuando el cap está lleno).
+    this.shadow.querySelectorAll('[data-personal-team-restore]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const teamId = (btn as HTMLElement).dataset.personalTeamRestore || '';
+        if (!teamId) return;
+        this._entryBusy = true;
+        this._entryError = null;
+        this.render();
+        try {
+          const res = await fetch(`/api/context/v1/personal-teams/${encodeURIComponent(teamId)}/restore`, {
+            method: 'POST',
+            credentials: 'include',
+          });
+          if (!res.ok) {
+            const body = await res.json().catch(() => null);
+            throw new Error(body?.detail || `No se pudo restaurar el equipo (${res.status})`);
           }
           this._personalTeams = null;
           this.loadPersonalTeams();

@@ -102,7 +102,7 @@ const PERSONAL_TEAMS = [
   },
 ];
 
-async function newEntryPage(browser, { bootstrap = BOOTSTRAP, routeQuery = null, personalTeams = PERSONAL_TEAMS, personalContext = false } = {}) {
+async function newEntryPage(browser, { bootstrap = BOOTSTRAP, routeQuery = null, personalTeams = PERSONAL_TEAMS, personalContext = false, org = undefined } = {}) {
   const page = await browser.newPage();
   const log = [];
 
@@ -140,16 +140,18 @@ async function newEntryPage(browser, { bootstrap = BOOTSTRAP, routeQuery = null,
     const el = document.getElementById('app');
     return !!(el && el.shadowRoot);
   }, { timeout: 10000 });
-  await page.evaluate(({ rq, personal }) => {
+  await page.evaluate(({ rq, personal, orgCtx }) => {
     const el = document.getElementById('app');
     if (rq) el.route = rq;
     if (personal) el.context = { owner_scope: { kind: 'personal' } };
-    el.org = { club: null, email: 'e2e@basketiq.io', display_name: 'E2E', memberships: [] };
+    el.org = orgCtx !== null
+      ? orgCtx
+      : { club: null, email: 'e2e@basketiq.io', display_name: 'E2E', memberships: [] };
     el.user = 'e2e-user';
-  }, { rq: routeQuery, personal: personalContext });
+  }, { rq: routeQuery, personal: personalContext, orgCtx: org === undefined ? null : org });
   await page.waitForFunction(() => {
     const el = document.getElementById('app');
-    return !!(el.shadowRoot && el.shadowRoot.querySelector('.entry-step'));
+    return !!(el.shadowRoot && el.shadowRoot.childElementCount > 0);
   }, { timeout: 10000 });
 
   return { page, log };
@@ -525,6 +527,135 @@ test('invitation deep link (?invite=) auto-previews and confirms on Mi club', as
     const redeem = log.find((r) => r.url.includes('/api/context/v1/invitations/redeem'));
     assert.ok(redeem, 'redeem request must fire');
     assert.deepEqual(JSON.parse(redeem.postData), { token: 'tok-abc' });
+  } finally {
+    await browser.close();
+  }
+});
+
+// ─── R6: selector reachable under every cohort ───────────────────────────
+
+test('spaces route renders the selector for an existing club member (R6)', async () => {
+  const browser = await chromium.launch();
+  try {
+    const { page } = await newEntryPage(browser, {
+      routeQuery: 'spaces',
+      org: {
+        club: { id: 'club-1', name: 'Club Uno' },
+        role: 'administrator',
+        email: 'e2e@basketiq.io',
+        display_name: 'E2E',
+        memberships: [{ club_id: 'club-1', club_name: 'Club Uno', role: 'administrator' }],
+      },
+    });
+    const found = await page.evaluate(() => {
+      const el = document.getElementById('app');
+      return {
+        selector: !!el.shadowRoot.querySelector('.entry-step'),
+        tabs: [...el.shadowRoot.querySelectorAll('[data-entry-tab]')].map((b) => b.textContent.trim()),
+      };
+    });
+    assert.ok(found.selector, 'a club member must reach the selector via #/onboard/spaces');
+    assert.deepEqual(found.tabs, ['Mi equipo', 'Mi club']);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('club nav exposes an Espacios tab that opens the selector (R6)', async () => {
+  const browser = await chromium.launch();
+  try {
+    const { page } = await newEntryPage(browser, {
+      org: {
+        club: { id: 'club-1', name: 'Club Uno' },
+        role: 'coach',
+        email: 'e2e@basketiq.io',
+        display_name: 'E2E',
+        memberships: [{ club_id: 'club-1', club_name: 'Club Uno', role: 'coach' }],
+      },
+    });
+    // The member lands on club admin — an «Espacios» nav item must exist.
+    const navHasSpaces = await page.evaluate(() => {
+      const el = document.getElementById('app');
+      return !!el.shadowRoot.querySelector('[data-nav="spaces"]');
+    });
+    assert.ok(navHasSpaces, 'club admin nav must carry the Espacios switch');
+    await page.evaluate(() => {
+      const el = document.getElementById('app');
+      el.shadowRoot.querySelector('[data-nav="spaces"]').click();
+    });
+    await page.waitForFunction(() => {
+      const el = document.getElementById('app');
+      return !!(el.shadowRoot && el.shadowRoot.querySelector('.entry-step'));
+    }, { timeout: 10000 });
+  } finally {
+    await browser.close();
+  }
+});
+
+test('personal panel offers the space switch (R6)', async () => {
+  const browser = await chromium.launch();
+  try {
+    const { page } = await newEntryPage(browser, { personalContext: true });
+    const hasSwitch = await page.evaluate(() => {
+      const el = document.getElementById('app');
+      return !!el.shadowRoot.querySelector('[data-personal-switch-space]');
+    });
+    assert.ok(hasSwitch, 'personal mode must expose the space switch');
+  } finally {
+    await browser.close();
+  }
+});
+
+test('personal panel edit issues PATCH with expected_revision (R6)', async () => {
+  const browser = await chromium.launch();
+  try {
+    const teams = [{ ...PERSONAL_TEAMS[0], team_revision: 7 }];
+    const { page, log } = await newEntryPage(browser, { personalContext: true, personalTeams: teams });
+    await page.waitForFunction(() => {
+      const el = document.getElementById('app');
+      return !!(el.shadowRoot && el.shadowRoot.querySelector('[data-personal-team-edit-open]'));
+    }, { timeout: 10000 });
+    await page.evaluate(() => {
+      const el = document.getElementById('app');
+      el.shadowRoot.querySelector('[data-personal-team-edit-open]').click();
+    });
+    await page.waitForFunction(() => {
+      const el = document.getElementById('app');
+      return !!el.shadowRoot.querySelector('[data-personal-team-edit]');
+    }, { timeout: 10000 });
+    await page.evaluate(() => {
+      const el = document.getElementById('app');
+      const form = el.shadowRoot.querySelector('[data-personal-team-edit]');
+      form.querySelector('input[name="name"]').value = 'Paquetillos Pro';
+      form.dispatchEvent(new Event('submit', { cancelable: true }));
+    });
+    await new Promise((r) => setTimeout(r, 300));
+    const patch = log.find((r) => r.method === 'PATCH' && r.url.includes('/api/context/v1/personal-teams/pt-1'));
+    assert.ok(patch, 'PATCH must fire for the edited team');
+    const body = JSON.parse(patch.postData);
+    assert.equal(body.name, 'Paquetillos Pro');
+    assert.equal(body.expected_revision, 7, 'CAS revision must ride the patch');
+  } finally {
+    await browser.close();
+  }
+});
+
+test('archived personal teams can be restored (R6)', async () => {
+  const browser = await chromium.launch();
+  try {
+    const teams = [{ ...PERSONAL_TEAMS[0], archived: true }];
+    const { page, log } = await newEntryPage(browser, { personalContext: true, personalTeams: teams });
+    await page.waitForFunction(() => {
+      const el = document.getElementById('app');
+      return !!(el.shadowRoot && el.shadowRoot.querySelector('[data-personal-team-restore]'));
+    }, { timeout: 10000 });
+    await page.evaluate(() => {
+      const el = document.getElementById('app');
+      el.shadowRoot.querySelector('[data-personal-team-restore]').click();
+    });
+    await new Promise((r) => setTimeout(r, 300));
+    const restore = log.find((r) => r.method === 'POST' && r.url.includes('/personal-teams/pt-1/restore'));
+    assert.ok(restore, 'restore POST must fire');
   } finally {
     await browser.close();
   }

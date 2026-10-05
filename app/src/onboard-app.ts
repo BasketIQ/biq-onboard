@@ -2336,7 +2336,7 @@ class BiqOnboardApp extends HTMLElement {
                   Entrar como ${escapeHtml((c as ContextCandidate & { name?: string }).name || c.owner_scope.club_id || '')}
                 </button>
               </li>`).join('')}
-          </ul>` : ''}
+          </ul>` : `<p class="entry-empty">No tienes clubes todavía.</p>`}
       </section>`;
 
     const helpModal = this._helpOpen

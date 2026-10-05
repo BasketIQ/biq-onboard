@@ -1241,6 +1241,7 @@
 .entry-step { display: flex; flex-direction: column; gap: 12px; }
 .entry-title { font-size: 1.25rem; font-weight: 700; margin: 0; }
 .entry-h { font-size: 0.95rem; font-weight: 600; margin: 12px 0 6px; }
+.entry-empty { color: var(--biq-muted); font-size: 0.9rem; margin: 12px 0; text-align: center; }
 .entry-p, .entry-note { color: var(--biq-muted, #666); font-size: 0.9rem; margin: 4px 0; }
 .entry-active { font-size: 0.9rem; }
 .entry-error { color: #b3261e; font-size: 0.9rem; margin: 4px 0; }
@@ -1258,11 +1259,13 @@
 .entry-invite { padding: 10px; border: 1px solid var(--biq-border, #e0e0e0); border-radius: 8px; display: flex; flex-direction: column; gap: 8px; max-width: 320px; }
 .entry-head { display: flex; align-items: center; justify-content: space-between; }
 .entry-head .entry-h { margin: 0; }
-.entry-tab { flex: 1; display: flex; align-items: center; border-radius: 8px; transition: background 0.15s, color 0.15s; }
+.entry-tab { flex: 1; position: relative; display: flex; align-items: center; justify-content: center; border-radius: 8px; transition: background 0.15s, color 0.15s; }
 .entry-tab.active { background: var(--biq-surface-1); box-shadow: var(--biq-shadow-sm); }
-.entry-tab-btn { flex: 1; padding: 10px 4px 10px 16px; border: 0; background: transparent; color: var(--biq-muted); font: inherit; font-size: 14px; font-weight: 600; text-align: left; cursor: pointer; border-radius: 8px; }
+.entry-tab-btn { flex: 1; padding: 10px 36px; border: 0; background: transparent; color: var(--biq-muted); font: inherit; font-size: 14px; font-weight: 600; text-align: center; cursor: pointer; border-radius: 8px; }
 .entry-tab.active .entry-tab-btn { color: var(--biq-text); }
-.entry-help { border: 0; background: transparent; padding: 4px; cursor: pointer; display: inline-flex; align-items: center; border-radius: 50%; }
+.entry-help { position: absolute; top: 50%; transform: translateY(-50%); border: 0; background: transparent; padding: 4px; cursor: pointer; display: inline-flex; align-items: center; border-radius: 50%; }
+.entry-tab:first-child .entry-help { left: 8px; }
+.entry-tab:last-child .entry-help { right: 8px; }
 .entry-help:hover { background: var(--biq-hover, rgba(0,0,0,0.06)); }
 .entry-help .nav-chispa { display: block; width: 24px; height: 24px; }
 .entry-help .entry-chispa-dark { display: none; }

@@ -458,6 +458,42 @@ def test_team_competitive_level_defaults_empty(admin_client):
     assert r.json()["teams"][0]["competitive_level"] == ""
 
 
+def test_create_team_with_staff_user_ids_roundtrips(admin_client):
+    """TeamCreate accepts staff_user_ids (personal→club upgrade path assigns
+    the creator membership as staff of the migrated team)."""
+    admin_client.post("/api/admin/clubs", json={"id": "club_stf", "name": "Club Stf"})
+    admin_client.post(
+        "/api/admin/clubs/club_stf/teams",
+        json={
+            "id": "team_stf_1",
+            "club_id": "club_stf",
+            "name": "Cadete A",
+            "staff_user_ids": ["f1f2m_abc"],
+        },
+    )
+    r = admin_client.get("/api/admin/clubs/club_stf/teams")
+    assert r.status_code == 200
+    team = r.json()["teams"][0]
+    assert team["staff_user_ids"] == ["f1f2m_abc"]
+
+
+def test_create_team_omitted_staff_preserves_existing_on_replay(admin_client):
+    """Omitted staff_user_ids must not clear stored staff — the upgrade
+    idempotent replay upserts by deterministic id."""
+    admin_client.post("/api/admin/clubs", json={"id": "club_stp", "name": "Club Stp"})
+    admin_client.post(
+        "/api/admin/clubs/club_stp/teams",
+        json={"id": "team_stp_1", "club_id": "club_stp", "name": "Junior B",
+              "staff_user_ids": ["f1f2m_abc"]},
+    )
+    admin_client.post(
+        "/api/admin/clubs/club_stp/teams",
+        json={"id": "team_stp_1", "club_id": "club_stp", "name": "Junior B"},
+    )
+    r = admin_client.get("/api/admin/clubs/club_stp/teams")
+    assert r.json()["teams"][0]["staff_user_ids"] == ["f1f2m_abc"]
+
+
 def test_update_team_competitive_level(admin_client):
     admin_client.post("/api/admin/clubs", json={"id": "club_lu", "name": "Club LU"})
     admin_client.post(

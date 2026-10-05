@@ -91,6 +91,8 @@ def create_team(club_id: str, payload: TeamCreate, request: Request) -> dict:
         from biq_core.org import TeamPlayer
 
         extra["players"] = [TeamPlayer(name=p.name, number=p.number) for p in payload.players]
+    if payload.staff_user_ids is not None:
+        extra["staff_user_ids"] = payload.staff_user_ids
     team = Team(
         id=payload.id,
         club_id=club_id,

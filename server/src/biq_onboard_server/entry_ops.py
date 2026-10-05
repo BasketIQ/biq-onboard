@@ -66,29 +66,38 @@ def _account_from_proof(request: Request) -> str:
     return _proof_claims(request)["sub"]
 
 
-def _issuer_still_grants(inv: invitations.Invitation, roles: list[str]) -> bool:
-    """Live issuer check (R5): the invite dies when the issuer no longer
-    holds the authority it minted under — an invitation survives neither
-    the issuer's membership loss nor a capability downgrade. Platform
-    break-glass issuers are env-bound, not memberships, so they are
-    evaluated against the platform gate instead."""
+def _issuer_still_grants(
+    state: invitations.RedeemRead,
+    inv: invitations.Invitation,
+    roles: list[str],
+) -> bool:
+    """Live issuer check (R5/B1), inside the redeem fence: the issuer's
+    user record and role assignments are read through the transaction, so
+    a demotion or membership loss racing the claim aborts it — the invite
+    dies when the issuer no longer holds the authority it minted under.
+    Platform break-glass issuers are env-bound, not memberships, so they
+    are evaluated against the platform gate instead."""
     issuer = inv.issuer_membership_id
     if not issuer:
         return False
     if _is_break_glass_admin(issuer):
         return True
-    try:
-        record = org.get_registry().get_user(issuer)
-    except Exception:
-        raise HTTPException(status_code=503, detail="registry unavailable")
+    record = state.get_user(issuer)
     if (
-        record is None
-        or getattr(record, "club_id", None) != inv.club_id
-        or getattr(record, "status", None) != "active"
+        not record
+        or record.get("club_id") != inv.club_id
+        or record.get("status") != "active"
     ):
         return False
-    caps = effective_capabilities(issuer, f"club:{inv.club_id}", org.get_roles())
-    return all(can_assign_role(caps, role) for role in roles)
+    from biq_core.roles.models import ROLE_CAPABILITIES, ROLES
+
+    now = _now_iso()
+    caps: set[str] = set()
+    for assignment in state.list_assignments(issuer, f"club:{inv.club_id}"):
+        if not assignment.is_active(now) or assignment.role not in ROLES:
+            continue
+        caps |= ROLE_CAPABILITIES.get(assignment.role, frozenset())
+    return all(can_assign_role(sorted(caps), role) for role in roles)
 
 
 def _now_iso() -> str:
@@ -148,100 +157,116 @@ async def invitation_redeem(request: Request) -> dict:
         raise HTTPException(status_code=400, detail="token required")
     claims = _proof_claims(request)
     account_id = claims["sub"]
+    # Verified mailbox carried by the proof — checked inside the fence
+    # against the authoritative invitation record.
+    proven = (
+        str(claims.get("vemail") or "").strip().lower()
+        if claims.get("scope") == "verified"
+        else ""
+    )
     store = invitations.get_invitation_store()
-    inv = store.get_by_digest(invitations.token_digest(body.token.strip()))
-    if inv is None:
+    found = store.get_by_digest(invitations.token_digest(body.token.strip()))
+    if found is None:
         raise HTTPException(status_code=404, detail="invitation not found")
-
-    # Verified recipient binding (R5): when the issuer targeted a mailbox,
-    # the claimant must hold a cryptographically-bound proof of that same
-    # mailbox — a membership-scope proof or a different verified mailbox
-    # can never claim it. Untargeted invitations stay claim-by-possession.
-    recipient = (inv.recipient_email or "").strip().lower()
-    if recipient:
-        proven = (
-            str(claims.get("vemail") or "").strip().lower()
-            if claims.get("scope") == "verified"
-            else ""
-        )
-        if proven != recipient:
-            raise HTTPException(status_code=403, detail="invitation unavailable")
-
-    # Stored roles must be a strict subset of the assignable set — an
-    # out-of-band edit is corrupt data, not a reason to silently mint a
-    # coach (fail closed, no default-role widening).
-    roles = [r for r in inv.proposed_roles if r in _MEMBER_ROLES]
-    if not roles or len(roles) != len(inv.proposed_roles):
-        raise HTTPException(status_code=409, detail="invitation unavailable")
-
-    # Live issuer check: the grant the issuer minted must still match the
-    # issuer's live authority — demotions and membership loss kill the
-    # outstanding invitation.
-    if not _issuer_still_grants(inv, roles):
-        raise HTTPException(status_code=409, detail="invitation unavailable")
-
     # Deterministic membership id: concurrent claims upsert the same row,
-    # the transact() gate picks exactly one winner — no duplicate members.
-    membership_id = f"f1f2m_{hashlib.sha256(inv.invitation_id.encode()).hexdigest()[:12]}"
-    now = _now_iso()
+    # the transaction fence picks exactly one winner — no duplicate members.
+    membership_id = f"f1f2m_{hashlib.sha256(found.invitation_id.encode()).hexdigest()[:12]}"
 
-    def _claim(current: invitations.Invitation | None) -> invitations.Invitation | None:
-        if current is None or not current.is_live(now):
-            return None
-        current.status = "redeemed"
-        current.redeemed_at = now
-        current.redeemed_account_id = account_id
-        current.membership_subject_id = membership_id
-        return current
+    from biq_core.org import User
+    from biq_core.roles import RoleAssignment
 
-    claimed = store.transact(inv.invitation_id, _claim)
-    if claimed is None:
-        raise HTTPException(status_code=404, detail="invitation not found")
-    # One gate covers every dead end: revoked (absolute — even the original
-    # claimer cannot replay), expired/still-pending, and a claim owned by
-    # a different account. A same-account replay of its own redemption is
-    # the single idempotent re-answer allowed through.
-    if (
-        claimed.status != "redeemed"
-        or claimed.redeemed_account_id != account_id
-        or claimed.membership_subject_id != membership_id
-    ):
-        raise HTTPException(status_code=409, detail="invitation unavailable")
-
-    try:
-        from biq_core.org import User
-        from biq_core.roles import RoleAssignment
-
-        registry = org.get_registry()
-        membership = User(
-            id=membership_id,
-            club_id=inv.club_id,
-            email="",
-            display_name="",
-            role=roles[0],
-            status="active",
-        )
-        registry.upsert_user(membership)
-        role_registry = org.get_roles()
-        for role in roles:
+    def _decide(state: invitations.RedeemRead) -> invitations.RedeemPlan:
+        inv = state.invitation
+        if inv is None:
+            return invitations.RedeemPlan(error=(404, "invitation not found"))
+        now = _now_iso()
+        if inv.is_live(now):
+            # Verified recipient binding (R5/B1): an issuer-targeted mailbox
+            # must match the claimant's cryptographically-bound proof —
+            # evaluated here so out-of-band invitation edits can't slip
+            # between a preflight read and the claim.
+            recipient = (inv.recipient_email or "").strip().lower()
+            if recipient and proven != recipient:
+                return invitations.RedeemPlan(error=(403, "invitation unavailable"))
+            # Stored roles must be a strict subset of the assignable set —
+            # an out-of-band edit is corrupt data, not a reason to mint a
+            # default coach (fail closed, no widening).
+            roles = [r for r in inv.proposed_roles if r in _MEMBER_ROLES]
+            if not roles or len(roles) != len(inv.proposed_roles):
+                return invitations.RedeemPlan(error=(409, "invitation unavailable"))
+            if not _issuer_still_grants(state, inv, roles):
+                return invitations.RedeemPlan(error=(409, "invitation unavailable"))
+            inv.status = "redeemed"
+            inv.redeemed_at = now
+            inv.redeemed_account_id = account_id
+            inv.membership_subject_id = membership_id
             scope = f"club:{inv.club_id}"
-            role_registry.put_assignment(
+            member = User(
+                id=membership_id,
+                club_id=inv.club_id,
+                email="",
+                display_name="",
+                role=roles[0],
+                status="active",
+            )
+            assignments = [
                 RoleAssignment(
                     user_id=membership_id,
                     role=role,
                     scope=scope,
                     id=f"{membership_id}__{role}__{scope}",
                 )
+                for role in roles
+            ]
+            return invitations.RedeemPlan(
+                invitation=inv,
+                member=member,
+                assignments=assignments,
+                response={
+                    "club_id": inv.club_id,
+                    "membership_subject_id": membership_id,
+                    "roles": roles,
+                },
             )
-    except Exception as exc:
-        logger.error("invitation membership write failed: %s", type(exc).__name__)
-        raise HTTPException(status_code=503, detail="registry unavailable") from exc
+        # Dead invitation. A same-account replay of its own redemption is
+        # the single idempotent re-answer — and it re-answers the RECORDED
+        # result as a pure read: no member upsert, no role re-grant (B1).
+        # A disabled membership must never be reactivated and a removed
+        # role never regranted by a stale retry.
+        if (
+            inv.status == "redeemed"
+            and inv.redeemed_account_id == account_id
+            and inv.membership_subject_id == membership_id
+        ):
+            return invitations.RedeemPlan(
+                response={
+                    "club_id": inv.club_id,
+                    "membership_subject_id": membership_id,
+                    "roles": list(inv.proposed_roles),
+                }
+            )
+        # Every other dead end: revoked (absolute — even the original
+        # claimer cannot replay), expired, or a claim owned by another
+        # account.
+        return invitations.RedeemPlan(error=(409, "invitation unavailable"))
 
-    return {
-        "club_id": inv.club_id,
-        "membership_subject_id": membership_id,
-        "roles": roles,
-    }
+    try:
+        plan = invitations.transact_redeem(
+            found.invitation_id,
+            _decide,
+            store=store,
+            registry=org.get_registry(),
+            role_registry=org.get_roles(),
+        )
+    except invitations.InvitationStoreUnavailable as exc:
+        raise HTTPException(status_code=503, detail="invitation store unavailable") from exc
+    except Exception as exc:
+        logger.error("invitation redeem transaction failed: %s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="registry unavailable") from exc
+    if plan.error:
+        status, detail = plan.error
+        raise HTTPException(status_code=status, detail=detail)
+    return plan.response or {}
 
 
 class ClubCreateBody(BaseModel):

@@ -552,3 +552,139 @@ class TestOpsClubCreate:
             headers=_ops_headers(),
         )
         assert resp.status_code == 422
+
+
+class TestB1AtomicRedeem:
+    """B1: claim + membership + roles commit in one transaction — a
+    mid-commit failure leaves no claimed invitation or partial member,
+    and a replay re-answers the recorded result as a pure read (it can
+    never reactivate a disabled membership or regrant a removed role)."""
+
+    def test_replay_does_not_reactivate_disabled_membership(
+        self, client: TestClient
+    ) -> None:
+        issued = _issue(client, roles=["coach"])
+        first = client.post(
+            "/api/ops/invitations/redeem",
+            json={"token": issued["token"]},
+            headers=_ops_headers("acc_b1a"),
+        )
+        assert first.status_code == 200
+        member_id = first.json()["membership_subject_id"]
+        # The member is disabled after redemption (off-boarded by an admin).
+        member = org.get_registry().get_user(member_id)
+        member.status = "disabled"
+        org.get_registry().upsert_user(member)
+        replay = client.post(
+            "/api/ops/invitations/redeem",
+            json={"token": issued["token"]},
+            headers=_ops_headers("acc_b1a"),
+        )
+        assert replay.status_code == 200
+        after = org.get_registry().get_user(member_id)
+        assert after.status == "disabled", (
+            "a stale replay must never resurrect a disabled membership"
+        )
+
+    def test_replay_does_not_regrant_removed_roles(
+        self, client: TestClient
+    ) -> None:
+        issued = _issue(client, roles=["coach", "coordinator"])
+        first = client.post(
+            "/api/ops/invitations/redeem",
+            json={"token": issued["token"]},
+            headers=_ops_headers("acc_b1b"),
+        )
+        assert first.status_code == 200
+        member_id = first.json()["membership_subject_id"]
+        scope = "club:c1"
+        # The coordinator grant is removed after redemption (demotion).
+        org.get_roles().remove_assignment(f"{member_id}__coordinator__{scope}")
+        replay = client.post(
+            "/api/ops/invitations/redeem",
+            json={"token": issued["token"]},
+            headers=_ops_headers("acc_b1b"),
+        )
+        assert replay.status_code == 200
+        remaining = [
+            a.role for a in org.get_roles().list_assignments(member_id, scope)
+        ]
+        assert remaining == ["coach"], (
+            "a stale replay must never regrant a removed role"
+        )
+
+    def test_member_write_failure_leaves_no_claim_or_member(
+        self, client: TestClient, monkeypatch
+    ) -> None:
+        issued = _issue(client, roles=["coach"])
+        registry = org.get_registry()
+
+        def boom(_user):
+            raise RuntimeError("member write failed")
+
+        monkeypatch.setattr(registry, "upsert_user", boom)
+        resp = client.post(
+            "/api/ops/invitations/redeem",
+            json={"token": issued["token"]},
+            headers=_ops_headers("acc_b1c"),
+        )
+        assert resp.status_code == 503
+        inv = invitations.get_invitation_store().get(issued["invitation_id"])
+        assert inv.status == "pending", (
+            "a failed commit must not consume the invitation"
+        )
+        mid = (
+            "f1f2m_"
+            + __import__("hashlib").sha256(
+                issued["invitation_id"].encode()
+            ).hexdigest()[:12]
+        )
+        assert registry.get_user(mid) is None, "no orphan member row"
+
+    def test_role_write_failure_rolls_back_then_retry_converges(
+        self, client: TestClient, monkeypatch
+    ) -> None:
+        issued = _issue(client, roles=["coach"])
+        registry = org.get_registry()
+        role_registry = org.get_roles()
+        original = role_registry.put_assignment
+        calls = {"fail": True}
+
+        def maybe_fail(assignment):
+            if calls["fail"]:
+                raise RuntimeError("role write failed")
+            return original(assignment)
+
+        monkeypatch.setattr(role_registry, "put_assignment", maybe_fail)
+        resp = client.post(
+            "/api/ops/invitations/redeem",
+            json={"token": issued["token"]},
+            headers=_ops_headers("acc_b1d"),
+        )
+        assert resp.status_code == 503
+        inv = invitations.get_invitation_store().get(issued["invitation_id"])
+        assert inv.status == "pending", (
+            "a failed role write must roll the claim back"
+        )
+        mid = (
+            "f1f2m_"
+            + __import__("hashlib").sha256(
+                issued["invitation_id"].encode()
+            ).hexdigest()[:12]
+        )
+        assert registry.get_user(mid) is None, "no partial member row survives"
+        # Authority recovers — the still-pending invitation redeems cleanly.
+        calls["fail"] = False
+        retry = client.post(
+            "/api/ops/invitations/redeem",
+            json={"token": issued["token"]},
+            headers=_ops_headers("acc_b1d"),
+        )
+        assert retry.status_code == 200
+        member = registry.get_user(retry.json()["membership_subject_id"])
+        assert member is not None and member.status == "active"
+        roles = [
+            a.role
+            for a in role_registry.list_assignments(member.id, "club:c1")
+        ]
+        assert roles == ["coach"]

@@ -179,6 +179,198 @@ class FirestoreInvitationStore:
         return _run(self._client.transaction())
 
 
+# ── Atomic redeem: claim + membership + roles in one commit ─────────────
+#
+# The redeem path used to claim the invitation in one transaction and then
+# write the member + role assignments in separate commits — a failure in
+# between left a consumed invitation with no member, and a replay re-ran
+# the member/role writes, silently reactivating a disabled membership or
+# regranting a removed role. ``transact_redeem`` is the single fence:
+# every validation read (invitation liveness, issuer user, issuer role
+# assignments) happens inside the transaction and every staged write
+# (invitation claim, member upsert, role grants) commits with it.
+
+
+@dataclass
+class RedeemRead:
+    """Read view handed to ``decide`` inside the redeem fence.
+
+    ``get_user`` returns the raw user document dict (``model_dump`` shape);
+    ``list_assignments`` returns ``RoleAssignment`` models for the user at
+    the scope. Both read through the transaction — never cached snapshots.
+    """
+
+    invitation: Invitation | None
+    get_user: Callable[[str], dict[str, Any] | None]
+    list_assignments: Callable[[str, str], list[Any]]
+
+
+@dataclass
+class RedeemPlan:
+    """Outcome of ``decide`` — either an error or the staged writes."""
+
+    invitation: Invitation | None = None  # staged invitation write
+    member: Any = None  # org ``User`` model to upsert
+    assignments: list[Any] = field(default_factory=list)
+    response: dict[str, Any] | None = None
+    error: tuple[int, str] | None = None
+
+
+def transact_redeem(
+    invitation_id: str,
+    decide: Callable[[RedeemRead], RedeemPlan],
+    *,
+    store: Any = None,
+    registry: Any = None,
+    role_registry: Any = None,
+) -> RedeemPlan:
+    """Run ``decide`` under one atomic fence and commit its staged writes.
+
+    Backends must be homogeneous — all memory, or all Firestore sharing
+    the one cached client. A mixed deployment cannot honour the atomicity
+    contract and fails closed with ``InvitationStoreUnavailable``.
+    """
+    if store is None:
+        store = get_invitation_store()
+    if registry is None or role_registry is None:
+        from .org import get_registry, get_roles
+
+        registry = registry if registry is not None else get_registry()
+        role_registry = role_registry if role_registry is not None else get_roles()
+
+    if isinstance(store, MemoryInvitationStore):
+        from biq_core.org import MemoryOrgRegistry
+        from biq_core.roles import MemoryRoleRegistry
+
+        if not isinstance(registry, MemoryOrgRegistry) or not isinstance(
+            role_registry, MemoryRoleRegistry
+        ):
+            raise InvitationStoreUnavailable(
+                "mixed store backends cannot commit atomically"
+            )
+
+        def _get_user(user_id: str) -> dict[str, Any] | None:
+            user = registry.get_user(user_id)
+            return user.model_dump() if user is not None else None
+
+        # The store's own lock is the fence — transact()/revoke serialize
+        # against the whole decide+commit, so a revocation can never land
+        # mid-redeem. The memory backend has no write batch: stage with a
+        # snapshot so a mid-commit failure restores the pre-write state,
+        # matching the Firestore abort contract.
+        with store._lock:
+            plan = decide(
+                RedeemRead(
+                    invitation=store.get(invitation_id),
+                    get_user=_get_user,
+                    list_assignments=role_registry.list_assignments,
+                )
+            )
+            if plan.error:
+                return plan
+            prior_inv_doc = store._docs.get(invitation_id)
+            prior_member = (
+                registry.get_user(plan.member.id) if plan.member is not None else None
+            )
+            prior_assignments = {
+                (a.scope, a.id): role_registry._assignments.get((a.scope, a.id))
+                for a in plan.assignments
+            }
+            try:
+                if plan.invitation is not None:
+                    store.put(plan.invitation)
+                if plan.member is not None:
+                    registry.upsert_user(plan.member)
+                for assignment in plan.assignments:
+                    role_registry.put_assignment(assignment)
+            except Exception:
+                if prior_inv_doc is None:
+                    store._docs.pop(invitation_id, None)
+                else:
+                    store._docs[invitation_id] = prior_inv_doc
+                if plan.member is not None:
+                    if prior_member is None:
+                        registry._users.pop(plan.member.id, None)
+                    else:
+                        registry._users[plan.member.id] = prior_member
+                for key, prior in prior_assignments.items():
+                    if prior is None:
+                        role_registry._assignments.pop(key, None)
+                    else:
+                        role_registry._assignments[key] = prior
+                raise
+            return plan
+
+    if isinstance(store, FirestoreInvitationStore):
+        from biq_core.org import FirestoreOrgRegistry
+        from biq_core.roles import FirestoreRoleRegistry, RoleAssignment
+
+        if not isinstance(registry, FirestoreOrgRegistry) or not isinstance(
+            role_registry, FirestoreRoleRegistry
+        ):
+            raise InvitationStoreUnavailable(
+                "mixed store backends cannot commit atomically"
+            )
+        client = store._client
+        if getattr(registry, "_db", None) is not client or getattr(
+            role_registry, "_db", None
+        ) is not client:
+            raise InvitationStoreUnavailable(
+                "stores must share one Firestore client"
+            )
+        from google.cloud import firestore  # lazy import
+
+        users_col = client.collection("orgs_users")
+        clubs_col = client.collection("orgs_clubs")
+        inv_ref = client.collection(COLLECTION).document(invitation_id)
+
+        @firestore.transactional
+        def _run(transaction: Any) -> RedeemPlan:
+            snap = inv_ref.get(transaction=transaction)
+            doc = FirestoreInvitationStore._snap_dict(snap)
+            inv = _from_dict(invitation_id, doc) if doc else None
+
+            def _get_user(user_id: str) -> dict[str, Any] | None:
+                user_snap = users_col.document(user_id).get(transaction=transaction)
+                return user_snap.to_dict() if getattr(user_snap, "exists", False) else None
+
+            def _list_assignments(user_id: str, scope: str) -> list[Any]:
+                query = (
+                    clubs_col.document(scope)
+                    .collection("roles")
+                    .where("user_id", "==", user_id)
+                )
+                return [
+                    RoleAssignment(**(d.to_dict() or {}))
+                    for d in transaction.get(query)
+                ]
+
+            plan = decide(RedeemRead(inv, _get_user, _list_assignments))
+            if plan.error:
+                return plan
+            if plan.invitation is not None:
+                transaction.set(inv_ref, _to_dict(plan.invitation))
+            if plan.member is not None:
+                # Same merge contract as OrgRegistry.upsert_user.
+                transaction.set(
+                    users_col.document(plan.member.id),
+                    plan.member.model_dump(exclude_none=True),
+                    merge=True,
+                )
+            for assignment in plan.assignments:
+                transaction.set(
+                    clubs_col.document(assignment.scope)
+                    .collection("roles")
+                    .document(assignment.id),
+                    assignment.model_dump(),
+                )
+            return plan
+
+        return _run(client.transaction())
+
+    raise InvitationStoreUnavailable("unknown invitation store backend")
+
+
 _store: Any = None
 
 

@@ -90,7 +90,19 @@ async function stopServer() {
  * `routeQuery` optionally sets el.route (e.g. 'entry?invite=tok-1').
  * Returns { page, log } — `log` captures every /api/** request.
  */
-async function newEntryPage(browser, { bootstrap = BOOTSTRAP, routeQuery = null } = {}) {
+const PERSONAL_TEAMS = [
+  {
+    team_id: 'pt-1',
+    name: 'Paquetillos 1',
+    category_key: 'infantil',
+    category_label: 'Infantil',
+    gender: 'M',
+    age_band: '',
+    archived: false,
+  },
+];
+
+async function newEntryPage(browser, { bootstrap = BOOTSTRAP, routeQuery = null, personalTeams = PERSONAL_TEAMS, personalContext = false } = {}) {
   const page = await browser.newPage();
   const log = [];
 
@@ -100,13 +112,22 @@ async function newEntryPage(browser, { bootstrap = BOOTSTRAP, routeQuery = null 
     const json = (data, status = 200) =>
       route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(data) });
     try {
-      if (req.url().includes('/api/context/v1/bootstrap')) return json(bootstrap);
-      if (req.url().includes('/api/context/v1/activate')) return json({ ok: true });
-      if (req.url().includes('/api/context/v1/clubs')) return json({ ok: true, club: { id: 'club-new' } });
-      if (req.url().includes('/api/context/v1/invitations/') && req.url().includes('/preview')) {
+      const u = req.url();
+      if (u.includes('/api/context/v1/bootstrap')) return json(bootstrap);
+      if (u.includes('/api/context/v1/activate')) return json({ ok: true });
+      if (u.includes('/api/context/v1/active/working-teams')) return json({ ok: true });
+      if (u.includes('/api/context/v1/clubs')) return json({ ok: true, club: { id: 'club-new' } });
+      if (u.includes('/api/context/v1/invitations/') && u.includes('/preview')) {
         return json({ club_id: 'club-inv', club_name: 'Club Invitado' });
       }
-      if (req.url().includes('/api/context/v1/invitations/redeem')) return json({ ok: true, club_id: 'club-inv' });
+      if (u.includes('/api/context/v1/invitations/redeem')) return json({ ok: true, club_id: 'club-inv' });
+      if (u.includes('/api/context/v1/personal-teams/') && req.method() === 'DELETE') {
+        return json({ ok: true, team: { team_id: 'pt-1', archived: true } });
+      }
+      if (u.includes('/api/context/v1/personal-teams')) {
+        if (req.method() === 'POST') return json({ team: { team_id: 'pt-new' } }, 201);
+        return json({ teams: personalTeams });
+      }
       return json({ ok: true });
     } catch {
       // Route aborted — nothing to do.
@@ -119,12 +140,13 @@ async function newEntryPage(browser, { bootstrap = BOOTSTRAP, routeQuery = null 
     const el = document.getElementById('app');
     return !!(el && el.shadowRoot);
   }, { timeout: 10000 });
-  await page.evaluate((rq) => {
+  await page.evaluate(({ rq, personal }) => {
     const el = document.getElementById('app');
     if (rq) el.route = rq;
+    if (personal) el.context = { owner_scope: { kind: 'personal' } };
     el.org = { club: null, email: 'e2e@basketiq.io', display_name: 'E2E', memberships: [] };
     el.user = 'e2e-user';
-  }, routeQuery);
+  }, { rq: routeQuery, personal: personalContext });
   await page.waitForFunction(() => {
     const el = document.getElementById('app');
     return !!(el.shadowRoot && el.shadowRoot.querySelector('.entry-step'));
@@ -223,7 +245,7 @@ test('help opens an accessible modal with the club explanation and closes', asyn
   }
 });
 
-test('Mi equipo has help + Entrar only — no email field, no verification form', async () => {
+test('Mi equipo lists personal teams each with Entrar — no email field', async () => {
   const browser = await chromium.launch();
   try {
     const { page } = await newEntryPage(browser);
@@ -234,15 +256,19 @@ test('Mi equipo has help + Entrar only — no email field, no verification form'
     const state = await page.evaluate(() => {
       const el = document.getElementById('app');
       const panel = el.shadowRoot.querySelector('.entry-panel');
+      const row = panel.querySelector('[data-entry-personal-enter-team]');
       return {
         help: !!panel.querySelector('[data-entry-help="personal"]'),
         enter: !!panel.querySelector('[data-entry-personal-enter]'),
+        teamRow: !!row,
+        teamLabel: row?.textContent.trim() || '',
         emailInput: !!panel.querySelector('input[type="email"], input[name="email"]'),
-        text: panel.textContent,
       };
     });
     assert.ok(state.help, 'personal tab must carry a help button');
     assert.ok(state.enter, 'personal tab must carry Entrar');
+    assert.ok(state.teamRow, 'each created team must offer Entrar');
+    assert.ok(state.teamLabel.includes('Paquetillos 1'));
     assert.equal(state.emailInput, false, 'no email field on the authenticated session');
     // Help modal carries the personal explanation.
     await page.evaluate(() => {
@@ -254,6 +280,128 @@ test('Mi equipo has help + Entrar only — no email field, no verification form'
       return el.shadowRoot.querySelector('[role="dialog"]')?.textContent || '';
     });
     assert.ok(modalText.includes('Espacio personal para preparar entrenamientos semanales y partidos'));
+  } finally {
+    await browser.close();
+  }
+});
+
+test('Entrar on a team activates personal context and narrows the working set', async () => {
+  const browser = await chromium.launch();
+  try {
+    const { page, log } = await newEntryPage(browser);
+    await page.evaluate(() => {
+      const el = document.getElementById('app');
+      el.shadowRoot.querySelector('[data-entry-tab="personal"]').click();
+    });
+    await new Promise((r) => setTimeout(r, 150));
+    log.length = 0;
+    await page.evaluate(() => {
+      const el = document.getElementById('app');
+      el.shadowRoot.querySelector('[data-entry-personal-enter-team]').click();
+    });
+    await new Promise((r) => setTimeout(r, 300));
+    const activate = log.find((r) => r.url.includes('/api/context/v1/activate'));
+    const working = log.find((r) => r.url.includes('/api/context/v1/active/working-teams'));
+    assert.ok(activate, 'activation must fire');
+    assert.deepEqual(JSON.parse(activate.postData), { kind: 'personal' });
+    assert.ok(working, 'working-set narrowing must fire');
+    assert.deepEqual(JSON.parse(working.postData), { working_team_ids: ['pt-1'] });
+  } finally {
+    await browser.close();
+  }
+});
+
+test('at the 2-team cap the create affordance is replaced by the cap note', async () => {
+  const browser = await chromium.launch();
+  try {
+    const { page } = await newEntryPage(browser, {
+      personalTeams: [
+        { ...PERSONAL_TEAMS[0] },
+        { ...PERSONAL_TEAMS[0], team_id: 'pt-2', name: 'Paquetillos 2' },
+      ],
+    });
+    await page.evaluate(() => {
+      const el = document.getElementById('app');
+      el.shadowRoot.querySelector('[data-entry-tab="personal"]').click();
+    });
+    const state = await page.evaluate(() => {
+      const el = document.getElementById('app');
+      const panel = el.shadowRoot.querySelector('.entry-panel');
+      return {
+        teamRows: panel.querySelectorAll('[data-entry-personal-enter-team]').length,
+        createToggle: !!panel.querySelector('[data-entry-team-create-toggle]'),
+        createForm: !!panel.querySelector('[data-entry-personal-create]'),
+        capNote: /hasta 2 equipos|Elimina uno/i.test(panel.textContent),
+      };
+    });
+    assert.equal(state.teamRows, 2);
+    assert.equal(state.createToggle, false, 'no create affordance at the cap');
+    assert.equal(state.createForm, false);
+    assert.ok(state.capNote, 'cap note must explain delete-to-create');
+  } finally {
+    await browser.close();
+  }
+});
+
+test('archived teams do not appear and do not count against the cap', async () => {
+  const browser = await chromium.launch();
+  try {
+    const { page } = await newEntryPage(browser, {
+      personalTeams: [
+        { ...PERSONAL_TEAMS[0] },
+        { ...PERSONAL_TEAMS[0], team_id: 'pt-arch', name: 'Viejo', archived: true },
+      ],
+    });
+    await page.evaluate(() => {
+      const el = document.getElementById('app');
+      el.shadowRoot.querySelector('[data-entry-tab="personal"]').click();
+    });
+    const state = await page.evaluate(() => {
+      const el = document.getElementById('app');
+      const panel = el.shadowRoot.querySelector('.entry-panel');
+      return {
+        teamRows: panel.querySelectorAll('[data-entry-personal-enter-team]').length,
+        createToggle: !!panel.querySelector('[data-entry-team-create-toggle]'),
+        text: panel.textContent,
+      };
+    });
+    assert.equal(state.teamRows, 1, 'archived team must be hidden');
+    assert.ok(state.createToggle, 'one active team leaves room to create');
+    assert.ok(!state.text.includes('Viejo'));
+  } finally {
+    await browser.close();
+  }
+});
+
+test('personal panel (in-session) deletes a team via DELETE and frees the slot', async () => {
+  const browser = await chromium.launch();
+  try {
+    const { page, log } = await newEntryPage(browser, {
+      personalContext: true,
+      personalTeams: [
+        { ...PERSONAL_TEAMS[0] },
+        { ...PERSONAL_TEAMS[0], team_id: 'pt-2', name: 'Paquetillos 2' },
+      ],
+    });
+    // At cap inside the session: create form hidden, delete affordance shown.
+    const before = await page.evaluate(() => {
+      const el = document.getElementById('app');
+      return {
+        create: !!el.shadowRoot.querySelector('[data-entry-personal-create]'),
+        del: el.shadowRoot.querySelectorAll('[data-personal-team-delete]').length,
+      };
+    });
+    assert.equal(before.create, false, 'create form hidden at cap');
+    assert.equal(before.del, 2, 'each team gets a delete control');
+    await page.evaluate(() => {
+      window.confirm = () => true;
+      const el = document.getElementById('app');
+      el.shadowRoot.querySelector('[data-personal-team-delete]').click();
+    });
+    await new Promise((r) => setTimeout(r, 300));
+    const del = log.find((r) => r.method === 'DELETE' && r.url.includes('/api/context/v1/personal-teams/'));
+    assert.ok(del, 'DELETE must fire');
+    assert.ok(del.url.includes('pt-1') || del.url.includes('pt-2'));
   } finally {
     await browser.close();
   }

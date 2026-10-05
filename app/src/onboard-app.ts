@@ -401,6 +401,7 @@ class BiqOnboardApp extends HTMLElement {
   private _inviteLoading = false;
   private _helpOpen: '' | 'personal' | 'club' = '';
   private _clubCreateOpen = false;
+  private _teamCreateOpen = false;
   private _entryError: string | null = null;
   private _entryBusy = false;
   private _subRoute = '';
@@ -645,6 +646,9 @@ class BiqOnboardApp extends HTMLElement {
       // Default the tab: club candidates land on the club tab.
       const hasClub = (data.contexts || []).some((c: ContextCandidate) => c.kind === 'club');
       this._entryTab = hasClub ? 'club' : 'personal';
+      // Mi equipo lists the account's private teams — session-scoped, no
+      // active context needed; prefetch so the tab renders them.
+      this.loadPersonalTeams();
     } catch (err) {
       this._bootstrapFailed = true;
     } finally {
@@ -686,6 +690,44 @@ class BiqOnboardApp extends HTMLElement {
       if (!res.ok) {
         const body = await res.json().catch(() => null);
         throw new Error(body?.detail || `No se pudo activar el contexto (${res.status})`);
+      }
+      this.dispatchEvent(new CustomEvent('biq-context:activated', { bubbles: true, composed: true }));
+    } catch (err) {
+      this._entryError = (err as Error).message;
+    } finally {
+      this._entryBusy = false;
+      this.render();
+    }
+  }
+
+  // Entrar en el espacio personal con un equipo concreto: activa el
+  // contexto personal y estrecha el working set a ese equipo.
+  private async enterPersonalTeam(teamId: string): Promise<void> {
+    this._entryBusy = true;
+    this._entryError = null;
+    this.render();
+    try {
+      const res = await fetch('/api/context/v1/activate', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ kind: 'personal' }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        throw new Error(body?.detail || `No se pudo activar el contexto (${res.status})`);
+      }
+      if (teamId) {
+        const put = await fetch('/api/context/v1/active/working-teams', {
+          method: 'PUT',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ working_team_ids: [teamId] }),
+        });
+        if (!put.ok) {
+          const body = await put.json().catch(() => null);
+          throw new Error(body?.detail || `No se pudo seleccionar el equipo (${put.status})`);
+        }
       }
       this.dispatchEvent(new CustomEvent('biq-context:activated', { bubbles: true, composed: true }));
     } catch (err) {
@@ -2233,10 +2275,41 @@ class BiqOnboardApp extends HTMLElement {
         <img class="nav-chispa entry-chispa-dark" src="/assets/basketiq-mobile-assets-v2/svg/dark/heads/chispa-speaking.svg" alt="" aria-hidden="true">
       </button>`;
 
+    const personalTeams = (this._personalTeams || []).filter((t) => !t.archived);
+    const atTeamCap = personalTeams.length >= 2;
+    const teamMeta = (t: PersonalTeamRow) =>
+      `${escapeHtml(t.category_label || t.category_key)}${t.gender && t.gender !== 'X' ? ` · ${escapeHtml(t.gender)}` : ''}${t.age_band ? ` · ${escapeHtml(t.age_band)}` : ''}`;
+
     const personalTab = `
       <section class="entry-panel">
-        <div class="entry-head"><h3 class="entry-h">Espacio personal</h3>${helpIcon('personal')}</div>
-        <button class="onboard-btn onboard-btn-primary" data-entry-personal-enter ${this._entryBusy ? 'disabled' : ''}>Entrar</button>
+        <div class="entry-head"><h3 class="entry-h">Mi equipo</h3>${helpIcon('personal')}</div>
+        ${this._personalTeams === null ? '<p class="entry-loading">Cargando equipos…</p>' : ''}
+        ${personalTeams.length ? `
+          <ul class="entry-teams">
+            ${personalTeams.map((t) => `
+              <li class="entry-team entry-team-action">
+                <button class="onboard-btn onboard-btn-primary" data-entry-personal-enter-team="${escapeHtml(t.team_id)}" ${this._entryBusy ? 'disabled' : ''}>
+                  Entrar — ${escapeHtml(t.name)}
+                </button>
+                <span>${teamMeta(t)}</span>
+              </li>`).join('')}
+          </ul>` : ''}
+        ${atTeamCap
+          ? '<p class="entry-note">Puedes tener hasta 2 equipos personales. Elimina uno desde «Mis equipos» para crear otro.</p>'
+          : `<button class="onboard-btn" data-entry-team-create-toggle ${this._entryBusy ? 'disabled' : ''}>+ Crear equipo</button>
+            ${this._teamCreateOpen ? `
+              <form class="entry-form" data-entry-personal-create>
+                <div class="entry-field"><label>Nombre del equipo</label>
+                  <input type="text" name="name" maxlength="120" required /></div>
+                <div class="entry-field"><label>Categoría</label>
+                  <select name="category_key">${PERSONAL_CATEGORIES.map((c) => `<option value="${c.key}">${c.label}</option>`).join('')}</select></div>
+                <div class="entry-field"><label>Género</label>
+                  <select name="gender"><option value="X">Mixto</option><option value="F">Femenino</option><option value="M">Masculino</option></select></div>
+                <div class="entry-field"><label>Edad / banda</label>
+                  <input type="text" name="age_band" maxlength="32" placeholder="Opcional" /></div>
+                <button class="onboard-btn onboard-btn-primary" type="submit" ${this._entryBusy ? 'disabled' : ''}>Crear y entrar</button>
+              </form>` : ''}`}
+        <button class="onboard-btn${personalTeams.length ? '' : ' onboard-btn-primary'}" data-entry-personal-enter ${this._entryBusy ? 'disabled' : ''}>${personalTeams.length ? 'Entrar con todos los equipos' : 'Entrar'}</button>
       </section>`;
 
     const clubTab = `
@@ -2338,6 +2411,51 @@ class BiqOnboardApp extends HTMLElement {
     this.shadow.querySelector('[data-entry-personal-enter]')?.addEventListener('click', () => {
       this.activateContext('personal');
     });
+    this.shadow.querySelectorAll('[data-entry-personal-enter-team]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        this.enterPersonalTeam((btn as HTMLElement).dataset.entryPersonalEnterTeam || '');
+      });
+    });
+    this.shadow.querySelector('[data-entry-team-create-toggle]')?.addEventListener('click', () => {
+      this._teamCreateOpen = !this._teamCreateOpen;
+      this.render();
+      if (this._teamCreateOpen) {
+        const input = this.shadow.querySelector('[data-entry-personal-create] input[name="name"]') as HTMLInputElement | null;
+        input?.focus();
+      }
+    });
+    // Crear equipo desde el selector de entrada: crea el equipo privado y
+    // entra en el espacio personal con ese equipo como equipo de trabajo.
+    this.shadow.querySelector('[data-entry-personal-create]')?.addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      const fd = new FormData(ev.target as HTMLFormElement);
+      this._entryBusy = true;
+      this._entryError = null;
+      this.render();
+      try {
+        const res = await fetch('/api/context/v1/personal-teams', {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json', 'Idempotency-Key': `entry-${Date.now()}` },
+          body: JSON.stringify({
+            name: String(fd.get('name') || '').trim(),
+            category_key: String(fd.get('category_key') || ''),
+            gender: String(fd.get('gender') || 'X'),
+            age_band: String(fd.get('age_band') || '').trim(),
+          }),
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => null);
+          throw new Error(body?.detail || `No se pudo crear el equipo (${res.status})`);
+        }
+        const data = await res.json();
+        await this.enterPersonalTeam(data?.team?.team_id || '');
+      } catch (err) {
+        this._entryError = (err as Error).message;
+        this._entryBusy = false;
+        this.render();
+      }
+    });
 
     this.shadow.querySelectorAll('[data-entry-help]').forEach((btn) => {
       btn.addEventListener('click', () => {
@@ -2431,20 +2549,24 @@ class BiqOnboardApp extends HTMLElement {
   // Personal workspace panel (Mi espacio) when the active context is
   // private — teams list + create + switch affordance.
   private renderPersonalPanel(): string {
-    const teams = this._personalTeams;
+    const teams = (this._personalTeams || []).filter((t) => !t.archived);
+    const atCap = teams.length >= 2;
     return `
       <div class="entry-step">
         <h2 class="entry-title">Mi espacio personal</h2>
         ${this._entryError ? `<p class="entry-error" role="alert">${escapeHtml(this._entryError)}</p>` : ''}
-        ${teams === null
+        ${this._personalTeams === null
           ? `<p class="entry-loading">Cargando equipos…</p>`
           : teams.length
             ? `<ul class="entry-teams">${teams.map((t) => `
                 <li class="entry-team"><strong>${escapeHtml(t.name)}</strong>
                   <span>${escapeHtml(t.category_label || t.category_key)}${t.gender && t.gender !== 'X' ? ` · ${escapeHtml(t.gender)}` : ''}${t.age_band ? ` · ${escapeHtml(t.age_band)}` : ''}</span>
+                  <button class="onboard-btn entry-team-delete" data-personal-team-delete="${escapeHtml(t.team_id)}" ${this._entryBusy ? 'disabled' : ''}>Eliminar</button>
                 </li>`).join('')}</ul>`
             : '<p class="entry-p">Todavía no tienes equipos personales.</p>'}
-        <form class="entry-form" data-entry-personal-create>
+        ${atCap
+          ? '<p class="entry-note">Puedes tener hasta 2 equipos personales. Elimina uno para crear otro.</p>'
+          : `<form class="entry-form" data-entry-personal-create>
           <div class="entry-field"><label>Nombre del equipo</label>
             <input type="text" name="name" maxlength="120" required /></div>
           <div class="entry-field"><label>Categoría</label>
@@ -2454,7 +2576,7 @@ class BiqOnboardApp extends HTMLElement {
           <div class="entry-field"><label>Edad / banda</label>
             <input type="text" name="age_band" maxlength="32" placeholder="Opcional" /></div>
           <button class="onboard-btn onboard-btn-primary" type="submit" ${this._entryBusy ? 'disabled' : ''}>Crear equipo</button>
-        </form>
+        </form>`}
       </div>`;
   }
 
@@ -2492,6 +2614,34 @@ class BiqOnboardApp extends HTMLElement {
         this._entryBusy = false;
         this.render();
       }
+    });
+    // Eliminar un equipo personal libera el slot (cap de 2) — el servidor
+    // archiva el equipo y lo retira del working set del contexto activo.
+    this.shadow.querySelectorAll('[data-personal-team-delete]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const teamId = (btn as HTMLElement).dataset.personalTeamDelete || '';
+        if (!teamId || !window.confirm('¿Eliminar este equipo? Podrás crear otro después.')) return;
+        this._entryBusy = true;
+        this._entryError = null;
+        this.render();
+        try {
+          const res = await fetch(`/api/context/v1/personal-teams/${encodeURIComponent(teamId)}`, {
+            method: 'DELETE',
+            credentials: 'include',
+          });
+          if (!res.ok) {
+            const body = await res.json().catch(() => null);
+            throw new Error(body?.detail || `No se pudo eliminar el equipo (${res.status})`);
+          }
+          this._personalTeams = null;
+          this.loadPersonalTeams();
+        } catch (err) {
+          this._entryError = (err as Error).message;
+        } finally {
+          this._entryBusy = false;
+          this.render();
+        }
+      });
     });
   }
 

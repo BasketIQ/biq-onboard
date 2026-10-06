@@ -2311,8 +2311,6 @@ class BiqOnboardApp extends HTMLElement {
                   <select name="category_key">${PERSONAL_CATEGORIES.map((c) => `<option value="${c.key}">${c.label}</option>`).join('')}</select></div>
                 <div class="entry-field"><label>Género</label>
                   <select name="gender"><option value="X">Mixto</option><option value="F">Femenino</option><option value="M">Masculino</option></select></div>
-                <div class="entry-field"><label>Edad / banda</label>
-                  <input type="text" name="age_band" maxlength="32" placeholder="Opcional" /></div>
                 <button class="onboard-btn onboard-btn-primary" type="submit" ${this._entryBusy ? 'disabled' : ''}>Crear y entrar</button>
               </form>` : ''}`}
         ${personalTeams.length ? `
@@ -2460,7 +2458,6 @@ class BiqOnboardApp extends HTMLElement {
             name: String(fd.get('name') || '').trim(),
             category_key: String(fd.get('category_key') || ''),
             gender: String(fd.get('gender') || 'X'),
-            age_band: String(fd.get('age_band') || '').trim(),
           }),
         });
         if (!res.ok) {
@@ -2581,8 +2578,6 @@ class BiqOnboardApp extends HTMLElement {
             <select name="category_key">${PERSONAL_CATEGORIES.map((c) => `<option value="${c.key}"${c.key === t.category_key ? ' selected' : ''}>${c.label}</option>`).join('')}</select></div>
           <div class="entry-field"><label>Género</label>
             <select name="gender">${['X', 'F', 'M'].map((g) => `<option value="${g}"${g === t.gender ? ' selected' : ''}>${g === 'X' ? 'Mixto' : g === 'F' ? 'Femenino' : 'Masculino'}</option>`).join('')}</select></div>
-          <div class="entry-field"><label>Edad / banda</label>
-            <input type="text" name="age_band" maxlength="32" value="${escapeHtml(t.age_band || '')}" /></div>
           <button class="onboard-btn onboard-btn-primary" type="submit" ${this._entryBusy ? 'disabled' : ''}>Guardar</button>
           <button class="onboard-btn" type="button" data-personal-team-edit-cancel ${this._entryBusy ? 'disabled' : ''}>Cancelar</button>
         </form>
@@ -2618,8 +2613,6 @@ class BiqOnboardApp extends HTMLElement {
             <select name="category_key">${PERSONAL_CATEGORIES.map((c) => `<option value="${c.key}">${c.label}</option>`).join('')}</select></div>
           <div class="entry-field"><label>Género</label>
             <select name="gender"><option value="X">Mixto</option><option value="F">Femenino</option><option value="M">Masculino</option></select></div>
-          <div class="entry-field"><label>Edad / banda</label>
-            <input type="text" name="age_band" maxlength="32" placeholder="Opcional" /></div>
           <button class="onboard-btn onboard-btn-primary" type="submit" ${this._entryBusy ? 'disabled' : ''}>Crear equipo</button>
         </form>`}
       </div>`;
@@ -2649,7 +2642,6 @@ class BiqOnboardApp extends HTMLElement {
             name: String(fd.get('name') || '').trim(),
             category_key: String(fd.get('category_key') || ''),
             gender: String(fd.get('gender') || 'X'),
-            age_band: String(fd.get('age_band') || '').trim(),
           }),
         });
         if (!res.ok) {
@@ -2723,7 +2715,6 @@ class BiqOnboardApp extends HTMLElement {
             name: String(fd.get('name') || '').trim(),
             category_key: String(fd.get('category_key') || ''),
             gender: String(fd.get('gender') || 'X'),
-            age_band: String(fd.get('age_band') || '').trim(),
             ...(Number.isFinite(revision) ? { expected_revision: revision } : {}),
           }),
         });

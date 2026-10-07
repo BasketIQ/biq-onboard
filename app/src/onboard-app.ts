@@ -920,9 +920,11 @@ class BiqOnboardApp extends HTMLElement {
       }
       // Every assignment must carry the upstream scope contract
       // (scope === "club:<requested club>") and must not conflict with an
-      // explicit club_id or name a user outside this member set. A foreign or
-      // malformed row is non-authoritative — fail closed instead of wiring
-      // another club's assignment id into this club's controls.
+      // explicit club_id. A foreign or malformed row is non-authoritative —
+      // fail closed instead of wiring another club's assignment id into this
+      // club's controls. Rows for users outside the member roster are valid
+      // scope state (cross-scope grants, assignments outliving membership) and
+      // can never back a member-row control — filter them, don't fail.
       const memberIds = new Set(
         (users as { id?: unknown }[])
           .map((u) => u?.id)
@@ -933,7 +935,7 @@ class BiqOnboardApp extends HTMLElement {
           && a.scope === `club:${clubId}`
           && (a.club_id === undefined || a.club_id === clubId)
           && typeof a.id === 'string' && a.id.length > 0
-          && typeof a.user_id === 'string' && memberIds.has(a.user_id)
+          && typeof a.user_id === 'string' && a.user_id.length > 0
           && typeof a.role === 'string' && a.role.length > 0;
         if (!valid) throw new Error('Respuesta de roles inválida');
         return {
@@ -942,7 +944,7 @@ class BiqOnboardApp extends HTMLElement {
           role: a.role as string,
           club_id: clubId,
         };
-      });
+      }).filter((a: MemberAssignment) => memberIds.has(a.user_id));
       if (!isCurrent()) return; // late response from another club/user — drop it
       this._members = users as MemberRow[];
       this._memberAssignments = assignments;

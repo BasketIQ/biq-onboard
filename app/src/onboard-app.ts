@@ -679,8 +679,9 @@ class BiqOnboardApp extends HTMLElement {
       });
       const data = res.ok ? await res.json().catch(() => null) : null;
       if (!isCurrent()) return; // stale/aborted response — drop it
-      if (res.ok && Array.isArray(data?.teams)) {
-        this._personalTeams = data.teams;
+      const teams = res.ok ? this._validPersonalTeams(data) : null;
+      if (res.ok && teams !== null) {
+        this._personalTeams = teams;
         this._personalTeamsStatus = 'ready';
       } else {
         // Non-OK status AND malformed payloads both land here — a broken
@@ -703,6 +704,35 @@ class BiqOnboardApp extends HTMLElement {
         this.render();
       }
     }
+  }
+
+  // Fail-closed row validation (OB60-3): the WHOLE collection must be
+  // well-formed before `ready` — a single corrupt row ({teams:[null]},
+  // missing ids, wrong types, duplicate identities) means the feed itself
+  // is untrustworthy, never a reason to filter rows into a "healthy" list.
+  // Legitimate empty arrays stay ready/empty.
+  private _validPersonalTeams(data: unknown): PersonalTeamRow[] | null {
+    const rows = (data as { teams?: unknown } | null)?.teams;
+    if (!Array.isArray(rows)) return null;
+    const ids = new Set<string>();
+    for (const row of rows) {
+      if (!row || typeof row !== 'object' || Array.isArray(row)) return null;
+      const t = row as Record<string, unknown>;
+      if (typeof t.team_id !== 'string' || !t.team_id.trim()) return null;
+      if (ids.has(t.team_id)) return null;
+      ids.add(t.team_id);
+      // `archived` drives the active/archived split and the edit drain;
+      // `team_revision` is the CAS input for edits — both must be real.
+      if (typeof t.archived !== 'boolean') return null;
+      if (typeof t.team_revision !== 'number' || !Number.isFinite(t.team_revision)) return null;
+      for (const key of [
+        'name', 'category_key', 'category_label', 'age_band',
+        'gender', 'section_applicability', 'timezone', 'season',
+      ] as const) {
+        if (typeof t[key] !== 'string') return null;
+      }
+    }
+    return rows as PersonalTeamRow[];
   }
 
   // Drains `?edit=<id>` on the spaces route into the personal team edit form —

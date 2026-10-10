@@ -98,13 +98,18 @@ const PERSONAL_TEAMS = [
     category_label: 'Infantil',
     gender: 'M',
     age_band: '',
+    section_applicability: 'all',
+    timezone: 'Europe/Madrid',
+    season: '2026-27',
+    team_revision: 1,
     archived: false,
   },
 ];
 
-async function newEntryPage(browser, { bootstrap = BOOTSTRAP, routeQuery = null, personalTeams = PERSONAL_TEAMS, personalContext = false, org = undefined, personalTeamsFailure = null } = {}) {
+async function newEntryPage(browser, { bootstrap = BOOTSTRAP, routeQuery = null, personalTeams = PERSONAL_TEAMS, personalContext = false, org = undefined, personalTeamsFailure = null, personalTeamsDelayMs = 0 } = {}) {
   const page = await browser.newPage();
   const log = [];
+  let feedCalls = 0;
 
   await page.route('**/api/**', async (route) => {
     const req = route.request();
@@ -126,7 +131,12 @@ async function newEntryPage(browser, { bootstrap = BOOTSTRAP, routeQuery = null,
       }
       if (u.includes('/api/context/v1/personal-teams')) {
         if (req.method() === 'POST') return json({ team: { team_id: 'pt-new' } }, 201);
-        const fail = typeof personalTeamsFailure === 'function' ? personalTeamsFailure() : personalTeamsFailure;
+        feedCalls += 1;
+        if (personalTeamsDelayMs) {
+          await new Promise((r) => setTimeout(r, personalTeamsDelayMs));
+        }
+        const fail = typeof personalTeamsFailure === 'function' ? personalTeamsFailure(feedCalls) : personalTeamsFailure;
+        if (fail?.network) return route.abort();
         if (fail) return json(fail.body ?? { detail: 'feed unavailable' }, fail.status ?? 503);
         return json({ teams: personalTeams });
       }
@@ -847,6 +857,198 @@ test('OB60-3: account switch fences the feed — stale state drops, new scope re
       { timeout: 10000 });
     const after = log.filter((r) => r.method === 'GET' && r.url.includes('/api/context/v1/personal-teams')).length;
     assert.ok(after > before, 'new account scope refetches the feed');
+  } finally {
+    await browser.close();
+  }
+});
+
+test('OB60-3: malformed rows fail closed — never ready, never phantom-empty', async () => {
+  const browser = await chromium.launch();
+  try {
+    const badBodies = [
+      { teams: [null] },
+      { teams: [{}] },
+      { teams: [{ ...PERSONAL_TEAMS[0], team_id: '' }] },
+      { teams: [PERSONAL_TEAMS[0], PERSONAL_TEAMS[0]] }, // duplicate identity
+      { teams: [{ ...PERSONAL_TEAMS[0], archived: 'no' }] },
+      { teams: [{ ...PERSONAL_TEAMS[0], team_revision: '1' }] },
+      { teams: [{ ...PERSONAL_TEAMS[0], name: 42 }] },
+    ];
+    for (const body of badBodies) {
+      const errors = [];
+      const { page, log } = await newEntryPage(browser, {
+        personalContext: true,
+        personalTeamsFailure: { status: 200, body },
+      });
+      page.on('pageerror', (e) => errors.push(e));
+      await page.waitForFunction(() =>
+        !!document.getElementById('app').shadowRoot.querySelector('[data-personal-teams-retry]'),
+        { timeout: 10000 });
+      const atError = log.filter((r) => r.url.includes('/api/context/v1/personal-teams')).length;
+      await page.waitForTimeout(800);
+      assert.equal(
+        log.filter((r) => r.url.includes('/api/context/v1/personal-teams')).length,
+        atError,
+        `malformed rows must not refetch: ${JSON.stringify(body)}`,
+      );
+      const state = await page.evaluate(() => ({
+        status: document.getElementById('app')._personalTeamsStatus,
+        teams: document.getElementById('app')._personalTeams,
+        editing: document.getElementById('app')._editingPersonalTeamId,
+        emptyShown: document.getElementById('app').shadowRoot.textContent.includes('Todavía no tienes'),
+      }));
+      assert.equal(state.status, 'error', `corrupt feed must land in error: ${JSON.stringify(body)}`);
+      assert.equal(state.teams, null, 'corrupt rows never become feed state');
+      assert.equal(state.emptyShown, false, 'corrupt feed is not a healthy empty list');
+      assert.equal(errors.length, 0, `no unhandled page error: ${JSON.stringify(body)}`);
+      await page.close();
+    }
+  } finally {
+    await browser.close();
+  }
+});
+
+test('OB60-3: 401/403/network failures are bounded errors with explicit retry', async () => {
+  const browser = await chromium.launch();
+  try {
+    for (const failure of [{ status: 401 }, { status: 403 }, { network: true }]) {
+      const { page, log } = await newEntryPage(browser, {
+        personalContext: true,
+        personalTeamsFailure: () => failure,
+      });
+      const feedGets = () =>
+        log.filter((r) => r.method === 'GET' && r.url.includes('/api/context/v1/personal-teams')).length;
+      await page.waitForFunction(() =>
+        !!document.getElementById('app').shadowRoot.querySelector('[data-personal-teams-retry]'),
+        { timeout: 10000 });
+      const atError = feedGets();
+      await page.waitForTimeout(800);
+      assert.equal(feedGets(), atError, `no refetch loop for ${JSON.stringify(failure)}`);
+      const txt = await page.evaluate(() => document.getElementById('app').shadowRoot.textContent);
+      assert.ok(txt.includes('No se pudieron cargar'), `error copy for ${JSON.stringify(failure)}`);
+      assert.ok(!txt.includes('Todavía no tienes'), 'failure never claims an empty roster');
+      await page.close();
+    }
+  } finally {
+    await browser.close();
+  }
+});
+
+test('OB60-3: foreign and archived edit ids never open — intent consumed once', async () => {
+  const browser = await chromium.launch();
+  try {
+    const archivedTeam = { ...PERSONAL_TEAMS[0], team_id: 'pt-arch', name: 'Viejo', archived: true };
+    for (const editId of ['pt-foreign', 'pt-arch']) {
+      const { page } = await newEntryPage(browser, {
+        routeQuery: `spaces?edit=${editId}`,
+        personalTeams: [...PERSONAL_TEAMS, archivedTeam],
+      });
+      await page.waitForFunction(() =>
+        document.getElementById('app')._personalTeamsStatus === 'ready',
+        { timeout: 10000 });
+      await page.waitForTimeout(400); // give a wrongful drain time to fire
+      const state = await page.evaluate(() => ({
+        editing: document.getElementById('app')._editingPersonalTeamId,
+        pending: document.getElementById('app')._pendingEditTeamId,
+      }));
+      assert.equal(state.editing, null, `${editId} must not open an editor`);
+      assert.equal(state.pending, null, `${editId} intent consumed once`);
+      await page.close();
+    }
+  } finally {
+    await browser.close();
+  }
+});
+
+test('OB60-3: both mount orders keep the edit intent — route-before-user and user-before-route', async () => {
+  const browser = await chromium.launch();
+  try {
+    // Route before user (harness order): user assignment must not wipe the
+    // just-captured ?edit= intent.
+    {
+      const { page } = await newEntryPage(browser, { routeQuery: 'spaces?edit=pt-1' });
+      await page.waitForFunction(() =>
+        document.getElementById('app')._editingPersonalTeamId === 'pt-1',
+        { timeout: 10000 });
+      await page.close();
+    }
+    // User before route: intent set after the session is already bound.
+    {
+      const { page } = await newEntryPage(browser, {});
+      await page.waitForFunction(() =>
+        document.getElementById('app')._personalTeamsStatus === 'ready',
+        { timeout: 10000 });
+      await page.evaluate(() => { document.getElementById('app').route = 'spaces?edit=pt-1'; });
+      await page.waitForFunction(() =>
+        document.getElementById('app')._editingPersonalTeamId === 'pt-1',
+        { timeout: 10000 });
+      await page.close();
+    }
+  } finally {
+    await browser.close();
+  }
+});
+
+test('OB60-3: delayed stale response after account switch never assigns old data', async () => {
+  const browser = await chromium.launch();
+  try {
+    const errors = [];
+    const staleTeam = { ...PERSONAL_TEAMS[0], team_id: 'pt-stale', name: 'STALE-TEAM' };
+    const { page, log } = await newEntryPage(browser, {
+      personalContext: true,
+      personalTeamsDelayMs: 700,
+      personalTeamsFailure: (n) =>
+        n === 1 ? { status: 200, body: { teams: [staleTeam] } } : null,
+    });
+    page.on('pageerror', (e) => errors.push(e));
+    // Switch accounts while the first feed is still in flight — its late
+    // body belongs to the previous scope and must never land.
+    await page.evaluate(() => { document.getElementById('app').user = 'second-account'; });
+    await page.waitForFunction(() =>
+      document.getElementById('app')._personalTeamsStatus === 'ready',
+      { timeout: 10000 });
+    await page.waitForTimeout(1000); // let the stale response fully land
+    const state = await page.evaluate(() => ({
+      teams: (document.getElementById('app')._personalTeams || []).map((t) => t.team_id),
+      editing: document.getElementById('app')._editingPersonalTeamId,
+      text: document.getElementById('app').shadowRoot.textContent,
+    }));
+    assert.deepEqual(state.teams, ['pt-1'], 'only the fresh-scope feed may assign');
+    assert.equal(state.editing, null, 'no editor from a stale completion');
+    assert.ok(!state.text.includes('STALE-TEAM'), 'stale body never renders');
+    assert.equal(errors.length, 0, 'no unhandled stale completion');
+    const gets = log.filter((r) => r.method === 'GET' && r.url.includes('/api/context/v1/personal-teams')).length;
+    assert.ok(gets <= 3, `fenced refetch, not a loop (${gets} gets)`);
+    await page.close();
+  } finally {
+    await browser.close();
+  }
+});
+
+test('OB60-3: disconnect mid-flight aborts — late body cannot resurrect the feed', async () => {
+  const browser = await chromium.launch();
+  try {
+    const errors = [];
+    const { page } = await newEntryPage(browser, {
+      personalContext: true,
+      personalTeamsDelayMs: 700,
+    });
+    page.on('pageerror', (e) => errors.push(e));
+    await page.evaluate(() => {
+      const el = document.getElementById('app');
+      window.__detached = el; // keep the detached node observable
+      el.remove();
+    });
+    await page.waitForTimeout(1100); // response lands after disconnect
+    const state = await page.evaluate(() => ({
+      connected: window.__detached.isConnected,
+      status: window.__detached._personalTeamsStatus,
+      teams: window.__detached._personalTeams,
+    }));
+    assert.equal(state.connected, false);
+    assert.equal(state.teams, null, 'detached feed never assigns');
+    assert.equal(errors.length, 0, 'no unhandled completion after disconnect');
+    await page.close();
   } finally {
     await browser.close();
   }

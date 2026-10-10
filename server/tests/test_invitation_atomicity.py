@@ -39,7 +39,7 @@ from biq_onboard_server import invitations, org  # noqa: E402
 from biq_onboard_server.app import create_app  # noqa: E402
 from biq_onboard_server.invitations import FirestoreInvitationStore  # noqa: E402
 
-from test_entry_ops import _ops_headers, _S2S  # noqa: E402
+from test_entry_ops import _ops_headers, _S2S, _RECIPIENT  # noqa: E402
 
 
 # ── strict Firestore fake ────────────────────────────────────────────────
@@ -258,7 +258,7 @@ def fx(monkeypatch: pytest.MonkeyPatch):
 def _issue(client: TestClient, roles: list[str] | None = None) -> dict:
     resp = client.post(
         "/api/admin/clubs/c1/invitations",
-        json={"proposed_roles": roles or ["coach"]},
+        json={"proposed_roles": roles or ["coach"], "recipient_email": _RECIPIENT},
         headers={
             **_S2S,
             "X-BIQ-Acting-User-Id": "admin1",
@@ -273,7 +273,7 @@ def _redeem(client: TestClient, token: str, account: str) -> Any:
     return client.post(
         "/api/ops/invitations/redeem",
         json={"token": token},
-        headers=_ops_headers(account, scope="verified"),
+        headers=_ops_headers(account, scope="verified", verified_email=_RECIPIENT),
     )
 
 

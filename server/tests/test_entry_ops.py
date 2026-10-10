@@ -66,6 +66,8 @@ def _mint(
     account_id: str = "acc_test",
     scope: str = "",
     verified_email: str = "",
+    aud: str = "biq:onboard:entry-v1",
+    ttl: int = 120,
 ) -> str:
     """Mint an entry proof the way App does (same HS256 contract)."""
     import base64
@@ -83,10 +85,10 @@ def _mint(
     now = int(time.time())
     claims: dict = {
         "sub": account_id,
-        "aud": "biq:onboard:entry-v1",
+        "aud": aud,
         "iss": "biq-app-context-v1",
         "iat": now,
-        "exp": now + 120,
+        "exp": now + ttl,
         "jti": "jt_test",
     }
     if scope:
@@ -99,7 +101,15 @@ def _mint(
     return f"{signing_input}.{sig}"
 
 
-def _issue(client: TestClient, club_id: str = "c1", roles=None) -> dict:
+_RECIPIENT = "recip@example.com"
+
+
+def _issue(
+    client: TestClient,
+    club_id: str = "c1",
+    roles=None,
+    recipient: str = _RECIPIENT,
+) -> dict:
     headers = {
         **_S2S,
         "X-BIQ-Acting-User-Id": "admin1",
@@ -107,11 +117,15 @@ def _issue(client: TestClient, club_id: str = "c1", roles=None) -> dict:
     }
     resp = client.post(
         f"/api/admin/clubs/{club_id}/invitations",
-        json={"proposed_roles": roles or ["coach"]},
+        json={"proposed_roles": roles or ["coach"], "recipient_email": recipient},
         headers=headers,
     )
     assert resp.status_code == 201, resp.text
     return resp.json()
+
+
+def _verified_headers(account_id: str = "acc_test", email: str = _RECIPIENT) -> dict:
+    return _ops_headers(account_id, scope="verified", verified_email=email)
 
 
 def _ops_headers(
@@ -203,7 +217,7 @@ class TestRedeem:
         resp = client.post(
             "/api/ops/invitations/redeem",
             json={"token": issued["token"]},
-            headers=_ops_headers("acc_1"),
+            headers=_verified_headers("acc_1"),
         )
         assert resp.status_code == 200, resp.text
         d = resp.json()
@@ -217,7 +231,7 @@ class TestRedeem:
         replay = client.post(
             "/api/ops/invitations/redeem",
             json={"token": issued["token"]},
-            headers=_ops_headers("acc_2"),
+            headers=_verified_headers("acc_2"),
         )
         assert replay.status_code in (404, 409)
 
@@ -248,7 +262,7 @@ class TestRedeem:
         resp = client.post(
             "/api/ops/invitations/redeem",
             json={"token": issued["token"]},
-            headers=_ops_headers(),
+            headers=_verified_headers(),
         )
         assert resp.status_code in (404, 409)
 
@@ -308,16 +322,56 @@ class TestR5InvitationHardening:
         )
         assert ok.status_code == 200, ok.text
 
-    def test_untargeted_invitation_stays_claim_by_possession(
+    def test_issue_requires_recipient(self, client: TestClient) -> None:
+        """OB60-1: an invitation without a verified target mailbox is an
+        open-bearer grant — missing, blank and malformed recipients are
+        refused at issue."""
+        headers = {
+            **_S2S,
+            "X-BIQ-Acting-User-Id": "admin1",
+            "X-BIQ-Acting-Email": "admin@example.com",
+        }
+        for payload in (
+            {"proposed_roles": ["coach"]},
+            {"proposed_roles": ["coach"], "recipient_email": ""},
+            {"proposed_roles": ["coach"], "recipient_email": "   "},
+            {"proposed_roles": ["coach"], "recipient_email": "not-an-email"},
+        ):
+            resp = client.post(
+                "/api/admin/clubs/c1/invitations", json=payload, headers=headers
+            )
+            assert resp.status_code == 422, resp.text
+
+    def test_unbound_legacy_invitation_fails_closed(
         self, client: TestClient
     ) -> None:
-        issued = _issue(client)
-        resp = client.post(
-            "/api/ops/invitations/redeem",
-            json={"token": issued["token"]},
-            headers=_ops_headers("acc_any", scope="membership"),
+        """OB60-1: a stored invitation without a recipient can never be
+        claimed — token possession and even a verified proof do not
+        revive an unbound record."""
+        store = invitations.get_invitation_store()
+        token = invitations.new_token()
+        inv = invitations.Invitation(
+            invitation_id=invitations.new_id(),
+            club_id="c1",
+            token_digest=invitations.token_digest(token),
+            proposed_roles=["coach"],
+            recipient_email="",
+            issuer_membership_id="admin1",
+            expires_at=invitations.default_expiry(),
+            created_at="2026-10-06T00:00:00+00:00",
         )
-        assert resp.status_code == 200
+        store.put(inv)
+        for headers in (
+            _ops_headers("acc_m", scope="membership"),
+            _ops_headers("acc_v", scope="verified", verified_email="x@example.com"),
+            _ops_headers("acc_none"),
+        ):
+            resp = client.post(
+                "/api/ops/invitations/redeem",
+                json={"token": token},
+                headers=headers,
+            )
+            assert resp.status_code == 403, resp.text
 
     def test_issuer_demotion_kills_invitation(self, client: TestClient) -> None:
         """The invitation dies when the issuer's live authority no longer
@@ -331,7 +385,7 @@ class TestR5InvitationHardening:
         resp = client.post(
             "/api/ops/invitations/redeem",
             json={"token": issued["token"]},
-            headers=_ops_headers("acc_v", scope="verified"),
+            headers=_verified_headers("acc_v"),
         )
         assert resp.status_code in (404, 409)
 
@@ -345,7 +399,7 @@ class TestR5InvitationHardening:
         resp = client.post(
             "/api/ops/invitations/redeem",
             json={"token": issued["token"]},
-            headers=_ops_headers("acc_v", scope="verified"),
+            headers=_verified_headers("acc_v"),
         )
         assert resp.status_code in (404, 409)
 
@@ -358,14 +412,16 @@ class TestR5InvitationHardening:
         # Beyond the 14-day ceiling → 422.
         far = client.post(
             "/api/admin/clubs/c1/invitations",
-            json={"proposed_roles": ["coach"], "expires_at": "2999-01-01T00:00:00+00:00"},
+            json={"proposed_roles": ["coach"], "recipient_email": _RECIPIENT,
+                  "expires_at": "2999-01-01T00:00:00+00:00"},
             headers=headers,
         )
         assert far.status_code == 422
         # Malformed → 422.
         bad = client.post(
             "/api/admin/clubs/c1/invitations",
-            json={"proposed_roles": ["coach"], "expires_at": "next-week"},
+            json={"proposed_roles": ["coach"], "recipient_email": _RECIPIENT,
+                  "expires_at": "next-week"},
             headers=headers,
         )
         assert bad.status_code == 422
@@ -375,7 +431,8 @@ class TestR5InvitationHardening:
         inside = (datetime.now(UTC) + timedelta(days=7)).isoformat()
         ok = client.post(
             "/api/admin/clubs/c1/invitations",
-            json={"proposed_roles": ["coach"], "expires_at": inside},
+            json={"proposed_roles": ["coach"], "recipient_email": _RECIPIENT,
+                  "expires_at": inside},
             headers=headers,
         )
         assert ok.status_code == 201, ok.text
@@ -400,7 +457,7 @@ class TestR5InvitationHardening:
         resp = client.post(
             "/api/ops/invitations/redeem",
             json={"token": issued["token"]},
-            headers=_ops_headers("acc_r", scope="verified"),
+            headers=_verified_headers("acc_r"),
         )
         assert resp.status_code == 409
 
@@ -412,13 +469,13 @@ class TestR5InvitationHardening:
         first = client.post(
             "/api/ops/invitations/redeem",
             json={"token": issued["token"]},
-            headers=_ops_headers("acc_win", scope="verified"),
+            headers=_verified_headers("acc_win"),
         )
         assert first.status_code == 200
         replay = client.post(
             "/api/ops/invitations/redeem",
             json={"token": issued["token"]},
-            headers=_ops_headers("acc_win", scope="verified"),
+            headers=_verified_headers("acc_win"),
         )
         assert replay.status_code == 200
         assert (
@@ -428,7 +485,7 @@ class TestR5InvitationHardening:
         foreign = client.post(
             "/api/ops/invitations/redeem",
             json={"token": issued["token"]},
-            headers=_ops_headers("acc_loser", scope="verified"),
+            headers=_verified_headers("acc_loser"),
         )
         assert foreign.status_code == 409
 
@@ -457,13 +514,13 @@ class TestR5InvitationHardening:
         }
         admin_invite = client.post(
             "/api/admin/clubs/c1/invitations",
-            json={"proposed_roles": ["administrator"]},
+            json={"proposed_roles": ["administrator"], "recipient_email": _RECIPIENT},
             headers=headers,
         )
         assert admin_invite.status_code == 403
         coach_invite = client.post(
             "/api/admin/clubs/c1/invitations",
-            json={"proposed_roles": ["coach"]},
+            json={"proposed_roles": ["coach"], "recipient_email": _RECIPIENT},
             headers=headers,
         )
         assert coach_invite.status_code == 201, coach_invite.text
@@ -567,7 +624,7 @@ class TestB1AtomicRedeem:
         first = client.post(
             "/api/ops/invitations/redeem",
             json={"token": issued["token"]},
-            headers=_ops_headers("acc_b1a"),
+            headers=_verified_headers("acc_b1a"),
         )
         assert first.status_code == 200
         member_id = first.json()["membership_subject_id"]
@@ -578,7 +635,7 @@ class TestB1AtomicRedeem:
         replay = client.post(
             "/api/ops/invitations/redeem",
             json={"token": issued["token"]},
-            headers=_ops_headers("acc_b1a"),
+            headers=_verified_headers("acc_b1a"),
         )
         assert replay.status_code == 200
         after = org.get_registry().get_user(member_id)
@@ -593,7 +650,7 @@ class TestB1AtomicRedeem:
         first = client.post(
             "/api/ops/invitations/redeem",
             json={"token": issued["token"]},
-            headers=_ops_headers("acc_b1b"),
+            headers=_verified_headers("acc_b1b"),
         )
         assert first.status_code == 200
         member_id = first.json()["membership_subject_id"]
@@ -603,7 +660,7 @@ class TestB1AtomicRedeem:
         replay = client.post(
             "/api/ops/invitations/redeem",
             json={"token": issued["token"]},
-            headers=_ops_headers("acc_b1b"),
+            headers=_verified_headers("acc_b1b"),
         )
         assert replay.status_code == 200
         remaining = [
@@ -626,7 +683,7 @@ class TestB1AtomicRedeem:
         resp = client.post(
             "/api/ops/invitations/redeem",
             json={"token": issued["token"]},
-            headers=_ops_headers("acc_b1c"),
+            headers=_verified_headers("acc_b1c"),
         )
         assert resp.status_code == 503
         inv = invitations.get_invitation_store().get(issued["invitation_id"])
@@ -659,7 +716,7 @@ class TestB1AtomicRedeem:
         resp = client.post(
             "/api/ops/invitations/redeem",
             json={"token": issued["token"]},
-            headers=_ops_headers("acc_b1d"),
+            headers=_verified_headers("acc_b1d"),
         )
         assert resp.status_code == 503
         inv = invitations.get_invitation_store().get(issued["invitation_id"])
@@ -678,7 +735,7 @@ class TestB1AtomicRedeem:
         retry = client.post(
             "/api/ops/invitations/redeem",
             json={"token": issued["token"]},
-            headers=_ops_headers("acc_b1d"),
+            headers=_verified_headers("acc_b1d"),
         )
         assert retry.status_code == 200
         member = registry.get_user(retry.json()["membership_subject_id"])
@@ -688,3 +745,129 @@ class TestB1AtomicRedeem:
             for a in role_registry.list_assignments(member.id, "club:c1")
         ]
         assert roles == ["coach"]
+
+
+class TestOB60AuthBeforeBody:
+    """OB60-2: every new entry/issue surface authenticates ALL required
+    layers before the body is decoded or schema-validated. Unauthorized
+    callers must see auth denial on malformed/missing/wrong-shaped
+    payloads; authorized callers keep genuine 400/422 validation."""
+
+    _OPS_PATHS = (
+        "/api/ops/invitations/preview",
+        "/api/ops/invitations/redeem",
+        "/api/ops/clubs",
+    )
+
+    def test_ops_malformed_json_never_beats_missing_auth(
+        self, client: TestClient
+    ) -> None:
+        for path in self._OPS_PATHS:
+            # No credentials at all.
+            resp = client.post(path, content=b"{{{{not json")
+            assert resp.status_code == 401, (path, resp.text)
+            # S2S only — missing entry proof.
+            resp = client.post(path, content=b"{{{{not json", headers=_S2S)
+            assert resp.status_code == 401, (path, resp.text)
+            # S2S + malformed proof.
+            resp = client.post(
+                path,
+                content=b"{{{{not json",
+                headers={**_S2S, "X-BIQ-Entry-Token": "bad"},
+            )
+            assert resp.status_code == 401, (path, resp.text)
+
+    def test_ops_malformed_json_never_beats_bad_or_expired_proof(
+        self, client: TestClient
+    ) -> None:
+        for path in self._OPS_PATHS:
+            wrong_aud = client.post(
+                path,
+                content=b"{{{{not json",
+                headers={**_S2S, "X-BIQ-Entry-Token": _mint(aud="biq:other")},
+            )
+            assert wrong_aud.status_code == 401, (path, wrong_aud.text)
+            expired = client.post(
+                path,
+                content=b"{{{{not json",
+                headers={**_S2S, "X-BIQ-Entry-Token": _mint(ttl=-300)},
+            )
+            assert expired.status_code == 401, (path, expired.text)
+
+    def test_ops_malformed_json_never_beats_wrong_s2s(
+        self, client: TestClient
+    ) -> None:
+        bad_s2s = {"Authorization": "Bearer wrong"}
+        for path in self._OPS_PATHS:
+            resp = client.post(
+                path,
+                content=b"{{{{not json",
+                headers={**bad_s2s, "X-BIQ-Entry-Token": _mint()},
+            )
+            assert resp.status_code == 401, (path, resp.text)
+
+    def test_ops_authorized_caller_keeps_body_validation(
+        self, client: TestClient
+    ) -> None:
+        headers = _ops_headers()
+        for path in self._OPS_PATHS:
+            # Undecodable JSON → 400.
+            resp = client.post(path, content=b"{{{{not json", headers=headers)
+            assert resp.status_code == 400, (path, resp.text)
+            # Decodable non-object → 422.
+            resp = client.post(path, content=b"[1,2]", headers=headers)
+            assert resp.status_code == 422, (path, resp.text)
+
+    def test_ops_blank_token_still_400_authorized(
+        self, client: TestClient
+    ) -> None:
+        for path in ("/api/ops/invitations/preview", "/api/ops/invitations/redeem"):
+            resp = client.post(path, json={"token": "  "}, headers=_ops_headers())
+            assert resp.status_code == 400, (path, resp.text)
+
+    def test_issue_malformed_body_never_beats_staff_gate(
+        self, client: TestClient
+    ) -> None:
+        path = "/api/admin/clubs/c1/invitations"
+        # No credentials at all → auth denial, not a body error.
+        assert client.post(path, content=b"{{{{not json").status_code == 401
+        # Valid S2S but a non-member acting identity → capability denial.
+        ghost = {
+            **_S2S,
+            "X-BIQ-Acting-User-Id": "ghost",
+            "X-BIQ-Acting-Email": "",
+        }
+        resp = client.post(path, content=b"{{{{not json", headers=ghost)
+        assert resp.status_code == 403, resp.text
+
+    def test_issue_authorized_caller_keeps_body_validation(
+        self, client: TestClient
+    ) -> None:
+        path = "/api/admin/clubs/c1/invitations"
+        headers = {
+            **_S2S,
+            "X-BIQ-Acting-User-Id": "admin1",
+            "X-BIQ-Acting-Email": "admin@example.com",
+        }
+        assert client.post(path, content=b"{{{{not json", headers=headers).status_code == 400
+        assert client.post(path, content=b"[1,2]", headers=headers).status_code == 422
+        # Schema violation on a decoded object → 422.
+        resp = client.post(
+            path, json={"proposed_roles": "coach"}, headers=headers
+        )
+        assert resp.status_code == 422, resp.text
+
+    def test_redeem_no_store_effects_on_unauthorized(
+        self, client: TestClient
+    ) -> None:
+        """An unauthorized malformed request must not touch invitation or
+        registry state — no lookup side effects, no partial writes."""
+        issued = _issue(client)
+        resp = client.post(
+            "/api/ops/invitations/redeem",
+            content=b"{{{{not json",
+        )
+        assert resp.status_code == 401
+        inv = invitations.get_invitation_store().get(issued["invitation_id"])
+        assert inv.status == "pending"
+        assert inv.redeemed_account_id == ""

@@ -23,10 +23,11 @@ from __future__ import annotations
 import hashlib
 import hmac
 import logging
+import re
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from biq_core.roles import can_assign_role, effective_capabilities
 
@@ -64,6 +65,32 @@ def _proof_claims(request: Request) -> dict:
 
 def _account_from_proof(request: Request) -> str:
     return _proof_claims(request)["sub"]
+
+
+async def _json_object(request: Request) -> dict[str, Any]:
+    """Decode the request body as a JSON object — ONLY after every auth
+    layer has passed. Undecodable JSON is a 400; a decodable non-object is
+    a 422 (mirrors FastAPI's body-contract responses)."""
+    try:
+        data = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid body")
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=422, detail="invalid body")
+    return data
+
+
+def _model(model_cls: Any, data: dict[str, Any]) -> Any:
+    """Apply the endpoint's schema after auth + JSON decode."""
+    try:
+        return model_cls.model_validate(data)
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail="invalid body") from exc
+
+
+# Recipient-bound policy (OB60-1): invitations name a verified mailbox —
+# anything else is an open-bearer grant the contract does not allow.
+_RECIPIENT_SHAPE = re.compile(r"^[^@\s]+@[^@\s]+$")
 
 
 def _issuer_still_grants(
@@ -130,9 +157,12 @@ class PreviewBody(BaseModel):
 
 
 @router.post("/api/ops/invitations/preview")
-def invitation_preview(body: PreviewBody, request: Request) -> dict:
+async def invitation_preview(request: Request) -> dict:
+    # Auth precedes body: malformed/absent payloads from unauthorized
+    # callers fail on credentials, never on schema.
     _require_s2s(request)
-    _account_from_proof(request)
+    _proof_claims(request)
+    body = _model(PreviewBody, await _json_object(request))
     if not body.token.strip():
         raise HTTPException(status_code=400, detail="token required")
     store = invitations.get_invitation_store()
@@ -148,14 +178,13 @@ class RedeemBody(BaseModel):
 
 @router.post("/api/ops/invitations/redeem")
 async def invitation_redeem(request: Request) -> dict:
+    # Both auth layers precede any body decode — a valid bearer with an
+    # absent/bad/expired proof dies as 401 before JSON is touched.
     _require_s2s(request)
-    try:
-        body = RedeemBody(**(await request.json()))
-    except Exception:
-        raise HTTPException(status_code=400, detail="invalid body")
+    claims = _proof_claims(request)
+    body = _model(RedeemBody, await _json_object(request))
     if not body.token.strip():
         raise HTTPException(status_code=400, detail="token required")
-    claims = _proof_claims(request)
     account_id = claims["sub"]
     # Verified mailbox carried by the proof — checked inside the fence
     # against the authoritative invitation record.
@@ -181,12 +210,14 @@ async def invitation_redeem(request: Request) -> dict:
             return invitations.RedeemPlan(error=(404, "invitation not found"))
         now = _now_iso()
         if inv.is_live(now):
-            # Verified recipient binding (R5/B1): an issuer-targeted mailbox
-            # must match the claimant's cryptographically-bound proof —
-            # evaluated here so out-of-band invitation edits can't slip
-            # between a preflight read and the claim.
+            # Verified recipient binding (R5/B1, OB60-1): every invitation
+            # names a verified mailbox — an unbound record (missing/blank
+            # recipient) is dead data, and a bound one must match the
+            # claimant's cryptographically-proven mailbox. Evaluated inside
+            # the fence so out-of-band edits can't slip between a preflight
+            # read and the claim.
             recipient = (inv.recipient_email or "").strip().lower()
-            if recipient and proven != recipient:
+            if not recipient or proven != recipient:
                 return invitations.RedeemPlan(error=(403, "invitation unavailable"))
             # Stored roles must be a strict subset of the assignable set —
             # an out-of-band edit is corrupt data, not a reason to mint a
@@ -278,7 +309,7 @@ class ClubCreateBody(BaseModel):
 
 
 @router.post("/api/ops/clubs", status_code=201)
-def ops_create_club(body: ClubCreateBody, request: Request) -> dict:
+async def ops_create_club(request: Request) -> dict:
     """PC-01 transport — App has already gated the account; this service
     runs the idempotent creation and returns the creator membership.
 
@@ -287,8 +318,11 @@ def ops_create_club(body: ClubCreateBody, request: Request) -> dict:
     collide with another's, and a replayed key carrying a different
     name/website conflicts (409) instead of silently overwriting the
     club document."""
+    # S2S + entry proof precede body validation — a loose-typed body must
+    # never leak schema errors to unauthorized callers.
     _require_s2s(request)
     account_id = _account_from_proof(request)
+    body = _model(ClubCreateBody, await _json_object(request))
 
     name = body.name.strip()
     if len(name) < 2:
@@ -415,10 +449,19 @@ def _bounded_expiry(raw: str | None) -> str:
 
 
 @staff_router.post("/api/admin/clubs/{club_id}/invitations", status_code=201)
-def issue_invitation(club_id: str, body: IssueBody, request: Request) -> dict:
+async def issue_invitation(club_id: str, request: Request) -> dict:
     """Issue a tokenized invitation — requires role-management capability
-    and the live per-role right to grant every proposed role (R5)."""
+    and the live per-role right to grant every proposed role (R5). The
+    acting-identity/capability gate runs BEFORE the body is decoded, so an
+    unauthorized caller's malformed payload fails on auth, not schema."""
     issuer = require_roles_admin_acting(request, club_id)
+    body = _model(IssueBody, await _json_object(request))
+    # Recipient-bound policy (OB60-1): an invitation without a verified
+    # target mailbox is an open-bearer grant — refuse it at issue rather
+    # than letting token possession mint membership.
+    recipient = (body.recipient_email or "").strip().lower()
+    if not recipient or not _RECIPIENT_SHAPE.match(recipient):
+        raise HTTPException(status_code=422, detail="recipient_email required")
     roles = [r for r in body.proposed_roles if r in _MEMBER_ROLES]
     if not roles or len(roles) != len({r for r in body.proposed_roles if r}):
         raise HTTPException(status_code=422, detail="unsupported proposed_roles")
@@ -436,7 +479,7 @@ def issue_invitation(club_id: str, body: IssueBody, request: Request) -> dict:
         club_id=club_id,
         token_digest="",  # set below
         proposed_roles=roles,
-        recipient_email=(body.recipient_email or "").strip().lower(),
+        recipient_email=recipient,
         issuer_membership_id=issuer,
         expires_at=_bounded_expiry(body.expires_at),
         created_at=_now_iso(),

@@ -375,7 +375,13 @@ class BiqOnboardApp extends HTMLElement {
   private _bootstrapFailed = false;
   private _entryTab: 'personal' | 'club' = 'personal';
   private _personalTeams: PersonalTeamRow[] | null = null;
-  private _personalTeamsLoading = false;
+  // OB60-3: the feed is a real state machine — 'uninitialized' means never
+  // attempted (first load may trigger), 'loading' in flight, 'error' failed
+  // (bounded — explicit retry only), 'ready' confirmed data (incl. empty).
+  private _personalTeamsStatus: 'uninitialized' | 'loading' | 'error' | 'ready' = 'uninitialized';
+  private _personalTeamsError: string | null = null;
+  private _personalTeamsSeq = 0; // response fence — stale completions drop
+  private _personalTeamsAbort: AbortController | null = null;
   private _editingPersonalTeamId: string | null = null;
   private _inviteToken = '';
   private _invitePreview: { club_id: string; club_name: string } | null = null;
@@ -592,6 +598,14 @@ class BiqOnboardApp extends HTMLElement {
       // User/session scope changed — the previous subject's roster and
       // role assignments must not survive into the new context.
       this._clearMembersState();
+      // Personal teams are account-scoped too: abort the in-flight feed,
+      // drop loaded/error state and close any open editor from the
+      // previous account. A still-pending ?edit= intent survives — the
+      // drain is fail-closed against the freshly reloaded feed, so a
+      // foreign team id can never open; clearing it here would kill
+      // deep links that land before the session attribute is set.
+      this._resetPersonalFeed();
+      this._editingPersonalTeamId = null;
     }
     this._user = value;
     this.render();
@@ -636,23 +650,58 @@ class BiqOnboardApp extends HTMLElement {
     }
   }
 
+  // Drop every cached feed value, invalidate in-flight fetches and abort
+  // the pending request — on account switch or disconnect nothing from the
+  // previous scope may complete into the new one.
+  private _resetPersonalFeed(): void {
+    this._personalTeamsSeq += 1;
+    if (this._personalTeamsAbort) {
+      this._personalTeamsAbort.abort();
+      this._personalTeamsAbort = null;
+    }
+    this._personalTeams = null;
+    this._personalTeamsStatus = 'uninitialized';
+    this._personalTeamsError = null;
+  }
+
   private async loadPersonalTeams(): Promise<void> {
-    if (this._personalTeamsLoading) return;
-    this._personalTeamsLoading = true;
+    if (this._personalTeamsStatus === 'loading') return;
+    this._personalTeamsStatus = 'loading';
+    this._personalTeamsError = null;
+    const seq = ++this._personalTeamsSeq;
+    this._personalTeamsAbort?.abort();
+    const controller = new AbortController();
+    this._personalTeamsAbort = controller;
+    const isCurrent = () => seq === this._personalTeamsSeq;
     try {
-      const res = await fetch('/api/context/v1/personal-teams', { credentials: 'include', cache: 'no-store' });
-      if (res.ok) {
-        const data = await res.json().catch(() => null);
-        this._personalTeams = Array.isArray(data?.teams) ? data.teams : [];
+      const res = await fetch('/api/context/v1/personal-teams', {
+        credentials: 'include', cache: 'no-store', signal: controller.signal,
+      });
+      const data = res.ok ? await res.json().catch(() => null) : null;
+      if (!isCurrent()) return; // stale/aborted response — drop it
+      if (res.ok && Array.isArray(data?.teams)) {
+        this._personalTeams = data.teams;
+        this._personalTeamsStatus = 'ready';
       } else {
+        // Non-OK status AND malformed payloads both land here — a broken
+        // feed is an error, never a healthy empty roster.
         this._personalTeams = null;
+        this._personalTeamsStatus = 'error';
+        this._personalTeamsError = res.ok
+          ? 'Respuesta de equipos inválida'
+          : `No se pudieron cargar los equipos (${res.status})`;
       }
     } catch (err) {
+      if (!isCurrent()) return;
       this._personalTeams = null;
+      this._personalTeamsStatus = 'error';
+      this._personalTeamsError = 'No se pudieron cargar los equipos';
     } finally {
-      this._personalTeamsLoading = false;
-      this._maybeOpenPendingPersonalEdit();
-      this.render();
+      if (isCurrent()) {
+        if (this._personalTeamsAbort === controller) this._personalTeamsAbort = null;
+        this._maybeOpenPendingPersonalEdit();
+        this.render();
+      }
     }
   }
 
@@ -660,9 +709,12 @@ class BiqOnboardApp extends HTMLElement {
   // mirrors _maybeOpenPendingEdit for the club catalog, once per intent.
   private _maybeOpenPendingPersonalEdit(): void {
     const teamId = this._pendingEditTeamId;
-    if (!teamId || this._subRoute !== 'spaces' || this._personalTeamsLoading) return;
+    if (!teamId || this._subRoute !== 'spaces' || this._personalTeamsStatus === 'loading') return;
     if (this._personalTeams === null) {
-      this.loadPersonalTeams();
+      // Only an uninitialized feed may self-trigger a load — an error keeps
+      // the intent pending and waits for the explicit retry instead of
+      // looping fetches on every failed completion.
+      if (this._personalTeamsStatus === 'uninitialized') this.loadPersonalTeams();
       return;
     }
     this._pendingEditTeamId = null;
@@ -1477,6 +1529,9 @@ class BiqOnboardApp extends HTMLElement {
       this._clubSubmitAbort.abort();
       this._clubSubmitAbort = null;
     }
+    // OB60-3: a detached component must not keep retrying the personal
+    // feed — fence + abort it like the club submit path.
+    this._resetPersonalFeed();
     // Remove visibility handler
     if (this._visibilityHandler) {
       document.removeEventListener('visibilitychange', this._visibilityHandler);
@@ -2291,7 +2346,12 @@ class BiqOnboardApp extends HTMLElement {
 
     const personalTab = `
       <section class="entry-panel">
-        ${this._personalTeams === null ? '<p class="entry-loading">Cargando equipos…</p>' : ''}
+        ${this._personalTeamsStatus === 'loading' || this._personalTeamsStatus === 'uninitialized'
+          ? '<p class="entry-loading">Cargando equipos…</p>'
+          : this._personalTeamsStatus === 'error'
+            ? `<p class="entry-error" role="alert">${escapeHtml(this._personalTeamsError || 'No se pudieron cargar los equipos')}
+                <button class="onboard-btn" type="button" data-personal-teams-retry ${this._entryBusy ? 'disabled' : ''}>Reintentar</button></p>`
+            : ''}
         ${personalTeams.length ? `
           <ul class="entry-teams">
             ${personalTeams.map((t) => `
@@ -2427,6 +2487,11 @@ class BiqOnboardApp extends HTMLElement {
       this.loadInvitePreview();
     }
 
+    // Feed failure in the selector is a bounded error too — the explicit
+    // retry is the only refetch, never a render-triggered one.
+    this.shadow.querySelector('[data-personal-teams-retry]')?.addEventListener('click', () => {
+      this.loadPersonalTeams();
+    });
     this.shadow.querySelector('[data-entry-personal-enter]')?.addEventListener('click', () => {
       this.activateContext('personal');
     });
@@ -2594,11 +2659,14 @@ class BiqOnboardApp extends HTMLElement {
         <h2 class="entry-title">Mi espacio personal</h2>
         <button class="onboard-btn" data-personal-switch-space>Cambiar de espacio</button>
         ${this._entryError ? `<p class="entry-error" role="alert">${escapeHtml(this._entryError)}</p>` : ''}
-        ${this._personalTeams === null
+        ${this._personalTeamsStatus === 'loading' || this._personalTeamsStatus === 'uninitialized'
           ? `<p class="entry-loading">Cargando equipos…</p>`
-          : teams.length
-            ? `<ul class="entry-teams">${teams.map(teamRow).join('')}</ul>`
-            : '<p class="entry-p">Todavía no tienes equipos personales.</p>'}
+          : this._personalTeamsStatus === 'error'
+            ? `<p class="entry-error" role="alert">${escapeHtml(this._personalTeamsError || 'No se pudieron cargar los equipos')}
+                <button class="onboard-btn" type="button" data-personal-teams-retry ${this._entryBusy ? 'disabled' : ''}>Reintentar</button></p>`
+            : teams.length
+              ? `<ul class="entry-teams">${teams.map(teamRow).join('')}</ul>`
+              : '<p class="entry-p">Todavía no tienes equipos personales.</p>'}
         ${archived.length ? `
           <h3 class="entry-h">Archivados</h3>
           <ul class="entry-teams">${archived.map((t) => `
@@ -2621,9 +2689,14 @@ class BiqOnboardApp extends HTMLElement {
   }
 
   private wirePersonalEvents(): void {
-    if (this._personalTeams === null && !this._personalTeamsLoading) {
+    // Only a never-attempted feed self-loads — a failure is a bounded error
+    // state, not an invitation to refetch on every render.
+    if (this._personalTeamsStatus === 'uninitialized') {
       this.loadPersonalTeams();
     }
+    this.shadow.querySelector('[data-personal-teams-retry]')?.addEventListener('click', () => {
+      this.loadPersonalTeams(); // explicit retry clears the error state
+    });
     // R6: el conmutador de espacios también es accesible desde el modo
     // personal — navega al selector autoritativo.
     this.shadow.querySelector('[data-personal-switch-space]')?.addEventListener('click', () => {

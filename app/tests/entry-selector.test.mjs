@@ -102,7 +102,7 @@ const PERSONAL_TEAMS = [
   },
 ];
 
-async function newEntryPage(browser, { bootstrap = BOOTSTRAP, routeQuery = null, personalTeams = PERSONAL_TEAMS, personalContext = false, org = undefined } = {}) {
+async function newEntryPage(browser, { bootstrap = BOOTSTRAP, routeQuery = null, personalTeams = PERSONAL_TEAMS, personalContext = false, org = undefined, personalTeamsFailure = null } = {}) {
   const page = await browser.newPage();
   const log = [];
 
@@ -126,6 +126,8 @@ async function newEntryPage(browser, { bootstrap = BOOTSTRAP, routeQuery = null,
       }
       if (u.includes('/api/context/v1/personal-teams')) {
         if (req.method() === 'POST') return json({ team: { team_id: 'pt-new' } }, 201);
+        const fail = typeof personalTeamsFailure === 'function' ? personalTeamsFailure() : personalTeamsFailure;
+        if (fail) return json(fail.body ?? { detail: 'feed unavailable' }, fail.status ?? 503);
         return json({ teams: personalTeams });
       }
       return json({ ok: true });
@@ -726,6 +728,125 @@ test('archived personal teams can be restored (R6)', async () => {
     await new Promise((r) => setTimeout(r, 300));
     const restore = log.find((r) => r.method === 'POST' && r.url.includes('/personal-teams/pt-1/restore'));
     assert.ok(restore, 'restore POST must fire');
+  } finally {
+    await browser.close();
+  }
+});
+
+test('OB60-3: failed personal feed is a bounded error — one fetch, explicit retry recovers', async () => {
+  const browser = await chromium.launch();
+  try {
+    let failing = true;
+    const { page, log } = await newEntryPage(browser, {
+      personalContext: true,
+      personalTeamsFailure: () => (failing ? { status: 503 } : null),
+    });
+    const feedGets = () =>
+      log.filter((r) => r.method === 'GET' && r.url.includes('/api/context/v1/personal-teams')).length;
+    await page.waitForFunction(() =>
+      !!document.getElementById('app').shadowRoot.querySelector('[data-personal-teams-retry]'),
+      { timeout: 10000 });
+    const atError = feedGets();
+    // Give render/completion cycles a chance to retrigger — none may fire.
+    await page.waitForTimeout(1200);
+    assert.equal(feedGets(), atError, 'no render/completion-triggered refetch loop');
+    const emptyText = await page.evaluate(() =>
+      document.getElementById('app').shadowRoot.textContent.includes('Todavía no tienes'));
+    assert.equal(emptyText, false, 'a failed feed never renders as a healthy empty list');
+    // Explicit retry is the only recovery path — and it recovers.
+    failing = false;
+    await page.evaluate(() =>
+      document.getElementById('app').shadowRoot.querySelector('[data-personal-teams-retry]').click());
+    await page.waitForFunction(() =>
+      document.getElementById('app').shadowRoot.textContent.includes('Paquetillos'),
+      { timeout: 10000 });
+    assert.equal(feedGets(), atError + 1, 'explicit retry issues exactly one more fetch');
+  } finally {
+    await browser.close();
+  }
+});
+
+test('OB60-3: malformed feed body is an error, not empty data', async () => {
+  const browser = await chromium.launch();
+  try {
+    const { page } = await newEntryPage(browser, {
+      personalContext: true,
+      personalTeamsFailure: { status: 200, body: { ok: true } },
+    });
+    await page.waitForFunction(() =>
+      !!document.getElementById('app').shadowRoot.querySelector('[data-personal-teams-retry]'),
+      { timeout: 10000 });
+    const txt = await page.evaluate(() => document.getElementById('app').shadowRoot.textContent);
+    assert.ok(txt.includes('Respuesta de equipos inválida'), 'malformed body surfaces as error');
+    assert.ok(!txt.includes('Todavía no tienes'), 'malformed body never becomes an empty list');
+  } finally {
+    await browser.close();
+  }
+});
+
+test('OB60-3: spaces?edit intent survives a failed feed and drains on explicit retry', async () => {
+  const browser = await chromium.launch();
+  try {
+    let failing = true;
+    const { page, log } = await newEntryPage(browser, {
+      personalTeamsFailure: () => (failing ? { status: 503 } : null),
+    });
+    const feedGets = () =>
+      log.filter((r) => r.method === 'GET' && r.url.includes('/api/context/v1/personal-teams')).length;
+    // The shell sets user/context before the deep-link navigation lands —
+    // set the route after mount so the intent survives the session scope.
+    await page.evaluate(() => {
+      document.getElementById('app').route = 'spaces?edit=pt-1';
+    });
+    // The selector defaults to Mi club when a club context exists — the
+    // feed error lives on the Mi equipo tab.
+    await page.waitForFunction(() =>
+      !!document.getElementById('app').shadowRoot.querySelector('[data-entry-tab="personal"]'),
+      { timeout: 10000 });
+    await page.evaluate(() =>
+      document.getElementById('app').shadowRoot.querySelector('[data-entry-tab="personal"]').click());
+    await page.waitForFunction(() =>
+      !!document.getElementById('app').shadowRoot.querySelector('[data-personal-teams-retry]'),
+      { timeout: 10000 });
+    // The pending edit drains nothing and triggers no extra fetches while
+    // the feed is in its error state.
+    const atError = feedGets();
+    await page.waitForTimeout(1200);
+    assert.equal(feedGets(), atError, 'pending edit does not loop the failed feed');
+    const kept = await page.evaluate(() => document.getElementById('app')._pendingEditTeamId);
+    assert.equal(kept, 'pt-1', 'failed feed keeps the edit intent pending');
+    failing = false;
+    await page.evaluate(() =>
+      document.getElementById('app').shadowRoot.querySelector('[data-personal-teams-retry]').click());
+    await page.waitForFunction(() =>
+      document.getElementById('app')._editingPersonalTeamId === 'pt-1',
+      { timeout: 10000 });
+    const pending = await page.evaluate(() => document.getElementById('app')._pendingEditTeamId);
+    assert.equal(pending, null, 'drained intent is consumed once');
+  } finally {
+    await browser.close();
+  }
+});
+
+test('OB60-3: account switch fences the feed — stale state drops, new scope refetches', async () => {
+  const browser = await chromium.launch();
+  try {
+    const { page, log } = await newEntryPage(browser, { personalContext: true });
+    await page.waitForFunction(() =>
+      document.getElementById('app').shadowRoot.textContent.includes('Paquetillos'),
+      { timeout: 10000 });
+    const before = log.filter((r) => r.method === 'GET' && r.url.includes('/api/context/v1/personal-teams')).length;
+    await page.evaluate(() => { document.getElementById('app').user = 'other-account'; });
+    const state = await page.evaluate(() => ({
+      teams: document.getElementById('app')._personalTeams,
+      status: document.getElementById('app')._personalTeamsStatus,
+    }));
+    assert.equal(state.teams, null, 'previous account teams dropped');
+    await page.waitForFunction(() =>
+      document.getElementById('app').shadowRoot.textContent.includes('Paquetillos'),
+      { timeout: 10000 });
+    const after = log.filter((r) => r.method === 'GET' && r.url.includes('/api/context/v1/personal-teams')).length;
+    assert.ok(after > before, 'new account scope refetches the feed');
   } finally {
     await browser.close();
   }

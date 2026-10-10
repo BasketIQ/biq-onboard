@@ -259,6 +259,11 @@ jobs:
         env:
           PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
           RUN_SERVICE: ${{ vars.GCP_RUN_SERVICE }}
+          # Numeric Secret Manager version the service pins BIQ_INTERNAL_TOKEN
+          # to — the approved mesh pin, never :latest (biq-app deploy.yml
+          # carries the same contract; a floating ref silently splits the
+          # mesh on rotation). Required per GitHub Environment.
+          INTERNAL_TOKEN_VERSION: ${{ vars.BIQ_INTERNAL_TOKEN_VERSION }}
         run: |
           # C14: Fail-closed — validate all required env vars are non-empty
           # before deploying. Missing config must not produce a silently
@@ -285,6 +290,36 @@ jobs:
           # C5: Use the dedicated task-invoker SA, not the deployer SA
           TASK_INVOKER_SA="${TASK_INVOKER_SA}"
 
+          # R9: BIQ_INTERNAL_TOKEN mounts at the EXPLICIT numeric version
+          # configured for this environment — never :latest. Reject
+          # nonnumeric values before any Secret Manager lookup ("latest"
+          # resolves ENABLED and would silently recreate the split).
+          test -n "${INTERNAL_TOKEN_VERSION}" \
+            || { echo "::error::BIQ_INTERNAL_TOKEN_VERSION is not configured for this environment — refusing to deploy without an explicit token pin"; exit 1; }
+          case "${INTERNAL_TOKEN_VERSION}" in
+            *[!0-9]*|'')
+              echo "::error::BIQ_INTERNAL_TOKEN_VERSION must be a numeric Secret Manager version, got '${INTERNAL_TOKEN_VERSION}' — refusing to deploy"
+              exit 1 ;;
+          esac
+          # || true: a missing secret makes gcloud exit non-zero; under
+          # `bash -e` a failing command substitution aborts the script
+          # silently, before the explicit ::error:: guard below can run.
+          TOKEN_VERSION_STATE="$(gcloud secrets versions describe "${INTERNAL_TOKEN_VERSION}" \
+            --secret=BIQ_INTERNAL_TOKEN --project="${PROJECT_ID}" --format='value(state)' 2>/dev/null || true)"
+          test "${TOKEN_VERSION_STATE}" = "ENABLED" \
+            || { echo "::error::BIQ_INTERNAL_TOKEN version ${INTERNAL_TOKEN_VERSION} is ${TOKEN_VERSION_STATE:-unreadable} — refusing to deploy"; exit 1; }
+
+          # R9: BIQ_EMBED_JWT_SECRET — the shared HS256 signing secret for
+          # App-issued entry proofs (entry_proof.py). Mounted from Secret
+          # Manager so the value never transits logs or env diffs; the
+          # canonical config owner distributes it (basketiq-wow cfg). Fail
+          # closed on metadata: without it every entry proof is rejected.
+          EMBED_VERSION_STATE="$(gcloud secrets versions list "BIQ_EMBED_JWT_SECRET" \
+            --project "${PROJECT_ID}" \
+            --filter='state=ENABLED' --limit=1 --format='value(state)' 2>/dev/null || true)"
+          test -n "${EMBED_VERSION_STATE}" \
+            || { echo "::error::BIQ_EMBED_JWT_SECRET has no enabled Secret Manager version — refusing to deploy (entry proofs would fail closed)"; exit 1; }
+
           gcloud run deploy "${RUN_SERVICE}" \
             --project "${PROJECT_ID}" \
             --region europe-west1 \
@@ -293,7 +328,7 @@ jobs:
             --allow-unauthenticated \
             --port 8080 \
             --set-env-vars "BIQ_ENV=prod,BIQ_ORG_STORE=firestore,BIQ_ROLES_STORE=firestore,GCP_PROJECT_ID=${{ vars.GCP_PROJECT_ID }},GOOGLE_CLOUD_PROJECT=${{ vars.GCP_PROJECT_ID }},BIQ_ONBOARD_USER=${{ secrets.BIQ_ONBOARD_USER }},BIQ_ONBOARD_PASSWORD=${{ secrets.BIQ_ONBOARD_PASSWORD }},BIQ_ONBOARD_SESSION_SECRET=${{ secrets.BIQ_ONBOARD_SESSION_SECRET }},BIQ_ONBOARD_S2S_SECRET=${{ secrets.BIQ_ONBOARD_S2S_SECRET }},BIQ_THEME_JOB_RESULT_TOKEN=${{ secrets.BIQ_THEME_JOB_RESULT_TOKEN }},BIQ_CLOUD_TASKS_QUEUE=club-theme-generation,GCP_TASKS_QUEUE=club-theme-generation,GCP_TASKS_LOCATION=europe-west1,GCP_THEME_JOB_NAME=club-theme-generation,GCP_TASK_INVOKER_SA=${TASK_INVOKER_SA},BIQ_ONBOARD_CALLBACK_URL=${{ vars.BIQ_ONBOARD_CALLBACK_URL }},BIQ_METHODOLOGY_URL=https://biq-methodology-staging-859603579451.europe-west1.run.app,BIQ_SEASON_PLAN_URL=https://biq-season-plan-staging-859603579451.europe-west1.run.app,BIQ_APP_URL=https://biq-app-staging-859603579451.europe-west1.run.app" \
-            --set-secrets "BIQ_INTERNAL_TOKEN=BIQ_INTERNAL_TOKEN:latest" \
+            --set-secrets "BIQ_INTERNAL_TOKEN=BIQ_INTERNAL_TOKEN:${INTERNAL_TOKEN_VERSION},BIQ_EMBED_JWT_SECRET=BIQ_EMBED_JWT_SECRET:latest" \
             --service-account "${DEFAULT_SA}"
 
       - name: Health check

@@ -956,7 +956,7 @@ test('P4-r2: roles assignments must be scoped to the requested club — foreign/
     { name: 'missing-scope', assignments: [{ id: 'a1', user_id: 'u1', role: 'coach', club_id: 'club1' }] },
     { name: 'typed-id', assignments: [{ id: 42, user_id: 'u1', role: 'coach', scope: 'club:club1' }] },
     { name: 'blank-role', assignments: [{ id: 'a1', user_id: 'u1', role: '', scope: 'club:club1' }] },
-    { name: 'non-member-user', assignments: [{ id: 'a1', user_id: 'ghost', role: 'coach', scope: 'club:club1' }] },
+    { name: 'blank-user_id', assignments: [{ id: 'a1', user_id: '', role: 'coach', scope: 'club:club1' }] },
     { name: 'blank-scope', assignments: [{ id: 'a1', user_id: 'u1', role: 'coach', scope: '' }] },
   ]) {
     const browser = await chromium.launch();
@@ -990,6 +990,41 @@ test('P4-r2: roles assignments must be scoped to the requested club — foreign/
     } finally {
       await browser.close();
     }
+  }
+});
+
+test('P4-r2: non-member scope assignments are filtered, never a roster failure', async () => {
+  // The registry can legitimately hold club-scope assignments for users who
+  // are not members of this roster (cross-scope grants, assignments that
+  // outlive membership). They are unreachable from member-row controls, so
+  // the roster must load and simply not retain them.
+  const browser = await chromium.launch();
+  const { page } = await newPage(browser);
+  try {
+    await page.route('**/api/clubs/club1/roles', async (route) => {
+      await route.fulfill({
+        status: 200, contentType: 'application/json',
+        body: JSON.stringify({
+          assignments: [
+            { id: 'ghost__coach__club:club1', user_id: 'ghost', role: 'coach', scope: 'club:club1' },
+            { id: 'u1__coordinator__club:club1', user_id: 'u1', role: 'coordinator', scope: 'club:club1' },
+          ],
+        }),
+      });
+    });
+    await mountAt(page, 'administrator', 'members');
+    await page.waitForFunction(() =>
+      document.getElementById('app').shadowRoot.querySelectorAll('[data-member-row]').length === 3,
+      { timeout: 10000 });
+    const state = await page.evaluate(() => ({
+      error: !!document.getElementById('app').shadowRoot.querySelector('[data-members-error]'),
+      assignments: document.getElementById('app')._memberAssignments,
+    }));
+    assert.equal(state.error, false, 'non-member assignment does not fail the roster');
+    assert.equal(state.assignments.length, 1, 'only member-backed assignment retained');
+    assert.equal(state.assignments[0].user_id, 'u1', 'ghost row filtered out');
+  } finally {
+    await browser.close();
   }
 });
 

@@ -52,6 +52,7 @@ interface ClubTheme {
   };
   logo?: {
     url: string | null;
+    onLight: string | null;
     rightsConfirmedAt: string | null;
     status: 'awaiting_rights' | 'confirmed' | 'rejected';
   } | null;
@@ -61,7 +62,15 @@ interface ClubTheme {
   };
   gate?: {
     passed: boolean;
-    failures: string[];
+    failures: Array<{
+      error?: string;
+      fg?: string;
+      bg?: string;
+      ratio?: number;
+      required?: number;
+      fgHex?: string;
+      bgHex?: string;
+    }>;
   };
   activation?: {
     themeStatus: string;
@@ -70,7 +79,10 @@ interface ClubTheme {
 }
 
 interface ThemeJob {
-  status: 'pending' | 'running' | 'completed' | 'failed' | 'reverted';
+  // Canonical states (B10) — the server has no "completed" vocabulary.
+  status: 'pending' | 'running' | 'succeeded' | 'uncertain' |
+    'rejected_not_a_club' | 'unsupported_source' | 'unreachable' |
+    'failed' | 'reverted';
   sourceUrl: string;
   requestedAt: string;
   finishedAt: string | null;
@@ -80,39 +92,6 @@ interface ThemeJob {
     score: number;
   } | null;
 }
-
-// ─── Per-verdict Spanish copy (ADDENDUM-04 §5) ──────────────────────────
-
-const VERDICT_COPY: Record<string, { title: string; description: string; action?: string }> = {
-  club_confirmed: {
-    title: 'Club confirmado',
-    description: 'Hemos detectado la web de tu club y generado los colores del estilo.',
-  },
-  uncertain: {
-    title: 'No estamos seguros',
-    description: 'La web parece legítima pero no tenemos suficiente confianza para aplicar los colores automáticamente. Puedes revisarlos y activarlos manualmente.',
-    action: 'Revisar colores',
-  },
-  not_a_club: {
-    title: 'No parece un club',
-    description: 'La URL indicada no corresponde a un club de baloncesto. Revisa la dirección e inténtalo de nuevo.',
-  },
-  unsupported_source: {
-    title: 'Fuente no soportada',
-    description: 'No podemos extraer colores de este tipo de página (redes sociales, PDFs, etc.). Introduce la URL de la web del club.',
-  },
-  unreachable: {
-    title: 'No se pudo acceder',
-    description: 'La web del club no respondió o no es accesible públicamente. Verifica la URL e inténtalo de nuevo.',
-  },
-};
-
-const THEME_STATUS_COPY: Record<string, { label: string; color: string }> = {
-  active: { label: 'Activo', color: 'var(--biq-green)' },
-  draft: { label: 'Borrador', color: 'var(--biq-amber)' },
-  rejected: { label: 'Rechazado', color: 'var(--biq-red)' },
-  pending: { label: 'Pendiente', color: 'var(--biq-blue)' },
-};
 
 // B14: themeJob state matrix — presentation + action per canonical state
 const THEME_JOB_COPY: Record<string, { title: string; description: string; action?: string }> = {
@@ -315,12 +294,103 @@ function normaliseWebsiteUrl(raw: string): string | null {
   return 'https://' + v;
 }
 
+// ─── Working-context entry (BIQ-PERSONAL-CLUB-CONTEXT/1.0.0) ────────────
+// The shell injects `el.context` when a context-aware module runs inside an
+// active working context. Without it (or while the bootstrap resolves) the
+// module falls back to the legacy club step.
+
+interface OwnerScope {
+  kind: string;
+  workspace_id?: string;
+  account_id?: string;
+  club_id?: string;
+}
+
+interface ContextDescriptor {
+  token?: string;
+  context_id: string;
+  context_epoch: number;
+  owner_scope: OwnerScope;
+  team_ids: string[];
+  archived_team_ids?: string[];
+  working_team_ids: string[];
+  active_team_id?: string;
+  status?: string;
+}
+
+interface ContextCandidate {
+  kind: string;
+  owner_scope: Record<string, string>;
+  name?: string;
+  requires_verification: boolean;
+}
+
+interface BootstrapPayload {
+  schema_version: string;
+  state: string;
+  account_id: string;
+  identity_verified: boolean;
+  contexts: ContextCandidate[];
+  active: ContextDescriptor | null;
+  entry_actions: Record<string, { allowed: boolean; requires_verification: boolean }>;
+}
+
+interface PersonalTeamRow {
+  team_id: string;
+  name: string;
+  category_key: string;
+  category_label: string;
+  age_band: string;
+  gender: string;
+  section_applicability: string;
+  timezone: string;
+  season: string;
+  archived: boolean;
+  team_revision: number;
+}
+
+// Category vocabulary mirrors biq-core CATEGORIES (slug → display label).
+const PERSONAL_CATEGORIES: Array<{ key: string; label: string }> = [
+  { key: 'babybasket', label: 'Babybasket' },
+  { key: 'prebenjamin', label: 'Prebenjamín' },
+  { key: 'benjamin', label: 'Benjamín' },
+  { key: 'alevin', label: 'Alevín' },
+  { key: 'infantil', label: 'Infantil' },
+  { key: 'cadete', label: 'Cadete' },
+  { key: 'junior', label: 'Junior' },
+  { key: 'senior', label: 'Senior' },
+  { key: 'veteranos', label: 'Veteranos' },
+];
+
 // ─── Main component ─────────────────────────────────────────────────────
 
 class BiqOnboardApp extends HTMLElement {
   private shadow: ShadowRoot;
   private _org: OrgContext | null = null;
   private _user: string | null = null;
+  // Working-context entry state (BIQ-PERSONAL-CLUB-CONTEXT)
+  private _context: ContextDescriptor | null = null;
+  private _bootstrap: BootstrapPayload | null = null;
+  private _bootstrapLoading = false;
+  private _bootstrapFailed = false;
+  private _entryTab: 'personal' | 'club' = 'personal';
+  private _personalTeams: PersonalTeamRow[] | null = null;
+  // OB60-3: the feed is a real state machine — 'uninitialized' means never
+  // attempted (first load may trigger), 'loading' in flight, 'error' failed
+  // (bounded — explicit retry only), 'ready' confirmed data (incl. empty).
+  private _personalTeamsStatus: 'uninitialized' | 'loading' | 'error' | 'ready' = 'uninitialized';
+  private _personalTeamsError: string | null = null;
+  private _personalTeamsSeq = 0; // response fence — stale completions drop
+  private _personalTeamsAbort: AbortController | null = null;
+  private _editingPersonalTeamId: string | null = null;
+  private _inviteToken = '';
+  private _invitePreview: { club_id: string; club_name: string } | null = null;
+  private _inviteLoading = false;
+  private _helpOpen: '' | 'personal' | 'club' = '';
+  private _clubCreateOpen = false;
+  private _teamCreateOpen = false;
+  private _entryError: string | null = null;
+  private _entryBusy = false;
   private _subRoute = '';
   private _theme: ClubTheme | null = null;
   private _themeJob: ThemeJob | null = null;
@@ -430,7 +500,6 @@ class BiqOnboardApp extends HTMLElement {
   } | null = null;
   private _clubSummaryLoading = false;
   private _clubSummaryError: string | null = null;
-  private _clubSummaryClubId: string | null = null;
   // Watches body[data-shell-chrome] (global nav contract §2) so the section
   // subhead's sticky offset follows the shell chrome's shown/collapsed state.
   private _shellChromeObserver: MutationObserver | null = null;
@@ -493,7 +562,6 @@ class BiqOnboardApp extends HTMLElement {
       this._stopSeedingPolling();
       // Phase 3: club summary belongs to the previous club — drop it.
       this._clubSummary = null;
-      this._clubSummaryClubId = null;
       this._clubSummaryError = null;
       // Consolidated Equipos: selection + management catalog are club-scoped.
       this._teams = [];
@@ -530,6 +598,14 @@ class BiqOnboardApp extends HTMLElement {
       // User/session scope changed — the previous subject's roster and
       // role assignments must not survive into the new context.
       this._clearMembersState();
+      // Personal teams are account-scoped too: abort the in-flight feed,
+      // drop loaded/error state and close any open editor from the
+      // previous account. A still-pending ?edit= intent survives — the
+      // drain is fail-closed against the freshly reloaded feed, so a
+      // foreign team id can never open; clearing it here would kill
+      // deep links that land before the session attribute is set.
+      this._resetPersonalFeed();
+      this._editingPersonalTeamId = null;
     }
     this._user = value;
     this.render();
@@ -539,6 +615,216 @@ class BiqOnboardApp extends HTMLElement {
     }
   }
   get user(): string | null { return this._user; }
+
+  // Working context (BIQ-PERSONAL-CLUB-CONTEXT): the shell injects the
+  // active-context descriptor before connecting the element.
+  set context(value: ContextDescriptor | null) {
+    this._context = value;
+    this.render();
+  }
+  get context(): ContextDescriptor | null { return this._context; }
+
+  // Bootstrap the entry surface: decides whether this module renders the
+  // context entry selector or the legacy club step. A failed/absent
+  // endpoint means the context feature is off — legacy path preserved.
+  private async loadBootstrap(): Promise<void> {
+    if (this._bootstrapLoading || this._bootstrap || this._bootstrapFailed) return;
+    this._bootstrapLoading = true;
+    try {
+      const res = await fetch('/api/context/v1/bootstrap', { credentials: 'include', cache: 'no-store' });
+      if (!res.ok) { this._bootstrapFailed = true; return; }
+      const data = await res.json().catch(() => null);
+      if (!data || typeof data.state !== 'string') { this._bootstrapFailed = true; return; }
+      this._bootstrap = data as BootstrapPayload;
+      // Default the tab: club candidates land on the club tab.
+      const hasClub = (data.contexts || []).some((c: ContextCandidate) => c.kind === 'club');
+      this._entryTab = hasClub ? 'club' : 'personal';
+      // Mi equipo lists the account's private teams — session-scoped, no
+      // active context needed; prefetch so the tab renders them.
+      this.loadPersonalTeams();
+    } catch (err) {
+      this._bootstrapFailed = true;
+    } finally {
+      this._bootstrapLoading = false;
+      this.render();
+    }
+  }
+
+  // Drop every cached feed value, invalidate in-flight fetches and abort
+  // the pending request — on account switch or disconnect nothing from the
+  // previous scope may complete into the new one.
+  private _resetPersonalFeed(): void {
+    this._personalTeamsSeq += 1;
+    if (this._personalTeamsAbort) {
+      this._personalTeamsAbort.abort();
+      this._personalTeamsAbort = null;
+    }
+    this._personalTeams = null;
+    this._personalTeamsStatus = 'uninitialized';
+    this._personalTeamsError = null;
+  }
+
+  private async loadPersonalTeams(): Promise<void> {
+    if (this._personalTeamsStatus === 'loading') return;
+    this._personalTeamsStatus = 'loading';
+    this._personalTeamsError = null;
+    const seq = ++this._personalTeamsSeq;
+    this._personalTeamsAbort?.abort();
+    const controller = new AbortController();
+    this._personalTeamsAbort = controller;
+    const isCurrent = () => seq === this._personalTeamsSeq;
+    try {
+      const res = await fetch('/api/context/v1/personal-teams', {
+        credentials: 'include', cache: 'no-store', signal: controller.signal,
+      });
+      const data = res.ok ? await res.json().catch(() => null) : null;
+      if (!isCurrent()) return; // stale/aborted response — drop it
+      const teams = res.ok ? this._validPersonalTeams(data) : null;
+      if (res.ok && teams !== null) {
+        this._personalTeams = teams;
+        this._personalTeamsStatus = 'ready';
+      } else {
+        // Non-OK status AND malformed payloads both land here — a broken
+        // feed is an error, never a healthy empty roster.
+        this._personalTeams = null;
+        this._personalTeamsStatus = 'error';
+        this._personalTeamsError = res.ok
+          ? 'Respuesta de equipos inválida'
+          : `No se pudieron cargar los equipos (${res.status})`;
+      }
+    } catch (err) {
+      if (!isCurrent()) return;
+      this._personalTeams = null;
+      this._personalTeamsStatus = 'error';
+      this._personalTeamsError = 'No se pudieron cargar los equipos';
+    } finally {
+      if (isCurrent()) {
+        if (this._personalTeamsAbort === controller) this._personalTeamsAbort = null;
+        this._maybeOpenPendingPersonalEdit();
+        this.render();
+      }
+    }
+  }
+
+  // Fail-closed row validation (OB60-3): the WHOLE collection must be
+  // well-formed before `ready` — a single corrupt row ({teams:[null]},
+  // missing ids, wrong types, duplicate identities) means the feed itself
+  // is untrustworthy, never a reason to filter rows into a "healthy" list.
+  // Legitimate empty arrays stay ready/empty.
+  private _validPersonalTeams(data: unknown): PersonalTeamRow[] | null {
+    const rows = (data as { teams?: unknown } | null)?.teams;
+    if (!Array.isArray(rows)) return null;
+    const ids = new Set<string>();
+    for (const row of rows) {
+      if (!row || typeof row !== 'object' || Array.isArray(row)) return null;
+      const t = row as Record<string, unknown>;
+      if (typeof t.team_id !== 'string' || !t.team_id.trim()) return null;
+      if (ids.has(t.team_id)) return null;
+      ids.add(t.team_id);
+      // `archived` drives the active/archived split and the edit drain;
+      // `team_revision` is the CAS input for edits — both must be real.
+      if (typeof t.archived !== 'boolean') return null;
+      if (typeof t.team_revision !== 'number' || !Number.isFinite(t.team_revision)) return null;
+      for (const key of [
+        'name', 'category_key', 'category_label', 'age_band',
+        'gender', 'section_applicability', 'timezone', 'season',
+      ] as const) {
+        if (typeof t[key] !== 'string') return null;
+      }
+    }
+    return rows as PersonalTeamRow[];
+  }
+
+  // Drains `?edit=<id>` on the spaces route into the personal team edit form —
+  // mirrors _maybeOpenPendingEdit for the club catalog, once per intent.
+  private _maybeOpenPendingPersonalEdit(): void {
+    const teamId = this._pendingEditTeamId;
+    if (!teamId || this._subRoute !== 'spaces' || this._personalTeamsStatus === 'loading') return;
+    if (this._personalTeams === null) {
+      // Only an uninitialized feed may self-trigger a load — an error keeps
+      // the intent pending and waits for the explicit retry instead of
+      // looping fetches on every failed completion.
+      if (this._personalTeamsStatus === 'uninitialized') this.loadPersonalTeams();
+      return;
+    }
+    this._pendingEditTeamId = null;
+    if (this._personalTeams.some((t) => t.team_id === teamId && !t.archived)) {
+      this._editingPersonalTeamId = teamId;
+    }
+    // Consume-once: drop the intent from the hash like the club path does.
+    const hash = window.location.hash || '';
+    const qIdx = hash.indexOf('?');
+    if (qIdx >= 0) {
+      const params = new URLSearchParams(hash.slice(qIdx + 1));
+      if (params.has('edit')) {
+        params.delete('edit');
+        const query = params.toString();
+        history.replaceState(null, '', `${hash.slice(0, qIdx)}${query ? `?${query}` : ''}`);
+      }
+    }
+  }
+
+  private async activateContext(kind: 'personal' | 'club', clubId?: string): Promise<void> {
+    this._entryBusy = true;
+    this._entryError = null;
+    this.render();
+    try {
+      const res = await fetch('/api/context/v1/activate', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(clubId ? { kind, club_id: clubId } : { kind }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        throw new Error(body?.detail || `No se pudo activar el contexto (${res.status})`);
+      }
+      this.dispatchEvent(new CustomEvent('biq-context:activated', { bubbles: true, composed: true }));
+    } catch (err) {
+      this._entryError = (err as Error).message;
+    } finally {
+      this._entryBusy = false;
+      this.render();
+    }
+  }
+
+  // Entrar en el espacio personal con un equipo concreto: activa el
+  // contexto personal y estrecha el working set a ese equipo.
+  private async enterPersonalTeam(teamId: string): Promise<void> {
+    this._entryBusy = true;
+    this._entryError = null;
+    this.render();
+    try {
+      const res = await fetch('/api/context/v1/activate', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ kind: 'personal' }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        throw new Error(body?.detail || `No se pudo activar el contexto (${res.status})`);
+      }
+      if (teamId) {
+        const put = await fetch('/api/context/v1/active/working-teams', {
+          method: 'PUT',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ working_team_ids: [teamId] }),
+        });
+        if (!put.ok) {
+          const body = await put.json().catch(() => null);
+          throw new Error(body?.detail || `No se pudo seleccionar el equipo (${put.status})`);
+        }
+      }
+      this.dispatchEvent(new CustomEvent('biq-context:activated', { bubbles: true, composed: true }));
+    } catch (err) {
+      this._entryError = (err as Error).message;
+    } finally {
+      this._entryBusy = false;
+      this.render();
+    }
+  }
 
   set route(value: string) {
     // Deep links may carry a query ("teams?return=cycle" from the mandatory
@@ -553,6 +839,14 @@ class BiqOnboardApp extends HTMLElement {
     // `edit=<teamId>` (from Home «Plantilla») asks for the edit modal; any
     // route without it drops a stale pending request.
     this._pendingEditTeamId = params?.get('edit') || null;
+    // `invite=<token>` — invitation links arrive by email; the token rides
+    // the deep link and the Mi club tab shows the confirm card.
+    const invite = params?.get('invite') || '';
+    if (invite) {
+      this._inviteToken = invite;
+      this._invitePreview = null;
+      this._entryTab = 'club';
+    }
     this.render();
     // F12: Deep-linking to #/onboard/teams bypasses the nav click that loads
     // the catalog — trigger the load here when club context is already set.
@@ -561,6 +855,12 @@ class BiqOnboardApp extends HTMLElement {
       this._ensureTeamsData(clubId);
       // Catalog may already be warm (no load started) — drain immediately.
       this._maybeOpenPendingEdit();
+    }
+    // «Plantilla» on a personal team (footer action dialog) deep-links to
+    // #/onboard/spaces?edit=<id> — the personal edit form opens once the
+    // teams feed confirms the id exists.
+    if (this._subRoute === 'spaces') {
+      this._maybeOpenPendingPersonalEdit();
     }
     // Phase 3: same for the Perfil club summary.
     if (this._subRoute === 'profile' && clubId && !this._clubSummary && !this._clubSummaryLoading) {
@@ -629,7 +929,6 @@ class BiqOnboardApp extends HTMLElement {
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       this._clubSummary = await res.json();
-      this._clubSummaryClubId = clubId;
     } catch (err) {
       this._clubSummaryError = (err as Error).message;
     } finally {
@@ -703,9 +1002,11 @@ class BiqOnboardApp extends HTMLElement {
       }
       // Every assignment must carry the upstream scope contract
       // (scope === "club:<requested club>") and must not conflict with an
-      // explicit club_id or name a user outside this member set. A foreign or
-      // malformed row is non-authoritative — fail closed instead of wiring
-      // another club's assignment id into this club's controls.
+      // explicit club_id. A foreign or malformed row is non-authoritative —
+      // fail closed instead of wiring another club's assignment id into this
+      // club's controls. Rows for users outside the member roster are valid
+      // scope state (cross-scope grants, assignments outliving membership) and
+      // can never back a member-row control — filter them, don't fail.
       const memberIds = new Set(
         (users as { id?: unknown }[])
           .map((u) => u?.id)
@@ -716,7 +1017,7 @@ class BiqOnboardApp extends HTMLElement {
           && a.scope === `club:${clubId}`
           && (a.club_id === undefined || a.club_id === clubId)
           && typeof a.id === 'string' && a.id.length > 0
-          && typeof a.user_id === 'string' && memberIds.has(a.user_id)
+          && typeof a.user_id === 'string' && a.user_id.length > 0
           && typeof a.role === 'string' && a.role.length > 0;
         if (!valid) throw new Error('Respuesta de roles inválida');
         return {
@@ -725,7 +1026,7 @@ class BiqOnboardApp extends HTMLElement {
           role: a.role as string,
           club_id: clubId,
         };
-      });
+      }).filter((a: MemberAssignment) => memberIds.has(a.user_id));
       if (!isCurrent()) return; // late response from another club/user — drop it
       this._members = users as MemberRow[];
       this._memberAssignments = assignments;
@@ -1250,7 +1551,6 @@ class BiqOnboardApp extends HTMLElement {
 
   // C11: Lifecycle — stop polling on disconnect, resume on reconnect
   disconnectedCallback(): void {
-    super.disconnectedCallback?.();
     this._stopPolling();
     this._stopSeedingPolling();
     // D20: invalidate in-flight submissions and abort stale responses.
@@ -1259,6 +1559,9 @@ class BiqOnboardApp extends HTMLElement {
       this._clubSubmitAbort.abort();
       this._clubSubmitAbort = null;
     }
+    // OB60-3: a detached component must not keep retrying the personal
+    // feed — fence + abort it like the club submit path.
+    this._resetPersonalFeed();
     // Remove visibility handler
     if (this._visibilityHandler) {
       document.removeEventListener('visibilitychange', this._visibilityHandler);
@@ -1271,7 +1574,6 @@ class BiqOnboardApp extends HTMLElement {
   }
 
   connectedCallback(): void {
-    super.connectedCallback?.();
     // C11: Resume polling on visibility/entry if theme job is pending/running
     this._visibilityHandler = () => {
       if (document.visibilityState === 'visible') {
@@ -1402,29 +1704,6 @@ class BiqOnboardApp extends HTMLElement {
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ homepage_url: url }),
-      });
-      if (!res.ok) {
-        const data = await res.json().catch(() => null);
-        throw new Error(data?.detail || `HTTP ${res.status}`);
-      }
-      await this.loadThemeData(clubId);
-    } catch (err) {
-      this._error = (err as Error).message;
-      this._loading = false;
-      this.render();
-    }
-  }
-
-  private async saveManualTheme(clubId: string, brand: string, brandAlt: string | null): Promise<void> {
-    this._loading = true;
-    this._error = null;
-    this.render();
-    try {
-      const res = await fetch(`/api/clubs/${clubId}/theme`, {
-        method: 'PUT',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ seed_brand: brand, seed_brand_alt: brandAlt }),
       });
       if (!res.ok) {
         const data = await res.json().catch(() => null);
@@ -1609,7 +1888,54 @@ class BiqOnboardApp extends HTMLElement {
 
   private render(): void {
     const club = this._org?.club;
+    // R6: el selector de espacios es alcanzable en TODAS las cohortes —
+    // un miembro con club activo o una sesión con contexto personal
+    // también puede cambiar de espacio desde #/onboard/spaces. Solo la
+    // ausencia real de autoridad cae a la vista legacy.
+    if (this._subRoute === 'spaces') {
+      if (this._bootstrap && !this._bootstrapFailed) {
+        this.shadow.innerHTML = `<style>${styles}</style>
+          <div class="onboard-app onboard-clubstep">${this.renderEntryStep()}</div>`;
+        this.wireEntryEvents();
+        return;
+      }
+      if (!this._bootstrapFailed) {
+        if (!this._bootstrapLoading) this.loadBootstrap();
+        this.shadow.innerHTML = `<style>${styles}</style>
+          <div class="onboard-app onboard-clubstep"><p class="entry-loading">Cargando…</p></div>`;
+        return;
+      }
+      // Sin autoridad de contexto no hay selector — la vista legacy sigue.
+    }
+    // Working context (BIQ-PERSONAL-CLUB-CONTEXT): con contexto activo el
+    // módulo refleja su ámbito — personal muestra el espacio privado; club
+    // sigue el Mi Club de siempre.
+    if (this._context?.owner_scope?.kind === 'personal') {
+      this.shadow.innerHTML = `<style>${styles}</style>
+        <div class="onboard-app">${this.renderPersonalPanel()}</div>`;
+      this.wirePersonalEvents();
+      return;
+    }
     if (!club) {
+      if (this._bootstrapLoading) {
+        this.shadow.innerHTML = `<style>${styles}</style>
+          <div class="onboard-app onboard-clubstep"><p class="entry-loading">Cargando…</p></div>`;
+        return;
+      }
+      if (this._bootstrap && !this._bootstrapFailed) {
+        // Context entry selector: dos pestañas (personal / club) sobre el
+        // bootstrap autoritativo — no hay club resuelto pero sí estado.
+        this.shadow.innerHTML = `<style>${styles}</style>
+          <div class="onboard-app onboard-clubstep">${this.renderEntryStep()}</div>`;
+        this.wireEntryEvents();
+        return;
+      }
+      if (!this._bootstrapFailed) {
+        this.loadBootstrap();
+        this.shadow.innerHTML = `<style>${styles}</style>
+          <div class="onboard-app onboard-clubstep"><p class="entry-loading">Cargando…</p></div>`;
+        return;
+      }
       // ADDENDUM-07 §6 — paso de club: sin club resuelto este módulo ES el
       // paso 2 del onboarding (picker / unirse por ID / crear club).
       this.shadow.innerHTML = `<style>${styles}</style>
@@ -1643,6 +1969,7 @@ class BiqOnboardApp extends HTMLElement {
           <button class="onboard-nav-item ${section === 'teams' ? 'active' : ''}" data-nav="teams">Equipos</button>
           ${canManageMembers ? `<button class="onboard-nav-item ${section === 'members' ? 'active' : ''}" data-nav="members">Miembros</button>` : ''}
           <button class="onboard-nav-item ${section === 'profile' ? 'active' : ''}" data-nav="profile">Perfil</button>
+          <button class="onboard-nav-item" data-nav="spaces">Espacios</button>
         </nav>`}
         ${content}
       </div>`;
@@ -1706,12 +2033,12 @@ class BiqOnboardApp extends HTMLElement {
 
         ${this._loading && !theme && !jobCopy ? '<div class="onboard-loading">Cargando…</div>' : ''}
 
-        ${theme ? this.renderActivationToggle(club.id, theme, isPolling) : ''}
+        ${theme ? this.renderActivationToggle(theme, isPolling) : ''}
         ${theme ? this.renderLogoSection(theme) : ''}
       </section>`;
   }
 
-  private renderActivationToggle(clubId: string, theme: ClubTheme, isPolling: boolean = false): string {
+  private renderActivationToggle(theme: ClubTheme, isPolling: boolean = false): string {
     const isActive = theme.status === 'active';
     const gateFailed = theme.gate && theme.gate.passed === false;
     if (gateFailed) {
@@ -1758,12 +2085,12 @@ class BiqOnboardApp extends HTMLElement {
 
   private renderLogoSection(theme: ClubTheme): string {
     const logo = theme.logo;
-    const hasLogo = logo && logo.onLight;
+    const logoSrc = logo?.onLight ?? null;
     const awaitingRights = logo && logo.rightsConfirmedAt === null;
     return `
       <div class="onboard-card">
         <h3 class="onboard-card-title">Logo del club</h3>
-        ${hasLogo ? `<img class="onboard-logo-preview" src="${escapeHtml(logo.onLight)}" alt="Logo" />` : '<p class="onboard-card-desc">No se encontró logo automáticamente.</p>'}
+        ${logoSrc ? `<img class="onboard-logo-preview" src="${escapeHtml(logoSrc)}" alt="Logo" />` : '<p class="onboard-card-desc">No se encontró logo automáticamente.</p>'}
         <div class="onboard-logo-input-group">
           <input type="url" class="onboard-logo-input" data-logo-url-input placeholder="https://www.club.com/logo.png" />
           <button class="onboard-btn onboard-btn-primary" data-logo-url-btn ${this._loading ? 'disabled' : ''}>Actualizar logo</button>
@@ -1774,7 +2101,7 @@ class BiqOnboardApp extends HTMLElement {
             <span class="onboard-btn">Subir archivo</span>
           </label>
         </div>
-        ${hasLogo && awaitingRights ? `
+        ${logoSrc && awaitingRights ? `
           <div class="onboard-rights">
             <p class="onboard-rights-text">Para mostrar el logo necesitas confirmar que el club tiene derecho a usarlo.</p>
             <label class="onboard-rights-label">
@@ -1783,7 +2110,7 @@ class BiqOnboardApp extends HTMLElement {
             </label>
             <button class="onboard-btn onboard-btn-primary" data-affirm-rights-btn disabled>Confirmar</button>
           </div>
-        ` : (hasLogo ? `
+        ` : (logoSrc ? `
           <p class="onboard-rights-confirmed">Derechos de uso confirmados.</p>
         ` : '')}
       </div>`;
@@ -2015,6 +2342,528 @@ class BiqOnboardApp extends HTMLElement {
     const message =
       (data && (data as { detail?: string }).detail) || `Error ${res.status}`;
     this._recoverSubmission(scope, message, seq);
+  }
+
+  // ─── Working-context entry selector ─────────────────────────────────
+  // Two tabs per the contract: "Solo entrenador" (personal workspace) and
+  // "Club actual" (memberships / invitation / gated club create). All
+  // authority lives server-side; this view only reflects entry_actions.
+
+  private renderEntryStep(): string {
+    const boot = this._bootstrap!;
+    const active = boot.active;
+    const actions = boot.entry_actions || {};
+    const clubs = (boot.contexts || []).filter((c) => c.kind === 'club');
+    const createAllowed = actions['club.create']?.allowed === true;
+
+    const activeLabel = active
+      ? active.owner_scope.kind === 'personal'
+        ? 'Espacio personal'
+        : `Club ${(clubs.find((c) => c.owner_scope.club_id === active.owner_scope.club_id) as ContextCandidate | undefined)?.name || active.owner_scope.club_id}`
+      : '';
+
+    const helpIcon = (tab: string) => `
+      <button class="entry-help" type="button" data-entry-help="${tab}" aria-label="Ayuda" aria-haspopup="dialog">
+        <img class="nav-chispa entry-chispa-light" src="/assets/basketiq-mobile-assets-v2/svg/light/heads/chispa-speaking.svg" alt="" aria-hidden="true">
+        <img class="nav-chispa entry-chispa-dark" src="/assets/basketiq-mobile-assets-v2/svg/dark/heads/chispa-speaking.svg" alt="" aria-hidden="true">
+      </button>`;
+
+    const personalTeams = (this._personalTeams || []).filter((t) => !t.archived);
+    const archivedTeams = (this._personalTeams || []).filter((t) => t.archived);
+    const atTeamCap = personalTeams.length >= 2;
+    const teamMeta = (t: PersonalTeamRow) =>
+      `${escapeHtml(t.category_label || t.category_key)}${t.gender && t.gender !== 'X' ? ` · ${escapeHtml(t.gender)}` : ''}${t.age_band ? ` · ${escapeHtml(t.age_band)}` : ''}`;
+
+    const personalTab = `
+      <section class="entry-panel">
+        ${this._personalTeamsStatus === 'loading' || this._personalTeamsStatus === 'uninitialized'
+          ? '<p class="entry-loading">Cargando equipos…</p>'
+          : this._personalTeamsStatus === 'error'
+            ? `<p class="entry-error" role="alert">${escapeHtml(this._personalTeamsError || 'No se pudieron cargar los equipos')}
+                <button class="onboard-btn" type="button" data-personal-teams-retry ${this._entryBusy ? 'disabled' : ''}>Reintentar</button></p>`
+            : ''}
+        ${personalTeams.length ? `
+          <ul class="entry-teams">
+            ${personalTeams.map((t) => `
+              <li class="entry-team entry-team-action">
+                <button class="onboard-btn onboard-btn-primary" data-entry-personal-enter-team="${escapeHtml(t.team_id)}" ${this._entryBusy ? 'disabled' : ''}>
+                  Entrar — ${escapeHtml(t.name)}
+                </button>
+                <span>${teamMeta(t)}</span>
+              </li>`).join('')}
+          </ul>` : ''}
+        ${atTeamCap
+          ? '<p class="entry-note">Puedes tener hasta 2 equipos personales. Elimina uno desde «Mis equipos» para crear otro.</p>'
+          : `<button class="onboard-btn" data-entry-team-create-toggle ${this._entryBusy ? 'disabled' : ''}>+ Crear equipo</button>
+            ${this._teamCreateOpen ? `
+              <form class="entry-form" data-entry-personal-create>
+                <div class="entry-field"><label>Nombre del equipo</label>
+                  <input type="text" name="name" maxlength="120" required /></div>
+                <div class="entry-field"><label>Categoría</label>
+                  <select name="category_key">${PERSONAL_CATEGORIES.map((c) => `<option value="${c.key}">${c.label}</option>`).join('')}</select></div>
+                <div class="entry-field"><label>Género</label>
+                  <select name="gender"><option value="X">Mixto</option><option value="F">Femenino</option><option value="M">Masculino</option></select></div>
+                <button class="onboard-btn onboard-btn-primary" type="submit" ${this._entryBusy ? 'disabled' : ''}>Crear y entrar</button>
+              </form>` : ''}`}
+        ${personalTeams.length ? `
+          <button class="onboard-btn" data-entry-personal-enter ${this._entryBusy ? 'disabled' : ''}>Entrar con todos los equipos</button>
+        ` : archivedTeams.length ? `
+          <p class="entry-note">Tus equipos están archivados — entra para restaurarlos desde «Mis equipos», o crea uno nuevo.</p>
+          <button class="onboard-btn" data-entry-personal-enter ${this._entryBusy ? 'disabled' : ''}>Entrar</button>
+        ` : ''}
+      </section>`;
+
+    const clubTab = `
+      <section class="entry-panel">
+        ${createAllowed ? `
+          <button class="onboard-btn" data-entry-club-create-toggle ${this._entryBusy ? 'disabled' : ''}>+ Crear club</button>
+          ${this._clubCreateOpen ? `
+            <form class="entry-form" data-entry-club-create>
+              <div class="entry-field"><label>Nombre del club</label>
+                <input type="text" name="name" maxlength="200" required /></div>
+              <button class="onboard-btn onboard-btn-primary" type="submit" ${this._entryBusy ? 'disabled' : ''}>Crear</button>
+            </form>` : ''}
+        ` : ''}
+        ${this._invitePreview ? `
+          <div class="entry-invite">
+            <p>Invitación para <strong>${escapeHtml(this._invitePreview.club_name || this._invitePreview.club_id)}</strong></p>
+            <button class="onboard-btn onboard-btn-primary" data-entry-invite-redeem ${this._entryBusy ? 'disabled' : ''}>Unirme al club</button>
+          </div>` : ''}
+        ${clubs.length ? `
+          <h3 class="entry-h">Tus clubes</h3>
+          <ul class="entry-teams">
+            ${clubs.map((c) => `
+              <li class="entry-team entry-team-action">
+                <button class="onboard-btn" data-entry-club-activate="${escapeHtml(c.owner_scope.club_id || '')}" ${this._entryBusy ? 'disabled' : ''}>
+                  Entrar como ${escapeHtml((c as ContextCandidate & { name?: string }).name || c.owner_scope.club_id || '')}
+                </button>
+              </li>`).join('')}
+          </ul>` : `<p class="entry-empty">No tienes clubes todavía.</p>`}
+      </section>`;
+
+    const helpModal = this._helpOpen
+      ? `<div class="entry-modal-backdrop" data-entry-help-close>
+          <div class="entry-modal" role="dialog" aria-modal="true" aria-label="Ayuda">
+            <p>${this._helpOpen === 'personal'
+              ? 'Espacio personal para preparar entrenamientos semanales y partidos.'
+              : 'Espacio de gestión del club que engloba todas las capacidades de planificación e interacción entre miembros del staff deportivo.'}</p>
+            <button class="onboard-btn" data-entry-help-close>Cerrar</button>
+          </div>
+        </div>`
+      : '';
+
+    return `
+      <div class="entry-step">
+        <h2 class="entry-title">Elige tu espacio de trabajo</h2>
+        ${activeLabel ? `<p class="entry-active">Trabajando en <strong>${escapeHtml(activeLabel)}</strong></p>` : ''}
+        ${this._entryError ? `<p class="entry-error" role="alert">${escapeHtml(this._entryError)}</p>` : ''}
+        <nav class="onboard-nav entry-tabs">
+          <span class="entry-tab ${this._entryTab === 'personal' ? 'active' : ''}">
+            <button class="entry-tab-btn" data-entry-tab="personal">Mi equipo</button>
+            ${helpIcon('personal')}
+          </span>
+          <span class="entry-tab ${this._entryTab === 'club' ? 'active' : ''}">
+            <button class="entry-tab-btn" data-entry-tab="club">Mi club</button>
+            ${helpIcon('club')}
+          </span>
+        </nav>
+        ${this._entryTab === 'personal' ? personalTab : clubTab}
+        ${helpModal}
+      </div>`;
+  }
+
+  private async loadInvitePreview(): Promise<void> {
+    if (this._inviteLoading) return;
+    this._inviteLoading = true;
+    this._entryError = null;
+    try {
+      const res = await fetch('/api/context/v1/invitations/preview', {
+        method: 'POST',
+        credentials: 'include',
+        cache: 'no-store',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: this._inviteToken }),
+      });
+      if (!res.ok) throw new Error('Invitación no válida o caducada');
+      this._invitePreview = await res.json();
+    } catch (err) {
+      this._entryError = (err as Error).message;
+      this._inviteToken = '';
+    } finally {
+      this._inviteLoading = false;
+      this.render();
+    }
+  }
+
+  private wireEntryEvents(): void {
+    const inviteAllowed =
+      this._bootstrap?.entry_actions?.['club.invitation.redeem']?.allowed !== false;
+    this.shadow.querySelectorAll('[data-entry-tab]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        this._entryTab = (btn as HTMLElement).dataset.entryTab as 'personal' | 'club';
+        this.render();
+      });
+    });
+
+    // Email invitations land on `#/onboard?invite=<token>` — the token
+    // arrives in the link, so there is no manual code entry at entry.
+    // Auto-preview once and let the user confirm.
+    if (
+      this._inviteToken &&
+      !this._invitePreview &&
+      !this._inviteLoading &&
+      inviteAllowed
+    ) {
+      this.loadInvitePreview();
+    }
+
+    // Feed failure in the selector is a bounded error too — the explicit
+    // retry is the only refetch, never a render-triggered one.
+    this.shadow.querySelector('[data-personal-teams-retry]')?.addEventListener('click', () => {
+      this.loadPersonalTeams();
+    });
+    this.shadow.querySelector('[data-entry-personal-enter]')?.addEventListener('click', () => {
+      this.activateContext('personal');
+    });
+    this.shadow.querySelectorAll('[data-entry-personal-enter-team]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        this.enterPersonalTeam((btn as HTMLElement).dataset.entryPersonalEnterTeam || '');
+      });
+    });
+    this.shadow.querySelector('[data-entry-team-create-toggle]')?.addEventListener('click', () => {
+      this._teamCreateOpen = !this._teamCreateOpen;
+      this.render();
+      if (this._teamCreateOpen) {
+        const input = this.shadow.querySelector('[data-entry-personal-create] input[name="name"]') as HTMLInputElement | null;
+        input?.focus();
+      }
+    });
+    // Crear equipo desde el selector de entrada: crea el equipo privado y
+    // entra en el espacio personal con ese equipo como equipo de trabajo.
+    this.shadow.querySelector('[data-entry-personal-create]')?.addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      const fd = new FormData(ev.target as HTMLFormElement);
+      this._entryBusy = true;
+      this._entryError = null;
+      this.render();
+      try {
+        const res = await fetch('/api/context/v1/personal-teams', {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json', 'Idempotency-Key': `entry-${Date.now()}` },
+          body: JSON.stringify({
+            name: String(fd.get('name') || '').trim(),
+            category_key: String(fd.get('category_key') || ''),
+            gender: String(fd.get('gender') || 'X'),
+          }),
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => null);
+          throw new Error(body?.detail || `No se pudo crear el equipo (${res.status})`);
+        }
+        const data = await res.json();
+        await this.enterPersonalTeam(data?.team?.team_id || '');
+      } catch (err) {
+        this._entryError = (err as Error).message;
+        this._entryBusy = false;
+        this.render();
+      }
+    });
+
+    this.shadow.querySelectorAll('[data-entry-help]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        this._helpOpen = (btn as HTMLElement).dataset.entryHelp as 'personal' | 'club';
+        this.render();
+      });
+    });
+    this.shadow.querySelectorAll('[data-entry-help-close]').forEach((el) => {
+      el.addEventListener('click', (ev) => {
+        // Backdrop closes only on a direct backdrop hit — clicks inside the
+        // dialog must not bubble-close it.
+        if ((el as HTMLElement).classList.contains('entry-modal-backdrop') && ev.target !== el) return;
+        this._helpOpen = '';
+        this.render();
+      });
+    });
+    this.shadow.querySelector('[data-entry-club-create-toggle]')?.addEventListener('click', () => {
+      this._clubCreateOpen = !this._clubCreateOpen;
+      this.render();
+      if (this._clubCreateOpen) {
+        const input = this.shadow.querySelector('[data-entry-club-create] input') as HTMLInputElement | null;
+        input?.focus();
+      }
+    });
+
+    this.shadow.querySelectorAll('[data-entry-club-activate]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        this.activateContext('club', (btn as HTMLElement).dataset.entryClubActivate || '');
+      });
+    });
+
+    this.shadow.querySelector('[data-entry-invite-redeem]')?.addEventListener('click', async () => {
+      if (!this._inviteToken) return;
+      this._entryBusy = true;
+      this._entryError = null;
+      this.render();
+      try {
+        const res = await fetch('/api/context/v1/invitations/redeem', {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token: this._inviteToken }),
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => null);
+          throw new Error(body?.detail || `No se pudo canjear la invitación (${res.status})`);
+        }
+        const data = await res.json();
+        this._invitePreview = null;
+        this._inviteToken = '';
+        await this.activateContext('club', data.club_id);
+      } catch (err) {
+        this._entryError = (err as Error).message;
+      } finally {
+        this._entryBusy = false;
+        this.render();
+      }
+    });
+
+    this.shadow.querySelector('[data-entry-club-create]')?.addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      const fd = new FormData(ev.target as HTMLFormElement);
+      this._entryBusy = true;
+      this._entryError = null;
+      this.render();
+      try {
+        const res = await fetch('/api/context/v1/clubs', {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name: String(fd.get('name') || '').trim(),
+            idempotency_key: `entry-club-${Date.now()}`,
+          }),
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => null);
+          throw new Error(body?.detail || `No se pudo crear el club (${res.status})`);
+        }
+        const data = await res.json();
+        await this.activateContext('club', data?.club?.id || '');
+      } catch (err) {
+        this._entryError = (err as Error).message;
+      } finally {
+        this._entryBusy = false;
+        this.render();
+      }
+    });
+  }
+
+  // Personal workspace panel (Mi espacio) when the active context is
+  // private — teams list + create + switch affordance.
+  private renderPersonalPanel(): string {
+    const all = this._personalTeams || [];
+    const teams = all.filter((t) => !t.archived);
+    const archived = all.filter((t) => t.archived);
+    const atCap = teams.length >= 2;
+    const teamRow = (t: PersonalTeamRow) => this._editingPersonalTeamId === t.team_id ? `
+      <li class="entry-team">
+        <form class="entry-form" data-personal-team-edit="${escapeHtml(t.team_id)}" data-revision="${t.team_revision}">
+          <div class="entry-field"><label>Nombre del equipo</label>
+            <input type="text" name="name" maxlength="120" required value="${escapeHtml(t.name)}" /></div>
+          <div class="entry-field"><label>Categoría</label>
+            <select name="category_key">${PERSONAL_CATEGORIES.map((c) => `<option value="${c.key}"${c.key === t.category_key ? ' selected' : ''}>${c.label}</option>`).join('')}</select></div>
+          <div class="entry-field"><label>Género</label>
+            <select name="gender">${['X', 'F', 'M'].map((g) => `<option value="${g}"${g === t.gender ? ' selected' : ''}>${g === 'X' ? 'Mixto' : g === 'F' ? 'Femenino' : 'Masculino'}</option>`).join('')}</select></div>
+          <button class="onboard-btn onboard-btn-primary" type="submit" ${this._entryBusy ? 'disabled' : ''}>Guardar</button>
+          <button class="onboard-btn" type="button" data-personal-team-edit-cancel ${this._entryBusy ? 'disabled' : ''}>Cancelar</button>
+        </form>
+      </li>` : `
+      <li class="entry-team"><strong>${escapeHtml(t.name)}</strong>
+        <span>${escapeHtml(t.category_label || t.category_key)}${t.gender && t.gender !== 'X' ? ` · ${escapeHtml(t.gender)}` : ''}${t.age_band ? ` · ${escapeHtml(t.age_band)}` : ''}</span>
+        <button class="onboard-btn" data-personal-team-edit-open="${escapeHtml(t.team_id)}" ${this._entryBusy ? 'disabled' : ''}>Editar</button>
+        <button class="onboard-btn entry-team-delete" data-personal-team-delete="${escapeHtml(t.team_id)}" ${this._entryBusy ? 'disabled' : ''}>Eliminar</button>
+      </li>`;
+    return `
+      <div class="entry-step">
+        <h2 class="entry-title">Mi espacio personal</h2>
+        <button class="onboard-btn" data-personal-switch-space>Cambiar de espacio</button>
+        ${this._entryError ? `<p class="entry-error" role="alert">${escapeHtml(this._entryError)}</p>` : ''}
+        ${this._personalTeamsStatus === 'loading' || this._personalTeamsStatus === 'uninitialized'
+          ? `<p class="entry-loading">Cargando equipos…</p>`
+          : this._personalTeamsStatus === 'error'
+            ? `<p class="entry-error" role="alert">${escapeHtml(this._personalTeamsError || 'No se pudieron cargar los equipos')}
+                <button class="onboard-btn" type="button" data-personal-teams-retry ${this._entryBusy ? 'disabled' : ''}>Reintentar</button></p>`
+            : teams.length
+              ? `<ul class="entry-teams">${teams.map(teamRow).join('')}</ul>`
+              : '<p class="entry-p">Todavía no tienes equipos personales.</p>'}
+        ${archived.length ? `
+          <h3 class="entry-h">Archivados</h3>
+          <ul class="entry-teams">${archived.map((t) => `
+            <li class="entry-team"><strong>${escapeHtml(t.name)}</strong>
+              <span>${escapeHtml(t.category_label || t.category_key)}</span>
+              <button class="onboard-btn" data-personal-team-restore="${escapeHtml(t.team_id)}" ${this._entryBusy || atCap ? 'disabled' : ''}>Restaurar</button>
+            </li>`).join('')}</ul>` : ''}
+        ${atCap
+          ? '<p class="entry-note">Puedes tener hasta 2 equipos personales. Elimina uno para crear otro.</p>'
+          : `<form class="entry-form" data-entry-personal-create>
+          <div class="entry-field"><label>Nombre del equipo</label>
+            <input type="text" name="name" maxlength="120" required /></div>
+          <div class="entry-field"><label>Categoría</label>
+            <select name="category_key">${PERSONAL_CATEGORIES.map((c) => `<option value="${c.key}">${c.label}</option>`).join('')}</select></div>
+          <div class="entry-field"><label>Género</label>
+            <select name="gender"><option value="X">Mixto</option><option value="F">Femenino</option><option value="M">Masculino</option></select></div>
+          <button class="onboard-btn onboard-btn-primary" type="submit" ${this._entryBusy ? 'disabled' : ''}>Crear equipo</button>
+        </form>`}
+      </div>`;
+  }
+
+  private wirePersonalEvents(): void {
+    // Only a never-attempted feed self-loads — a failure is a bounded error
+    // state, not an invitation to refetch on every render.
+    if (this._personalTeamsStatus === 'uninitialized') {
+      this.loadPersonalTeams();
+    }
+    this.shadow.querySelector('[data-personal-teams-retry]')?.addEventListener('click', () => {
+      this.loadPersonalTeams(); // explicit retry clears the error state
+    });
+    // R6: el conmutador de espacios también es accesible desde el modo
+    // personal — navega al selector autoritativo.
+    this.shadow.querySelector('[data-personal-switch-space]')?.addEventListener('click', () => {
+      location.hash = '#/onboard/spaces';
+    });
+    this.shadow.querySelector('[data-entry-personal-create]')?.addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      const fd = new FormData(ev.target as HTMLFormElement);
+      this._entryBusy = true;
+      this._entryError = null;
+      this.render();
+      try {
+        const res = await fetch('/api/context/v1/personal-teams', {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json', 'Idempotency-Key': `panel-${Date.now()}` },
+          body: JSON.stringify({
+            name: String(fd.get('name') || '').trim(),
+            category_key: String(fd.get('category_key') || ''),
+            gender: String(fd.get('gender') || 'X'),
+          }),
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => null);
+          throw new Error(body?.detail || `No se pudo crear el equipo (${res.status})`);
+        }
+        this._personalTeams = null;
+        this.loadPersonalTeams();
+      } catch (err) {
+        this._entryError = (err as Error).message;
+      } finally {
+        this._entryBusy = false;
+        this.render();
+      }
+    });
+    // Eliminar un equipo personal libera el slot (cap de 2) — el servidor
+    // archiva el equipo y lo retira del working set del contexto activo.
+    this.shadow.querySelectorAll('[data-personal-team-delete]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const teamId = (btn as HTMLElement).dataset.personalTeamDelete || '';
+        if (!teamId || !window.confirm('¿Eliminar este equipo? Podrás crear otro después.')) return;
+        this._entryBusy = true;
+        this._entryError = null;
+        this.render();
+        try {
+          const res = await fetch(`/api/context/v1/personal-teams/${encodeURIComponent(teamId)}`, {
+            method: 'DELETE',
+            credentials: 'include',
+          });
+          if (!res.ok) {
+            const body = await res.json().catch(() => null);
+            throw new Error(body?.detail || `No se pudo eliminar el equipo (${res.status})`);
+          }
+          this._personalTeams = null;
+          this.loadPersonalTeams();
+        } catch (err) {
+          this._entryError = (err as Error).message;
+        } finally {
+          this._entryBusy = false;
+          this.render();
+        }
+      });
+    });
+    // Editar — formulario inline por equipo; PATCH con expected_revision
+    // para que una edición sobre una versión vieja conflicte (409).
+    this.shadow.querySelectorAll('[data-personal-team-edit-open]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        this._editingPersonalTeamId = (btn as HTMLElement).dataset.personalTeamEditOpen || null;
+        this.render();
+      });
+    });
+    this.shadow.querySelector('[data-personal-team-edit-cancel]')?.addEventListener('click', () => {
+      this._editingPersonalTeamId = null;
+      this.render();
+    });
+    this.shadow.querySelector('[data-personal-team-edit]')?.addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      const form = ev.target as HTMLFormElement;
+      const teamId = form.dataset.personalTeamEdit || '';
+      const revision = parseInt(form.dataset.revision || '', 10);
+      const fd = new FormData(form);
+      this._entryBusy = true;
+      this._entryError = null;
+      this.render();
+      try {
+        const res = await fetch(`/api/context/v1/personal-teams/${encodeURIComponent(teamId)}`, {
+          method: 'PATCH',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name: String(fd.get('name') || '').trim(),
+            category_key: String(fd.get('category_key') || ''),
+            gender: String(fd.get('gender') || 'X'),
+            ...(Number.isFinite(revision) ? { expected_revision: revision } : {}),
+          }),
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => null);
+          throw new Error(body?.detail || `No se pudo guardar el equipo (${res.status})`);
+        }
+        this._editingPersonalTeamId = null;
+        this._personalTeams = null;
+        this.loadPersonalTeams();
+      } catch (err) {
+        this._entryError = (err as Error).message;
+      } finally {
+        this._entryBusy = false;
+        this.render();
+      }
+    });
+    // Restaurar un equipo archivado (bloqueado cuando el cap está lleno).
+    this.shadow.querySelectorAll('[data-personal-team-restore]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const teamId = (btn as HTMLElement).dataset.personalTeamRestore || '';
+        if (!teamId) return;
+        this._entryBusy = true;
+        this._entryError = null;
+        this.render();
+        try {
+          const res = await fetch(`/api/context/v1/personal-teams/${encodeURIComponent(teamId)}/restore`, {
+            method: 'POST',
+            credentials: 'include',
+          });
+          if (!res.ok) {
+            const body = await res.json().catch(() => null);
+            throw new Error(body?.detail || `No se pudo restaurar el equipo (${res.status})`);
+          }
+          this._personalTeams = null;
+          this.loadPersonalTeams();
+        } catch (err) {
+          this._entryError = (err as Error).message;
+        } finally {
+          this._entryBusy = false;
+          this.render();
+        }
+      });
+    });
   }
 
   private renderClubStep(): string {

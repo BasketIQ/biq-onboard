@@ -106,7 +106,7 @@ const PERSONAL_TEAMS = [
   },
 ];
 
-async function newEntryPage(browser, { bootstrap = BOOTSTRAP, routeQuery = null, personalTeams = PERSONAL_TEAMS, personalContext = false, org = undefined, personalTeamsFailure = null, personalTeamsDelayMs = 0 } = {}) {
+async function newEntryPage(browser, { bootstrap = BOOTSTRAP, routeQuery = null, personalTeams = PERSONAL_TEAMS, personalContext = false, org = undefined, personalTeamsFailure = null, personalTeamsDelayMs = 0, personalTeamsHold = null } = {}) {
   const page = await browser.newPage();
   const log = [];
   let feedCalls = 0;
@@ -131,11 +131,16 @@ async function newEntryPage(browser, { bootstrap = BOOTSTRAP, routeQuery = null,
       }
       if (u.includes('/api/context/v1/personal-teams')) {
         if (req.method() === 'POST') return json({ team: { team_id: 'pt-new' } }, 201);
+        // Request-local identity is bound BEFORE any wait — a newer request
+        // must not change what this response resolves to (A3 stale-body fix).
         feedCalls += 1;
+        const thisCall = feedCalls;
+        const hold = typeof personalTeamsHold === 'function' ? personalTeamsHold(thisCall) : null;
+        if (hold) await hold;
         if (personalTeamsDelayMs) {
           await new Promise((r) => setTimeout(r, personalTeamsDelayMs));
         }
-        const fail = typeof personalTeamsFailure === 'function' ? personalTeamsFailure(feedCalls) : personalTeamsFailure;
+        const fail = typeof personalTeamsFailure === 'function' ? personalTeamsFailure(thisCall) : personalTeamsFailure;
         if (fail?.network) return route.abort();
         if (fail) return json(fail.body ?? { detail: 'feed unavailable' }, fail.status ?? 503);
         return json({ teams: personalTeams });
@@ -994,31 +999,50 @@ test('OB60-3: delayed stale response after account switch never assigns old data
   try {
     const errors = [];
     const staleTeam = { ...PERSONAL_TEAMS[0], team_id: 'pt-stale', name: 'STALE-TEAM' };
+    let releaseOld;
+    const oldResponseHeld = new Promise((r) => (releaseOld = r));
     const { page, log } = await newEntryPage(browser, {
       personalContext: true,
-      personalTeamsDelayMs: 700,
+      // The mount's feed requests (prefetch + session-bound ensure) carry
+      // the OLD scope's data and stay held; the post-switch request is
+      // free to return the fresh account's roster.
+      personalTeamsHold: (n) => (n <= 2 ? oldResponseHeld : null),
       personalTeamsFailure: (n) =>
-        n === 1 ? { status: 200, body: { teams: [staleTeam] } } : null,
+        n <= 2 ? { status: 200, body: { teams: [staleTeam] } } : null,
     });
     page.on('pageerror', (e) => errors.push(e));
-    // Switch accounts while the first feed is still in flight — its late
-    // body belongs to the previous scope and must never land.
+    const feedGets = () =>
+      log.filter((r) => r.method === 'GET' && r.url.includes('/api/context/v1/personal-teams')).length;
+    // 1. A known old-scope request is pending before the account switch.
+    await page.waitForFunction(() =>
+      document.getElementById('app')._personalTeamsStatus === 'loading',
+      { timeout: 10000 });
+    assert.ok(feedGets() >= 1, 'old-scope feed request must be in flight');
+    // 2. Switch — the fresh-scope request returns different data first.
     await page.evaluate(() => { document.getElementById('app').user = 'second-account'; });
     await page.waitForFunction(() =>
       document.getElementById('app')._personalTeamsStatus === 'ready',
       { timeout: 10000 });
-    await page.waitForTimeout(1000); // let the stale response fully land
+    const fresh = await page.evaluate(() =>
+      (document.getElementById('app')._personalTeams || []).map((t) => t.team_id));
+    assert.deepEqual(fresh, ['pt-1'], 'fresh scope renders before the old body lands');
+    // 3. Releasing the held old-scope response cannot overwrite state,
+    //    render, open an editor, or retrigger a load.
+    releaseOld();
+    await page.waitForTimeout(800);
     const state = await page.evaluate(() => ({
       teams: (document.getElementById('app')._personalTeams || []).map((t) => t.team_id),
       editing: document.getElementById('app')._editingPersonalTeamId,
+      status: document.getElementById('app')._personalTeamsStatus,
       text: document.getElementById('app').shadowRoot.textContent,
     }));
-    assert.deepEqual(state.teams, ['pt-1'], 'only the fresh-scope feed may assign');
+    assert.deepEqual(state.teams, ['pt-1'], 'late stale body cannot overwrite fresh state');
+    assert.equal(state.status, 'ready');
     assert.equal(state.editing, null, 'no editor from a stale completion');
     assert.ok(!state.text.includes('STALE-TEAM'), 'stale body never renders');
     assert.equal(errors.length, 0, 'no unhandled stale completion');
-    const gets = log.filter((r) => r.method === 'GET' && r.url.includes('/api/context/v1/personal-teams')).length;
-    assert.ok(gets <= 3, `fenced refetch, not a loop (${gets} gets)`);
+    const getsAfter = feedGets();
+    assert.ok(getsAfter <= 3, `fenced refetch, not a loop (${getsAfter} gets)`);
     await page.close();
   } finally {
     await browser.close();

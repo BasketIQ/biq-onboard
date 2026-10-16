@@ -310,6 +310,64 @@ test('Mi equipo lists personal teams each with Entrar — no email field', async
   }
 });
 
+// D2 regression: a member-scope session is denied personal authority by
+// design (R1) — the selector must never prefetch personal-teams (the 403
+// console error on every club-context login) and the Mi equipo tab must
+// state the verified-session requirement instead of a dead retry.
+const BOOTSTRAP_MEMBER = {
+  ...BOOTSTRAP,
+  identity_scope: 'membership',
+  contexts: [
+    {
+      kind: 'personal',
+      owner_scope: { kind: 'personal', workspace_id: 'ws-acc-e2e', account_id: 'acc-e2e' },
+      requires_verification: true,
+    },
+    ...BOOTSTRAP.contexts,
+  ],
+  entry_actions: {
+    ...BOOTSTRAP.entry_actions,
+    'personal.team.read': { allowed: false, requires_verification: true },
+  },
+};
+
+test('member-scope session never fetches personal-teams and shows the verified-session note', async () => {
+  const browser = await chromium.launch();
+  try {
+    const { page, log } = await newEntryPage(browser, { bootstrap: BOOTSTRAP_MEMBER });
+    const feedGets = () =>
+      log.filter((r) => r.method === 'GET' && r.url.includes('/api/context/v1/personal-teams')).length;
+    // Bootstrap prefetch is gated — the feed is never touched.
+    await page.waitForTimeout(500);
+    assert.equal(feedGets(), 0, 'member-scope prefetch must not issue GET /personal-teams');
+    // Mi equipo tab renders the honest elevation note, no spinner/retry/CTAs.
+    await page.evaluate(() => {
+      const el = document.getElementById('app');
+      el.shadowRoot.querySelector('[data-entry-tab="personal"]').click();
+    });
+    const state = await page.evaluate(() => {
+      const el = document.getElementById('app');
+      const panel = el.shadowRoot.querySelector('.entry-panel');
+      return {
+        text: panel?.textContent || '',
+        loading: !!panel?.querySelector('.entry-loading'),
+        retry: !!panel?.querySelector('[data-personal-teams-retry]'),
+        create: !!panel?.querySelector('[data-entry-team-create-toggle]'),
+        enter: !!panel?.querySelector('[data-entry-personal-enter], [data-entry-personal-enter-team]'),
+      };
+    });
+    assert.match(state.text, /sesión verificada/i, 'denied state must explain the verified-session requirement');
+    assert.equal(state.loading, false, 'denied state must not spin forever');
+    assert.equal(state.retry, false, 'denied state must not offer a retry that can never succeed');
+    assert.equal(state.create, false, 'denied state must not offer team creation');
+    assert.equal(state.enter, false, 'denied state must not offer Entrar');
+    await page.waitForTimeout(500);
+    assert.equal(feedGets(), 0, 'tab render must not trigger the feed either');
+  } finally {
+    await browser.close();
+  }
+});
+
 test('Entrar on a team activates personal context and narrows the working set', async () => {
   const browser = await chromium.launch();
   try {

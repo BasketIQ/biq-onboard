@@ -330,6 +330,7 @@ interface BootstrapPayload {
   state: string;
   account_id: string;
   identity_verified: boolean;
+  identity_scope?: string;
   contexts: ContextCandidate[];
   active: ContextDescriptor | null;
   entry_actions: Record<string, { allowed: boolean; requires_verification: boolean }>;
@@ -639,9 +640,12 @@ class BiqOnboardApp extends HTMLElement {
       // Default the tab: club candidates land on the club tab.
       const hasClub = (data.contexts || []).some((c: ContextCandidate) => c.kind === 'club');
       this._entryTab = hasClub ? 'club' : 'personal';
-      // Mi equipo lists the account's private teams — session-scoped, no
-      // active context needed; prefetch so the tab renders them.
-      this.loadPersonalTeams();
+      // Mi equipo lists the account's private teams — prefetch only when
+      // this session actually holds personal authority. A member-scope
+      // credential is denied the endpoint outright (403 by design), so a
+      // guaranteed-rejected fetch would only produce a console error and
+      // a retry control that can never succeed.
+      if (this._personalReadAllowed()) this.loadPersonalTeams();
     } catch (err) {
       this._bootstrapFailed = true;
     } finally {
@@ -664,7 +668,24 @@ class BiqOnboardApp extends HTMLElement {
     this._personalTeamsError = null;
   }
 
+  // Personal-authority gate (R1): GET /personal-teams requires a verified
+  // or account-scope session — member credentials are denied (403) even
+  // before a context is activated. The bootstrap already advertises that
+  // verdict (`entry_actions['personal.team.read'].allowed === false`, the
+  // personal candidate marked requires_verification). When no bootstrap is
+  // loaded the caller is the personal panel under an ACTIVE personal
+  // context — authority is already proven, so the read is allowed.
+  private _personalReadAllowed(): boolean {
+    const boot = this._bootstrap;
+    if (!boot) return true;
+    const read = boot.entry_actions?.['personal.team.read'];
+    if (read && typeof read.allowed === 'boolean') return read.allowed;
+    const personal = (boot.contexts || []).find((c) => c.kind === 'personal');
+    return personal ? personal.requires_verification !== true : true;
+  }
+
   private async loadPersonalTeams(): Promise<void> {
+    if (!this._personalReadAllowed()) return;
     if (this._personalTeamsStatus === 'loading') return;
     this._personalTeamsStatus = 'loading';
     this._personalTeamsError = null;
@@ -2374,7 +2395,13 @@ class BiqOnboardApp extends HTMLElement {
     const teamMeta = (t: PersonalTeamRow) =>
       `${escapeHtml(t.category_label || t.category_key)}${t.gender && t.gender !== 'X' ? ` · ${escapeHtml(t.gender)}` : ''}${t.age_band ? ` · ${escapeHtml(t.age_band)}` : ''}`;
 
-    const personalTab = `
+    // Member-scope sessions are denied personal authority by design (R1):
+    // the feed is never fetched, so instead of a spinner/retry that could
+    // never resolve, the tab states the elevation requirement honestly.
+    const personalTab = !this._personalReadAllowed() ? `
+      <section class="entry-panel">
+        <p class="entry-note">El espacio personal requiere una sesión verificada. Cierra sesión y entra con tu cuenta para usarlo.</p>
+      </section>` : `
       <section class="entry-panel">
         ${this._personalTeamsStatus === 'loading' || this._personalTeamsStatus === 'uninitialized'
           ? '<p class="entry-loading">Cargando equipos…</p>'

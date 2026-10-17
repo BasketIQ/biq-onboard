@@ -73,3 +73,7 @@ draft and reports inside the modal.
   launch could starve concurrent `chromium.launch()` calls and leave
   later files `cancelledByParent` (environment flake, not a code
   defect). Sequential runs deterministically pass 149/149.
+- G2 (17 Oct follow-up): the save completion validates its captured
+  generation + fence + target BEFORE writing any state — a stale
+  completion returns without touching `_editSaving`/`_editError`, so it
+  can never release the controls of a newer editor's in-flight save.

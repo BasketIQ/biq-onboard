@@ -4313,14 +4313,15 @@ class BiqOnboardApp extends HTMLElement {
           { name, competitive_level, players },
           version,
         );
-        this._editSaving = false;
         if (
           seq !== this._editSeq ||
           this._editFence !== fence ||
           this._editingTeamId !== teamId
         ) {
-          return; // stale — the editor moved on; drop the outcome entirely
+          return; // stale — drop the outcome entirely; another operation's
+                  // busy/error state is never ours to release
         }
+        this._editSaving = false;
         if (res.kind === 'saved') {
           this._editModel = res.model;
           this._closeEditModal();

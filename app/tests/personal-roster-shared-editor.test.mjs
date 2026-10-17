@@ -101,7 +101,9 @@ const rosterPayload = () => ({
 /**
  * Mounts the app under a personal context. `routeQuery` presets el.route;
  * `rosterStatus` fails the roster endpoint; `rosterHold`/`putHold` park
- * the GET/PUT until released (stale-response + late-save fencing);
+ * the GET/PUT until released (stale-response + late-save fencing) —
+ * `putHold` may be a promise applied to every PUT or a function called
+ * per request so distinct saves get distinct gates;
  * `rosterBody` replaces the served payload (echo-mismatch coverage);
  * `context` replaces the injected descriptor (working-set coverage).
  */
@@ -130,7 +132,7 @@ async function newPersonalPage(browser, { routeQuery = null, rosterStatus = 200,
       if (u.match(/personal-teams\/[^/]+\/roster/)) {
         if (rosterStatus !== 200) return json({ detail: 'denied' }, rosterStatus);
         if (req.method() === 'PUT') {
-          if (putHold) await putHold;
+          if (putHold) await (typeof putHold === 'function' ? putHold() : putHold);
           const body = JSON.parse(req.postData() || '{}');
           ROSTER = {
             name: body.name,
@@ -549,6 +551,76 @@ test('a roster response echoing the wrong binding fails closed', async () => {
       assert.match(view.error, /inválida|plantilla|error|cargar/i, `${label}: truthful failure surfaced`);
       await page.close();
     }
+  } finally {
+    await browser.close();
+  }
+});
+
+test('G2: a stale save completion never releases another save\'s busy state', async () => {
+  const browser = await chromium.launch();
+  try {
+    // Per-request gates: save A and save B park on distinct holds.
+    const gates = [];
+    const holdFor = () => new Promise((r) => gates.push(r));
+    const { page, log } = await newPersonalPage(browser, {
+      routeQuery: 'teams?edit=pt-1',
+      putHold: () => holdFor(),
+    });
+    await page.waitForFunction(
+      (m) => !!document.getElementById('app').shadowRoot.querySelector(m),
+      '[data-edit-modal]', { timeout: 10000 });
+    // Save A — parked in flight.
+    await page.evaluate(() => {
+      const m = document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]');
+      m.querySelector('[data-edit-team-name]').value = 'Nombre A';
+      m.querySelector('[data-save-team]').click();
+    });
+    await page.waitForTimeout(300);
+    // Close + reopen the SAME team → new generation; B starts its own save.
+    await page.evaluate(() =>
+      document.getElementById('app').shadowRoot.querySelector('[data-cancel-edit]')?.click());
+    await page.evaluate(() => { document.getElementById('app').route = 'teams?edit=pt-1'; });
+    await page.waitForFunction(() => {
+      const m = document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]');
+      return m && m.querySelector('[data-edit-team-name]');
+    }, { timeout: 10000 });
+    await page.evaluate(() => {
+      const m = document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]');
+      m.querySelector('[data-edit-team-name]').value = 'Nombre B';
+      m.querySelector('[data-save-team]').click();
+    });
+    await page.waitForTimeout(300);
+    // A's completion lands — stale. B must keep its busy state.
+    gates[0]();
+    await page.waitForTimeout(400);
+    // Force a rerender under the still-pending B (same fingerprint → no
+    // retirement, just a paint) — the regression showed enabled controls
+    // right here.
+    await page.evaluate(() => {
+      const el = document.getElementById('app');
+      el.context = { ...el.context };
+    });
+    await page.waitForTimeout(200);
+    const mid = await page.evaluate(() => {
+      const m = document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]');
+      return {
+        open: !!m,
+        name: m?.querySelector('[data-edit-team-name]')?.value ?? null,
+        saveDisabled: m?.querySelector('[data-save-team]')?.disabled ?? null,
+        nameDisabled: m?.querySelector('[data-edit-team-name]')?.disabled ?? null,
+      };
+    });
+    assert.equal(mid.open, true, 'late A must not close editor B');
+    assert.equal(mid.name, 'Nombre B', 'late A must not repaint B');
+    assert.equal(mid.saveDisabled, true, 'B save stays busy through rerender');
+    assert.equal(mid.nameDisabled, true, 'B inputs stay disabled while B saves');
+    // Releasing B's own completion is the only thing allowed to close it.
+    gates[1]();
+    await page.waitForFunction(() =>
+      !document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]'),
+    { timeout: 10000 });
+    const puts = log.filter((e) => e.method === 'PUT' && e.url.includes('/roster'));
+    assert.equal(puts.length, 2, 'one PUT each for A and B — no duplicate B PUT');
   } finally {
     await browser.close();
   }

@@ -100,10 +100,12 @@ const rosterPayload = () => ({
 
 /**
  * Mounts the app under a personal context. `routeQuery` presets el.route;
- * `rosterStatus` lets a test make the roster endpoint fail; `rosterHold`
- * parks the GET until released (stale-response fencing).
+ * `rosterStatus` fails the roster endpoint; `rosterHold`/`putHold` park
+ * the GET/PUT until released (stale-response + late-save fencing);
+ * `rosterBody` replaces the served payload (echo-mismatch coverage);
+ * `context` replaces the injected descriptor (working-set coverage).
  */
-async function newPersonalPage(browser, { routeQuery = null, rosterStatus = 200, rosterHold = null } = {}) {
+async function newPersonalPage(browser, { routeQuery = null, rosterStatus = 200, rosterHold = null, putHold = null, rosterBody = null, context = null } = {}) {
   const page = await browser.newPage();
   const log = [];
 
@@ -128,6 +130,7 @@ async function newPersonalPage(browser, { routeQuery = null, rosterStatus = 200,
       if (u.match(/personal-teams\/[^/]+\/roster/)) {
         if (rosterStatus !== 200) return json({ detail: 'denied' }, rosterStatus);
         if (req.method() === 'PUT') {
+          if (putHold) await putHold;
           const body = JSON.parse(req.postData() || '{}');
           ROSTER = {
             name: body.name,
@@ -135,10 +138,10 @@ async function newPersonalPage(browser, { routeQuery = null, rosterStatus = 200,
             players: body.players,
             team_revision: ROSTER.team_revision + 1,
           };
-          return json(rosterPayload());
+          return json(rosterBody ? rosterBody(req) : rosterPayload());
         }
         if (rosterHold) await rosterHold;
-        return json(rosterPayload());
+        return json(rosterBody ? rosterBody(req) : rosterPayload());
       }
       if (u.includes('/api/context/v1/personal-teams')) {
         return json({ teams: PERSONAL_TEAMS });
@@ -161,7 +164,7 @@ async function newPersonalPage(browser, { routeQuery = null, rosterStatus = 200,
     el.context = ctx;
     el.org = { club: null, email: 'e2e@basketiq.io', display_name: 'E2E', memberships: [] };
     el.user = 'e2e-user';
-  }, { rq: routeQuery, ctx: PERSONAL_CONTEXT });
+  }, { rq: routeQuery, ctx: context || PERSONAL_CONTEXT });
   await page.waitForFunction(() => {
     const el = document.getElementById('app');
     return !!(el.shadowRoot && el.shadowRoot.childElementCount > 0);
@@ -364,7 +367,7 @@ test('a 409 keeps the draft and shows the conflict inside the modal', async () =
         status: 200, contentType: 'application/json',
         body: JSON.stringify({
           schema_version: '1.0', context_id: 'ctx-personal-1', context_epoch: 3,
-          owner_scope: { kind: 'personal' },
+          owner_scope: PERSONAL_CONTEXT.owner_scope,
           team: { id: 'pt-1', name: 'Paquetillos 1', competitive_level: 'regional', players: [], team_revision: 2 },
         }),
       });
@@ -389,6 +392,163 @@ test('a 409 keeps the draft and shows the conflict inside the modal', async () =
     assert.equal(state.draft, 'Nombre Nuevo', 'draft survives the conflict');
     // No silent retry or rebase — exactly one PUT.
     assert.equal(puts, 1);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('a late save completion never closes a reopened same-team editor', async () => {
+  const browser = await chromium.launch();
+  try {
+    let release;
+    const hold = new Promise((r) => { release = r; });
+    const { page } = await newPersonalPage(browser, { routeQuery: 'teams?edit=pt-1', putHold: hold });
+    await page.waitForFunction(() =>
+      !!document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]'),
+    { timeout: 10000 });
+    // Save A — parked in flight.
+    await page.evaluate(() => {
+      const m = document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]');
+      m.querySelector('[data-edit-team-name]').value = 'Nombre A';
+      m.querySelector('[data-save-team]').click();
+    });
+    await page.waitForTimeout(300);
+    // Close and reopen the SAME team — a new generation. Draft B must not
+    // be closed or overwritten when A's response finally lands.
+    await page.evaluate(() =>
+      document.getElementById('app').shadowRoot.querySelector('[data-cancel-edit]')?.click());
+    await page.evaluate(() => { document.getElementById('app').route = 'teams?edit=pt-1'; });
+    await page.waitForFunction(() => {
+      const m = document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]');
+      return m && m.querySelector('[data-edit-team-name]');
+    }, { timeout: 10000 });
+    await page.evaluate(() => {
+      document.getElementById('app').shadowRoot
+        .querySelector('[data-edit-team-name]').value = 'Nombre B';
+    });
+    release();
+    await page.waitForTimeout(500);
+    const state = await page.evaluate(() => {
+      const m = document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]');
+      return {
+        open: !!m,
+        name: m?.querySelector('[data-edit-team-name]')?.value ?? null,
+        error: m?.querySelector('.onboard-modal-error')?.textContent ?? null,
+      };
+    });
+    assert.equal(state.open, true, 'late save A must not close editor B');
+    assert.equal(state.name, 'Nombre B', 'late save A must not overwrite B');
+    assert.equal(state.error, null, 'late save A must not paint into B');
+  } finally {
+    await browser.close();
+  }
+});
+
+test('double save serializes — exactly one roster PUT', async () => {
+  const browser = await chromium.launch();
+  try {
+    const { page, log } = await newPersonalPage(browser, { routeQuery: 'teams?edit=pt-1' });
+    await page.waitForFunction(() =>
+      !!document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]'),
+    { timeout: 10000 });
+    await page.evaluate(() => {
+      const m = document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]');
+      const save = () => m.querySelector('[data-save-team]').click();
+      save(); save(); save();
+    });
+    await page.waitForFunction(() =>
+      !document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]'),
+    { timeout: 10000 });
+    const puts = log.filter((e) => e.method === 'PUT' && e.url.includes('/roster'));
+    assert.equal(puts.length, 1, 'serialized saves — one PUT for many clicks');
+  } finally {
+    await browser.close();
+  }
+});
+
+test('a same-epoch working-set switch retires the open editor', async () => {
+  const browser = await chromium.launch();
+  try {
+    const { page } = await newPersonalPage(browser, { routeQuery: 'teams?edit=pt-1' });
+    await page.waitForFunction(() =>
+      !!document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]'),
+    { timeout: 10000 });
+    // Same context_id + epoch — only the working set moved. The editor
+    // was authorized under the old set; the new fingerprint retires it.
+    await page.evaluate(() => {
+      document.getElementById('app').context = {
+        context_id: 'ctx-personal-1',
+        context_epoch: 3,
+        owner_scope: { kind: 'personal', workspace_id: 'ws-1', account_id: 'acc-1' },
+        team_ids: ['pt-1'], working_team_ids: [],
+      };
+    });
+    await page.waitForFunction(() =>
+      !document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]'),
+    { timeout: 10000 });
+  } finally {
+    await browser.close();
+  }
+});
+
+test('a readable own team outside the working set opens read-only', async () => {
+  const browser = await chromium.launch();
+  try {
+    // GET succeeds (own workspace read) but the team is not in the
+    // working set — truthful read-only, never a writable draft.
+    const { page } = await newPersonalPage(browser, {
+      routeQuery: 'teams?edit=pt-1',
+      context: { ...PERSONAL_CONTEXT, working_team_ids: [] },
+    });
+    await page.waitForFunction(() =>
+      !!document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]'),
+    { timeout: 10000 });
+    const view = await page.evaluate(() => {
+      const m = document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]');
+      return {
+        note: !!m.querySelector('[data-edit-readonly-note]'),
+        save: !!m.querySelector('[data-save-team]'),
+        add: !!m.querySelector('[data-add-player]'),
+        nameDisabled: m.querySelector('[data-edit-team-name]').disabled,
+      };
+    });
+    assert.equal(view.note, true, 'read-only note is rendered');
+    assert.equal(view.save, false, 'no save affordance');
+    assert.equal(view.add, false, 'no add-player affordance');
+    assert.equal(view.nameDisabled, true, 'inputs are disabled');
+  } finally {
+    await browser.close();
+  }
+});
+
+test('a roster response echoing the wrong binding fails closed', async () => {
+  const browser = await chromium.launch();
+  try {
+    const variants = {
+      'wrong team id': () => ({ ...rosterPayload(), team: { ...rosterPayload().team, id: 'pt-other' } }),
+      'wrong owner': () => ({ ...rosterPayload(), owner_scope: { kind: 'personal', workspace_id: 'ws-1', account_id: 'acc-2' } }),
+      'wrong context': () => ({ ...rosterPayload(), context_id: 'ctx-other' }),
+      'wrong epoch': () => ({ ...rosterPayload(), context_epoch: 99 }),
+      'wrong schema': () => ({ ...rosterPayload(), schema_version: '9.9' }),
+      'zero revision': () => ({ ...rosterPayload(), team: { ...rosterPayload().team, team_revision: 0 } }),
+    };
+    for (const [label, make] of Object.entries(variants)) {
+      const { page } = await newPersonalPage(browser, {
+        routeQuery: 'teams?edit=pt-1',
+        rosterBody: make,
+      });
+      await page.waitForTimeout(600); // let the rejected load settle
+      const view = await page.evaluate(() => {
+        const s = document.getElementById('app').shadowRoot;
+        return {
+          modal: !!s.querySelector('[data-edit-modal] [data-player-name="0"]'),
+          error: s.querySelector('.entry-error')?.textContent?.trim() || '',
+        };
+      });
+      assert.equal(view.modal, false, `${label}: mismatched echo never paints a draft`);
+      assert.match(view.error, /inválida|plantilla|error|cargar/i, `${label}: truthful failure surfaced`);
+      await page.close();
+    }
   } finally {
     await browser.close();
   }

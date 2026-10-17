@@ -56,10 +56,10 @@ async function stopServer() {
 
 // Seed teams returned by the mocked API.
 const SEED_TEAMS = [
-  { id: 'team_club1_senior_m', club_id: 'club1', name: 'Senior Masculino', category: 'senior', gender: 'M', label: '', archived: false },
+  { id: 'team_club1_senior_m', club_id: 'club1', name: 'Senior Masculino', category: 'senior', gender: 'M', label: '', archived: false, players: [] },
   { id: 'team_club1_senior_f', club_id: 'club1', name: 'Senior Femenino', category: 'senior', gender: 'F', label: '', archived: false, competitive_level: 'Liga EBA', players: [{ name: 'Ana García', number: 7 }] },
-  { id: 'team_club1_cadete_m', club_id: 'club1', name: 'Cadete Masculino', category: 'cadete', gender: 'M', label: '2011', archived: false },
-  { id: 'team_club1_cadete_f', club_id: 'club1', name: 'Cadete Femenino', category: 'cadete', gender: 'F', label: '', archived: true },
+  { id: 'team_club1_cadete_m', club_id: 'club1', name: 'Cadete Masculino', category: 'cadete', gender: 'M', label: '2011', archived: false, players: [] },
+  { id: 'team_club1_cadete_f', club_id: 'club1', name: 'Cadete Femenino', category: 'cadete', gender: 'F', label: '', archived: true, players: [] },
 ];
 
 async function newPage(browser) {

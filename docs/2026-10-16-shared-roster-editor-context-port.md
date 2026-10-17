@@ -43,3 +43,33 @@ The editor must never open on anything but a successful authorized
 roster read. `unavailable`/`denied`/`not_found` surface an error in the
 host (`_entryError` personal, `_teamsError` club); `conflict` keeps the
 draft and reports inside the modal.
+
+## Review corrections (2026-10-17)
+
+- Club adapter reads are authoritative: a model is built only from a
+  confirmed roster-bearing management row (`players` present). The
+  `_mergedCatalog()` self-scoped metadata projection is never a roster;
+  a delayed/failed management read leaves the intent pending or
+  unavailable — a metadata row can never open as an empty draft.
+- Fencing is generation + full scope identity: `_openEditModal` and
+  `_saveEditModel` capture `editor generation` and a fingerprint of
+  context id/epoch, owner union, principal, org, working team ids and
+  active team before awaiting; every completion is dropped unless the
+  fingerprint and generation still match. A same-team reopen is a new
+  generation, so a late save can never close or repaint the fresh
+  editor. Context setter retires the editor whenever the fingerprint
+  changes (including same-epoch working-set/principal transitions).
+- Saves serialize: inputs and the save control are disabled while a
+  payload is in flight, and a second submission is dropped — a stale
+  completion can never discard newer typed edits.
+- Personal `toModel` echo-validates the served envelope before any
+  model exists: `team_id` echo, `schema_version: "1.0"`, context
+  id/epoch match, complete `owner_scope` union against the active
+  context, positive `team_revision`. A readable own team outside the
+  working set opens read-only (`permissions.edit === false`) — the GET
+  proves visibility, not edit authority.
+- `app/package.json` — the test script is capped to a single
+  concurrency slot (`--test-concurrency=1`); the default parallel file
+  launch could starve concurrent `chromium.launch()` calls and leave
+  later files `cancelledByParent` (environment flake, not a code
+  defect). Sequential runs deterministically pass 149/149.

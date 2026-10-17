@@ -486,8 +486,13 @@ class BiqOnboardApp extends HTMLElement {
   // the context id+epoch+owner+team it was opened under.
   private _editModel: TeamEditorModel | null = null;
   private _editLoading = false;
+  private _editSaving = false;
   private _editSeq = 0;
   private _editFence = '';
+  // Stored fingerprint of the last injected context descriptor — detects
+  // a re-injected or in-place-mutated object that identity comparison
+  // against `this._context` would miss (prev === value).
+  private _contextFingerprint = '';
   // Save/validation errors render INSIDE the modal — the overlay is
   // z-index 1000, so the section-level _teamsError banner would sit behind
   // it invisible. Cleared on open/close/success.
@@ -597,6 +602,9 @@ class BiqOnboardApp extends HTMLElement {
     // paint. A fresh fetch under the new tier repopulates below.
     if (clubChanged || roleChanged) {
       this._clearMembersState();
+      // The club edit surface is org-scoped — a different club or a role
+      // transition retires an open editor and its drafts synchronously.
+      this._retireEditor();
     }
     this._org = value;
     this.render();
@@ -654,6 +662,7 @@ class BiqOnboardApp extends HTMLElement {
       // deep links that land before the session attribute is set.
       this._resetPersonalFeed();
       this._editingPersonalTeamId = null;
+      this._retireEditor();
     }
     this._user = value;
     this.render();
@@ -667,23 +676,23 @@ class BiqOnboardApp extends HTMLElement {
   // Working context (BIQ-PERSONAL-CLUB-CONTEXT): the shell injects the
   // active-context descriptor before connecting the element.
   set context(value: ContextDescriptor | null) {
-    const prev = this._context;
-    const scopeChanged =
-      (prev?.context_id ?? '') !== (value?.context_id ?? '') ||
-      (prev?.context_epoch ?? -1) !== (value?.context_epoch ?? -1) ||
-      JSON.stringify(prev?.owner_scope ?? null) !==
-        JSON.stringify(value?.owner_scope ?? null);
+    // Fingerprint the whole authoritative identity — a re-injected or
+    // in-place-mutated descriptor must still retire the editor (comparing
+    // `value` against `this._context` misses same-object mutation).
+    const fp = value
+      ? JSON.stringify([
+          value.context_id, value.context_epoch, value.owner_scope ?? null,
+          value.team_ids ?? [], value.working_team_ids ?? [],
+          value.active_team_id ?? null, value.status ?? null,
+        ])
+      : '';
+    const scopeChanged = fp !== this._contextFingerprint;
+    this._contextFingerprint = fp;
     this._context = value;
     if (scopeChanged) {
-      // Scope/logout/epoch moved — any in-flight editor load or save
-      // response is stale for the new scope; drop it plus all drafts.
-      this._editSeq += 1;
-      this._editModel = null;
-      this._editLoading = false;
-      this._editingTeamId = null;
-      this._rosterDraft = [];
-      this._editError = null;
-      this._editFence = '';
+      // Scope/logout/epoch/working-set moved — any in-flight editor load
+      // or save response is stale for the new scope; drop it plus drafts.
+      this._retireEditor();
     }
     // A pending spaces?edit intent gated on context knowledge drains now
     // that the scope is known (forward to the canonical editor route).
@@ -762,10 +771,36 @@ class BiqOnboardApp extends HTMLElement {
     return this._context?.owner_scope?.kind === 'personal';
   }
 
+  // Operation-scope identity for the shared editor: principal, org
+  // identity+role, the complete owner union, context epoch, working set,
+  // active team and the target team. Any transition of ANY component
+  // retires in-flight load/save completions — a late response can never
+  // paint or close the new generation's editor.
   private _editFenceNow(teamId: string): string {
     const c = this._context;
-    return `${c?.context_id ?? ''}:${c?.context_epoch ?? ''}:${
-      c?.owner_scope?.kind ?? ''}:${teamId}`;
+    return [
+      this._user ?? '',
+      this._org?.club?.id ?? '',
+      this._org?.role ?? '',
+      c?.context_id ?? '',
+      c?.context_epoch ?? '',
+      JSON.stringify(c?.owner_scope ?? null),
+      (c?.working_team_ids ?? []).join(','),
+      c?.active_team_id ?? '',
+      teamId,
+    ].join('|');
+  }
+
+  private _retireEditor(): void {
+    this._editSeq += 1;
+    this._editModel = null;
+    this._editLoading = false;
+    this._editSaving = false;
+    this._editingTeamId = null;
+    this._rosterDraft = [];
+    this._editError = null;
+    this._editFence = '';
+    this._rosterFocus = false;
   }
 
   private _teamEditorPort(): TeamEditorPort {
@@ -778,19 +813,47 @@ class BiqOnboardApp extends HTMLElement {
     const clubId = this._org?.club?.id || '';
     return {
       load: async (teamId) => {
-        const t = this._mergedCatalog().find((r) => r.id === teamId);
-        if (!t) return { kind: 'not-found' };
-        return {
-          kind: 'ok',
-          model: {
-            id: t.id,
-            name: t.name,
-            competitive_level: t.competitive_level ?? '',
-            players: [...(t.players ?? [])],
-            version: null,
-            permissions: { read: true, edit: true },
-          },
-        };
+        // Only a confirmed roster-bearing management read is editable:
+        // the self-scoped /api/org/my-teams projection omits players by
+        // design — treating a metadata row as an empty roster would make
+        // Save send players:[] under full-replace semantics and erase
+        // the real roster. Missing players = unavailable, never a
+        // known-empty draft; only an explicit players:[] opens empty.
+        const t = this._teams.find((r) => r.id === teamId);
+        if (t && Array.isArray(t.players)) {
+          const players: RosterPlayer[] = [];
+          for (const p of t.players as unknown[]) {
+            const row = p as Record<string, unknown> | null;
+            if (!row || typeof row.name !== 'string') {
+              return { kind: 'unavailable', message: 'Respuesta de plantilla inválida' };
+            }
+            const n = row.number;
+            if (
+              n !== null && n !== undefined &&
+              (typeof n !== 'number' || !Number.isInteger(n) || n < 0 || n > 99)
+            ) {
+              return { kind: 'unavailable', message: 'Respuesta de plantilla inválida' };
+            }
+            players.push({ name: row.name, number: n ?? null });
+          }
+          return {
+            kind: 'ok',
+            model: {
+              id: t.id,
+              name: t.name,
+              competitive_level: t.competitive_level ?? '',
+              players,
+              version: null,
+              permissions: { read: true, edit: true },
+            },
+          };
+        }
+        if (t || this._myTeamsCatalog.some((r) => r.id === teamId)) {
+          // Known team, unconfirmed roster — the management feed failed
+          // or returned a metadata row. Unavailable, not empty.
+          return { kind: 'unavailable', message: 'No se pudo cargar la plantilla' };
+        }
+        return { kind: 'not-found' };
       },
       save: async (teamId, draft) => {
         let res: Response;
@@ -829,12 +892,38 @@ class BiqOnboardApp extends HTMLElement {
   private _personalTeamEditorPort(): TeamEditorPort {
     const url = (teamId: string) =>
       `/api/context/v1/personal-teams/${encodeURIComponent(teamId)}/roster`;
-    const toModel = (data: unknown): TeamEditorModel | null => {
-      const t = (data as { team?: Record<string, unknown> } | null)?.team;
+    // Echo validation (SF1 review A3): a well-shaped response for the
+    // WRONG team, context, epoch or owner must never populate a live
+    // editor. Every envelope field is checked against the currently
+    // authorized descriptor before a model exists — no coercion.
+    const toModel = (data: unknown, teamId: string): TeamEditorModel | null => {
+      const body = data as Record<string, unknown> | null;
+      if (!body || typeof body !== 'object') return null;
+      const ctx = this._context;
+      if (body.schema_version !== '1.0') return null;
+      if (body.context_id !== ctx?.context_id) return null;
+      if (body.context_epoch !== ctx?.context_epoch) return null;
+      const owner = body.owner_scope as Record<string, unknown> | null;
+      const expected = ctx?.owner_scope;
+      if (
+        !owner || !expected ||
+        owner.kind !== expected.kind ||
+        owner.workspace_id !== expected.workspace_id ||
+        owner.account_id !== expected.account_id
+      ) {
+        return null;
+      }
+      const t = body.team as Record<string, unknown> | null;
       if (!t || typeof t !== 'object') return null;
-      if (typeof t.id !== 'string' || typeof t.name !== 'string') return null;
+      if (t.id !== teamId || typeof t.name !== 'string') return null;
       if (typeof t.competitive_level !== 'string') return null;
-      if (typeof t.team_revision !== 'number') return null;
+      if (
+        typeof t.team_revision !== 'number' ||
+        !Number.isSafeInteger(t.team_revision) ||
+        t.team_revision <= 0
+      ) {
+        return null;
+      }
       if (!Array.isArray(t.players)) return null;
       const players: RosterPlayer[] = [];
       for (const p of t.players as unknown[]) {
@@ -849,13 +938,17 @@ class BiqOnboardApp extends HTMLElement {
         }
         players.push({ name: row.name, number: n as number | null });
       }
+      // GET success is not edit authority: the server intentionally serves
+      // reads for an own team outside the working set. Only working-set
+      // membership makes the draft writable.
+      const writable = (ctx?.working_team_ids ?? []).includes(teamId);
       return {
         id: t.id,
         name: t.name,
         competitive_level: t.competitive_level,
         players,
         version: t.team_revision,
-        permissions: { read: true, edit: true },
+        permissions: { read: true, edit: writable },
       };
     };
     return {
@@ -874,7 +967,7 @@ class BiqOnboardApp extends HTMLElement {
         if (!res.ok) {
           return { kind: 'unavailable', message: `No se pudo cargar la plantilla (${res.status})` };
         }
-        const model = toModel(await res.json().catch(() => null));
+        const model = toModel(await res.json().catch(() => null), teamId);
         return model
           ? { kind: 'ok', model }
           : { kind: 'unavailable', message: 'Respuesta de plantilla inválida' };
@@ -902,7 +995,7 @@ class BiqOnboardApp extends HTMLElement {
         if (!res.ok) {
           return { kind: 'unavailable', message: `No se pudo guardar la plantilla (${res.status})` };
         }
-        const model = toModel(await res.json().catch(() => null));
+        const model = toModel(await res.json().catch(() => null), teamId);
         return model
           ? { kind: 'saved', model }
           : { kind: 'unavailable', message: 'Respuesta de plantilla inválida' };
@@ -1493,6 +1586,7 @@ class BiqOnboardApp extends HTMLElement {
     this._teamsError = null;
     this._editError = null;
     this._editLoading = true;
+    this._editSaving = false; // a prior generation's in-flight save is stale
     this._editFence = this._editFenceNow(teamId);
     const seq = ++this._editSeq;
     this.render();
@@ -1577,6 +1671,7 @@ class BiqOnboardApp extends HTMLElement {
     this._editingTeamId = null;
     this._editModel = null;
     this._editLoading = false;
+    this._editSaving = false;
     this._editSeq += 1; // an in-flight load landing after close is stale
     this._rosterDraft = [];
     this._rosterFocus = false;
@@ -3681,30 +3776,36 @@ class BiqOnboardApp extends HTMLElement {
   }
 
   private _renderTeamEditScreen(model: TeamEditorModel): string {
+    // permissions.edit=false renders the truthful read-only state — a
+    // readable own team outside the working set is never shown writable.
+    const readOnly = !model.permissions.edit;
+    const busy = this._editSaving;
+    const off = readOnly || busy ? ' disabled' : '';
     const rosterRows = this._rosterDraft.map((p, i) => `
       <div class="onboard-roster-row" data-roster-row>
-        <input type="text" class="onboard-input onboard-input-sm" data-player-name="${i}" placeholder="Nombre y apellidos" aria-label="Nombre y apellidos del jugador" value="${escapeHtml(p.name)}" />
-        <input type="text" class="onboard-input onboard-input-sm onboard-player-num" data-player-number="${i}" placeholder="Nº" aria-label="Dorsal" inputmode="numeric" maxlength="2" value="${escapeHtml(p.number)}" />
-        <button class="onboard-icon-btn onboard-icon-btn-danger" data-remove-player="${i}" type="button" title="Quitar jugador" aria-label="Quitar jugador">${ICON_TRASH}</button>
+        <input type="text" class="onboard-input onboard-input-sm" data-player-name="${i}" placeholder="Nombre y apellidos" aria-label="Nombre y apellidos del jugador" value="${escapeHtml(p.name)}"${off} />
+        <input type="text" class="onboard-input onboard-input-sm onboard-player-num" data-player-number="${i}" placeholder="Nº" aria-label="Dorsal" inputmode="numeric" maxlength="2" value="${escapeHtml(p.number)}"${off} />
+        ${readOnly ? '' : `<button class="onboard-icon-btn onboard-icon-btn-danger" data-remove-player="${i}" type="button" title="Quitar jugador" aria-label="Quitar jugador"${off}>${ICON_TRASH}</button>`}
       </div>`).join('');
     return `<section class="onboard-section onboard-subscreen" data-edit-modal aria-labelledby="edit-team-title">
       <div class="onboard-subscreen-card">
-        <h3 class="onboard-card-title" id="edit-team-title">Editar equipo</h3>
+        <h3 class="onboard-card-title" id="edit-team-title">${readOnly ? 'Equipo (solo lectura)' : 'Editar equipo'}</h3>
+        ${readOnly ? '<p class="onboard-card-desc" data-edit-readonly-note>Este equipo está fuera de tu selección activa — solo lectura.</p>' : ''}
         <label class="onboard-field-label" for="edit-team-name">Nombre del equipo</label>
-        <input id="edit-team-name" type="text" class="onboard-input" data-edit-team-name value="${escapeHtml(this._editNameDraft)}" />
+        <input id="edit-team-name" type="text" class="onboard-input" data-edit-team-name value="${escapeHtml(this._editNameDraft)}"${off} />
         <label class="onboard-field-label" for="edit-team-level">Nivel de competición</label>
-        <select id="edit-team-level" class="onboard-input" data-edit-team-level>${competitiveLevelOptionsHtml(this._editLevelDraft)}</select>
+        <select id="edit-team-level" class="onboard-input" data-edit-team-level${off}>${competitiveLevelOptionsHtml(this._editLevelDraft)}</select>
         <div class="onboard-roster">
           <div class="onboard-roster-head">
             <h4 class="onboard-roster-title">Plantilla</h4>
-            <button class="onboard-linkbtn" data-add-player type="button">+ Añadir jugador</button>
+            ${readOnly ? '' : `<button class="onboard-linkbtn" data-add-player type="button"${off}>+ Añadir jugador</button>`}
           </div>
           ${rosterRows || '<p class="onboard-card-desc onboard-roster-empty">Sin jugadores todavía — añade el primero con «Añadir jugador».</p>'}
         </div>
         ${this._editError ? `<div class="onboard-error onboard-modal-error" role="alert">${escapeHtml(this._editError)}</div>` : ''}
         <div class="onboard-team-actions">
-          <button class="onboard-btn onboard-btn-primary" data-save-team="${escapeHtml(model.id)}" type="button">Guardar</button>
-          <button class="onboard-btn onboard-btn-secondary" data-cancel-edit type="button">Cancelar</button>
+          ${readOnly ? '' : `<button class="onboard-btn onboard-btn-primary" data-save-team="${escapeHtml(model.id)}" type="button"${busy ? ' disabled' : ''}>${busy ? 'Guardando…' : 'Guardar'}</button>`}
+          <button class="onboard-btn onboard-btn-secondary" data-cancel-edit type="button">${readOnly ? 'Volver' : 'Cancelar'}</button>
         </div>
       </div>
     </section>`;
@@ -4194,14 +4295,32 @@ class BiqOnboardApp extends HTMLElement {
           this.render();
           return;
         }
+        // Serialized saves: a second click while the payload is in flight
+        // is ignored, and inputs are disabled for the duration so the
+        // submitted draft can't silently diverge from what was sent.
+        if (this._editSaving) return;
+        // Capture the opening generation + full scope identity + target
+        // BEFORE the await — closing and reopening the SAME team starts a
+        // new generation, so a late completion from the old one must be
+        // dropped, never paint into or close the new editor.
+        const seq = this._editSeq;
+        const fence = this._editFence;
+        const version = this._editModel?.version ?? null;
+        this._editSaving = true;
+        this.render();
         const res = await this._teamEditorPort().save(
           teamId,
           { name, competitive_level, players },
-          this._editModel?.version ?? null,
+          version,
         );
-        // The context/subject may have moved while the save was in flight —
-        // a stale outcome never paints nor closes the new subject's editor.
-        if (this._editFence !== this._editFenceNow(teamId)) return;
+        this._editSaving = false;
+        if (
+          seq !== this._editSeq ||
+          this._editFence !== fence ||
+          this._editingTeamId !== teamId
+        ) {
+          return; // stale — the editor moved on; drop the outcome entirely
+        }
         if (res.kind === 'saved') {
           this._editModel = res.model;
           this._closeEditModal();

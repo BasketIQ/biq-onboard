@@ -892,7 +892,23 @@ test('OB60-3: spaces?edit intent survives a failed feed and drains on explicit r
     await page.evaluate(() =>
       document.getElementById('app').shadowRoot.querySelector('[data-personal-teams-retry]').click());
     await page.waitForFunction(() =>
-      document.getElementById('app')._editingPersonalTeamId === 'pt-1',
+      document.getElementById('app')._personalTeamsStatus === 'ready',
+      { timeout: 10000 });
+    // SF1: the alias forwards to the shared roster editor — that surface
+    // only exists under an active personal context, so the intent holds
+    // until the shell injects one (never drains into the legacy form).
+    assert.equal(
+      await page.evaluate(() => document.getElementById('app')._pendingEditTeamId),
+      'pt-1', 'no personal context yet — intent still held');
+    await page.evaluate(() => {
+      document.getElementById('app').context = {
+        context_id: 'ctx-fwd', context_epoch: 1,
+        owner_scope: { kind: 'personal', workspace_id: 'ws-1', account_id: 'acc-e2e' },
+        team_ids: ['pt-1'], working_team_ids: ['pt-1'],
+      };
+    });
+    await page.waitForFunction(() =>
+      document.getElementById('app')._subRoute === 'teams',
       { timeout: 10000 });
     const pending = await page.evaluate(() => document.getElementById('app')._pendingEditTeamId);
     assert.equal(pending, null, 'drained intent is consumed once');
@@ -1026,12 +1042,24 @@ test('OB60-3: foreign and archived edit ids never open — intent consumed once'
 test('OB60-3: both mount orders keep the edit intent — route-before-user and user-before-route', async () => {
   const browser = await chromium.launch();
   try {
+    const personalContext = () => {
+      document.getElementById('app').context = {
+        context_id: 'ctx-fwd', context_epoch: 1,
+        owner_scope: { kind: 'personal', workspace_id: 'ws-1', account_id: 'acc-e2e' },
+        team_ids: ['pt-1'], working_team_ids: ['pt-1'],
+      };
+    };
     // Route before user (harness order): user assignment must not wipe the
-    // just-captured ?edit= intent.
+    // just-captured ?edit= intent. SF1: the alias holds the intent until a
+    // personal context arrives, then forwards to the shared editor route.
     {
       const { page } = await newEntryPage(browser, { routeQuery: 'spaces?edit=pt-1' });
       await page.waitForFunction(() =>
-        document.getElementById('app')._editingPersonalTeamId === 'pt-1',
+        document.getElementById('app')._personalTeamsStatus === 'ready',
+        { timeout: 10000 });
+      await page.evaluate(personalContext);
+      await page.waitForFunction(() =>
+        document.getElementById('app')._subRoute === 'teams',
         { timeout: 10000 });
       await page.close();
     }
@@ -1042,8 +1070,9 @@ test('OB60-3: both mount orders keep the edit intent — route-before-user and u
         document.getElementById('app')._personalTeamsStatus === 'ready',
         { timeout: 10000 });
       await page.evaluate(() => { document.getElementById('app').route = 'spaces?edit=pt-1'; });
+      await page.evaluate(personalContext);
       await page.waitForFunction(() =>
-        document.getElementById('app')._editingPersonalTeamId === 'pt-1',
+        document.getElementById('app')._subRoute === 'teams',
         { timeout: 10000 });
       await page.close();
     }

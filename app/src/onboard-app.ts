@@ -350,6 +350,45 @@ interface PersonalTeamRow {
   team_revision: number;
 }
 
+// ─── SF1 §5: shared roster editor — normalized model + context port ─────
+// ONE editor renderer/controller for club and personal teams; the data
+// adapter is chosen from the authoritative working context
+// (`_context.owner_scope.kind`), never from UI mode strings, id prefixes
+// or caller-supplied ownership. `version` is the opaque CAS handle —
+// `team_revision` for the personal roster API, null for the club PUT
+// contract which carries no CAS.
+
+interface TeamEditorModel {
+  id: string;
+  name: string;
+  competitive_level: string;
+  players: RosterPlayer[];
+  version: number | null;
+  permissions: { read: boolean; edit: boolean };
+}
+
+type TeamEditorLoad =
+  | { kind: 'ok'; model: TeamEditorModel }
+  | { kind: 'not-found' }
+  | { kind: 'denied' }
+  | { kind: 'unavailable'; message: string };
+
+type TeamEditorSave =
+  | { kind: 'saved'; model: TeamEditorModel }
+  | { kind: 'conflict' }
+  | { kind: 'not-found' }
+  | { kind: 'denied' }
+  | { kind: 'unavailable'; message: string };
+
+interface TeamEditorPort {
+  load(teamId: string): Promise<TeamEditorLoad>;
+  save(
+    teamId: string,
+    draft: { name: string; competitive_level: string; players: RosterPlayer[] },
+    version: number | null,
+  ): Promise<TeamEditorSave>;
+}
+
 // Category vocabulary mirrors biq-core CATEGORIES (slug → display label).
 const PERSONAL_CATEGORIES: Array<{ key: string; label: string }> = [
   { key: 'babybasket', label: 'Babybasket' },
@@ -441,6 +480,14 @@ class BiqOnboardApp extends HTMLElement {
   private _editNameDraft = '';
   private _editLevelDraft = '';
   private _rosterDraft: { name: string; number: string }[] = [];
+  // SF1: the loaded editor model + async load state. `_editSeq` fences
+  // load/save completions (a stale response for a closed modal or a
+  // changed context never paints); `_editFence` binds the open editor to
+  // the context id+epoch+owner+team it was opened under.
+  private _editModel: TeamEditorModel | null = null;
+  private _editLoading = false;
+  private _editSeq = 0;
+  private _editFence = '';
   // Save/validation errors render INSIDE the modal — the overlay is
   // z-index 1000, so the section-level _teamsError banner would sit behind
   // it invisible. Cleared on open/close/success.
@@ -620,7 +667,29 @@ class BiqOnboardApp extends HTMLElement {
   // Working context (BIQ-PERSONAL-CLUB-CONTEXT): the shell injects the
   // active-context descriptor before connecting the element.
   set context(value: ContextDescriptor | null) {
+    const prev = this._context;
+    const scopeChanged =
+      (prev?.context_id ?? '') !== (value?.context_id ?? '') ||
+      (prev?.context_epoch ?? -1) !== (value?.context_epoch ?? -1) ||
+      JSON.stringify(prev?.owner_scope ?? null) !==
+        JSON.stringify(value?.owner_scope ?? null);
     this._context = value;
+    if (scopeChanged) {
+      // Scope/logout/epoch moved — any in-flight editor load or save
+      // response is stale for the new scope; drop it plus all drafts.
+      this._editSeq += 1;
+      this._editModel = null;
+      this._editLoading = false;
+      this._editingTeamId = null;
+      this._rosterDraft = [];
+      this._editError = null;
+      this._editFence = '';
+    }
+    // A pending spaces?edit intent gated on context knowledge drains now
+    // that the scope is known (forward to the canonical editor route).
+    if (this._pendingEditTeamId && this._subRoute === 'spaces') {
+      this._maybeOpenPendingPersonalEdit();
+    }
     this.render();
   }
   get context(): ContextDescriptor | null { return this._context; }
@@ -684,6 +753,163 @@ class BiqOnboardApp extends HTMLElement {
     return personal ? personal.requires_verification !== true : true;
   }
 
+  // ─── SF1 §5: context-bound team-editor ports ──────────────────────────
+  // The adapter is selected from the authoritative working context —
+  // `_context.owner_scope.kind` as injected by the shell — never from the
+  // route, a UI mode string or a caller-supplied owner field.
+
+  private _isPersonalContext(): boolean {
+    return this._context?.owner_scope?.kind === 'personal';
+  }
+
+  private _editFenceNow(teamId: string): string {
+    const c = this._context;
+    return `${c?.context_id ?? ''}:${c?.context_epoch ?? ''}:${
+      c?.owner_scope?.kind ?? ''}:${teamId}`;
+  }
+
+  private _teamEditorPort(): TeamEditorPort {
+    return this._isPersonalContext()
+      ? this._personalTeamEditorPort()
+      : this._clubTeamEditorPort();
+  }
+
+  private _clubTeamEditorPort(): TeamEditorPort {
+    const clubId = this._org?.club?.id || '';
+    return {
+      load: async (teamId) => {
+        const t = this._mergedCatalog().find((r) => r.id === teamId);
+        if (!t) return { kind: 'not-found' };
+        return {
+          kind: 'ok',
+          model: {
+            id: t.id,
+            name: t.name,
+            competitive_level: t.competitive_level ?? '',
+            players: [...(t.players ?? [])],
+            version: null,
+            permissions: { read: true, edit: true },
+          },
+        };
+      },
+      save: async (teamId, draft) => {
+        let res: Response;
+        try {
+          res = await fetch(`/api/clubs/${clubId}/teams/${teamId}`, {
+            method: 'PUT',
+            credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(draft),
+          });
+        } catch {
+          return { kind: 'unavailable', message: 'No se pudo guardar el equipo' };
+        }
+        if (res.status === 403) return { kind: 'denied' };
+        if (res.status === 404) return { kind: 'not-found' };
+        if (!res.ok) return { kind: 'unavailable', message: `HTTP ${res.status}` };
+        return {
+          kind: 'saved',
+          model: {
+            id: teamId,
+            name: draft.name,
+            competitive_level: draft.competitive_level,
+            players: [...draft.players],
+            version: null,
+            permissions: { read: true, edit: true },
+          },
+        };
+      },
+    };
+  }
+
+  // Own-workspace roster API (SF1 §4): GET/PUT
+  // /api/context/v1/personal-teams/{id}/roster — the server derives the
+  // workspace/account from the live personal context; the wire shape is
+  // the editor contract verbatim plus the team_revision CAS.
+  private _personalTeamEditorPort(): TeamEditorPort {
+    const url = (teamId: string) =>
+      `/api/context/v1/personal-teams/${encodeURIComponent(teamId)}/roster`;
+    const toModel = (data: unknown): TeamEditorModel | null => {
+      const t = (data as { team?: Record<string, unknown> } | null)?.team;
+      if (!t || typeof t !== 'object') return null;
+      if (typeof t.id !== 'string' || typeof t.name !== 'string') return null;
+      if (typeof t.competitive_level !== 'string') return null;
+      if (typeof t.team_revision !== 'number') return null;
+      if (!Array.isArray(t.players)) return null;
+      const players: RosterPlayer[] = [];
+      for (const p of t.players as unknown[]) {
+        const row = p as Record<string, unknown> | null;
+        if (!row || typeof row.name !== 'string') return null;
+        const n = row.number;
+        if (
+          n !== null &&
+          (typeof n !== 'number' || !Number.isInteger(n) || n < 0 || n > 99)
+        ) {
+          return null;
+        }
+        players.push({ name: row.name, number: n as number | null });
+      }
+      return {
+        id: t.id,
+        name: t.name,
+        competitive_level: t.competitive_level,
+        players,
+        version: t.team_revision,
+        permissions: { read: true, edit: true },
+      };
+    };
+    return {
+      load: async (teamId) => {
+        let res: Response;
+        try {
+          res = await fetch(url(teamId), {
+            credentials: 'include',
+            cache: 'no-store',
+          });
+        } catch {
+          return { kind: 'unavailable', message: 'No se pudo cargar la plantilla' };
+        }
+        if (res.status === 403) return { kind: 'denied' };
+        if (res.status === 404) return { kind: 'not-found' };
+        if (!res.ok) {
+          return { kind: 'unavailable', message: `No se pudo cargar la plantilla (${res.status})` };
+        }
+        const model = toModel(await res.json().catch(() => null));
+        return model
+          ? { kind: 'ok', model }
+          : { kind: 'unavailable', message: 'Respuesta de plantilla inválida' };
+      },
+      save: async (teamId, draft, version) => {
+        let res: Response;
+        try {
+          res = await fetch(url(teamId), {
+            method: 'PUT',
+            credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              expected_revision: version ?? 0,
+              name: draft.name,
+              competitive_level: draft.competitive_level,
+              players: draft.players,
+            }),
+          });
+        } catch {
+          return { kind: 'unavailable', message: 'No se pudo guardar la plantilla' };
+        }
+        if (res.status === 409) return { kind: 'conflict' };
+        if (res.status === 403) return { kind: 'denied' };
+        if (res.status === 404) return { kind: 'not-found' };
+        if (!res.ok) {
+          return { kind: 'unavailable', message: `No se pudo guardar la plantilla (${res.status})` };
+        }
+        const model = toModel(await res.json().catch(() => null));
+        return model
+          ? { kind: 'saved', model }
+          : { kind: 'unavailable', message: 'Respuesta de plantilla inválida' };
+      },
+    };
+  }
+
   private async loadPersonalTeams(): Promise<void> {
     if (!this._personalReadAllowed()) return;
     if (this._personalTeamsStatus === 'loading') return;
@@ -722,6 +948,7 @@ class BiqOnboardApp extends HTMLElement {
       if (isCurrent()) {
         if (this._personalTeamsAbort === controller) this._personalTeamsAbort = null;
         this._maybeOpenPendingPersonalEdit();
+        this._maybeOpenPendingEdit();
         this.render();
       }
     }
@@ -756,33 +983,45 @@ class BiqOnboardApp extends HTMLElement {
     return rows as PersonalTeamRow[];
   }
 
-  // Drains `?edit=<id>` on the spaces route into the personal team edit form —
-  // mirrors _maybeOpenPendingEdit for the club catalog, once per intent.
+  // Drains `?edit=<id>` on the spaces route — SF1: the legacy personal
+  // edit deep link forwards to the CANONICAL shared-editor route
+  // `#/onboard/teams?edit=<id>` under an active personal context (same
+  // renderer/adapter as the footer «Plantilla» action — never the old
+  // name/category/gender-only form). Without personal context the intent
+  // is consumed silently: the selector has no edit surface.
   private _maybeOpenPendingPersonalEdit(): void {
     const teamId = this._pendingEditTeamId;
-    if (!teamId || this._subRoute !== 'spaces' || this._personalTeamsStatus === 'loading') return;
+    if (!teamId || this._subRoute !== 'spaces') return;
+    if (this._isPersonalContext()) {
+      // Under an active personal context the alias reaches the canonical
+      // shared-editor route — same surface the footer «Plantilla» targets.
+      const hash = window.location.hash || '';
+      const qIdx = hash.indexOf('?');
+      const params = qIdx >= 0
+        ? new URLSearchParams(hash.slice(qIdx + 1))
+        : new URLSearchParams();
+      params.set('edit', teamId);
+      history.replaceState(null, '', `#/onboard/teams?${params.toString()}`);
+      this._subRoute = 'teams';
+      this._maybeOpenPendingEdit();
+      return;
+    }
+    if (this._context) {
+      // A confirmed non-personal context has no personal edit surface —
+      // consume the intent rather than leaving it lingering.
+      this._pendingEditTeamId = null;
+      return;
+    }
+    // No context yet — the shell injects it before connecting; a servable
+    // id waits. A confirmed-dead intent (unknown/archived id once the feed
+    // settles) is still consumed once, never left lingering.
+    if (this._personalTeamsStatus === 'loading') return;
     if (this._personalTeams === null) {
-      // Only an uninitialized feed may self-trigger a load — an error keeps
-      // the intent pending and waits for the explicit retry instead of
-      // looping fetches on every failed completion.
       if (this._personalTeamsStatus === 'uninitialized') this.loadPersonalTeams();
       return;
     }
-    this._pendingEditTeamId = null;
-    if (this._personalTeams.some((t) => t.team_id === teamId && !t.archived)) {
-      this._editingPersonalTeamId = teamId;
-    }
-    // Consume-once: drop the intent from the hash like the club path does.
-    const hash = window.location.hash || '';
-    const qIdx = hash.indexOf('?');
-    if (qIdx >= 0) {
-      const params = new URLSearchParams(hash.slice(qIdx + 1));
-      if (params.has('edit')) {
-        params.delete('edit');
-        const query = params.toString();
-        history.replaceState(null, '', `${hash.slice(0, qIdx)}${query ? `?${query}` : ''}`);
-      }
-    }
+    const row = this._personalTeams.find((t) => t.team_id === teamId);
+    if (!row || row.archived) this._pendingEditTeamId = null;
   }
 
   private async activateContext(kind: 'personal' | 'club', clubId?: string): Promise<void> {
@@ -877,9 +1116,13 @@ class BiqOnboardApp extends HTMLElement {
       // Catalog may already be warm (no load started) — drain immediately.
       this._maybeOpenPendingEdit();
     }
-    // «Plantilla» on a personal team (footer action dialog) deep-links to
-    // #/onboard/spaces?edit=<id> — the personal edit form opens once the
-    // teams feed confirms the id exists.
+    // SF1: under a personal context the same canonical route drains into
+    // the shared roster editor — readiness is the personal-teams feed.
+    if (this._subRoute === 'teams' && this._isPersonalContext()) {
+      this._maybeOpenPendingEdit();
+    }
+    // «Plantilla» on a personal team — the legacy #/onboard/spaces?edit=<id>
+    // alias forwards to the canonical teams route under a personal context.
     if (this._subRoute === 'spaces') {
       this._maybeOpenPendingPersonalEdit();
     }
@@ -1236,21 +1479,58 @@ class BiqOnboardApp extends HTMLElement {
 
   // Edit-team modal lifecycle — the draft fields carry name/level/roster so
   // add/remove-player re-renders never lose typed input (innerHTML re-render
-  // discards live input values).
+  // discards live input values). The model loads through the context port —
+  // actual roster readiness, never `players ?? []` on a metadata row.
   private _openEditModal(teamId: string, rosterFocus: boolean): void {
-    const team = this._mergedCatalog().find((t) => t.id === teamId);
     this._editingTeamId = teamId;
-    this._editNameDraft = team?.name ?? '';
-    this._editLevelDraft = team?.competitive_level ?? '';
-    this._rosterDraft = (team?.players ?? []).map((p) => ({
-      name: p.name,
-      number: p.number === null || p.number === undefined ? '' : String(p.number),
-    }));
+    this._editModel = null;
+    this._editNameDraft = '';
+    this._editLevelDraft = '';
+    this._rosterDraft = [];
     this._rosterFocus = rosterFocus;
     this._addingTeamCategory = null;
     this._deleteConfirmTeamId = null;
     this._teamsError = null;
     this._editError = null;
+    this._editLoading = true;
+    this._editFence = this._editFenceNow(teamId);
+    const seq = ++this._editSeq;
+    this.render();
+    void this._loadEditorModel(teamId, seq);
+  }
+
+  private async _loadEditorModel(teamId: string, seq: number): Promise<void> {
+    const res = await this._teamEditorPort().load(teamId);
+    if (
+      seq !== this._editSeq ||
+      this._editFence !== this._editFenceNow(teamId) ||
+      this._editingTeamId !== teamId
+    ) {
+      return; // stale — the subject, context or scope moved on
+    }
+    this._editLoading = false;
+    if (res.kind === 'ok') {
+      const m = res.model;
+      this._editModel = m;
+      this._editNameDraft = m.name;
+      this._editLevelDraft = m.competitive_level;
+      this._rosterDraft = m.players.map((p) => ({
+        name: p.name,
+        number: p.number === null || p.number === undefined ? '' : String(p.number),
+      }));
+    } else {
+      // Typed failure fails closed: no empty draft opens over a denied or
+      // missing read — the intent closes and the host surfaces the error.
+      this._editingTeamId = null;
+      this._editModel = null;
+      const message = res.kind === 'unavailable'
+        ? res.message
+        : res.kind === 'denied'
+          ? 'No tienes permiso para editar este equipo.'
+          : 'Equipo no encontrado.';
+      if (this._isPersonalContext()) this._entryError = message;
+      else this._teamsError = message;
+    }
     this.render();
   }
 
@@ -1258,9 +1538,23 @@ class BiqOnboardApp extends HTMLElement {
   // settled (self-scoped selection catalog for all roles + the management
   // feed for ADMIN_ROLES). Fails closed: non-managers and unknown team ids
   // just land on the Equipos list — the pending intent never lingers.
+  // Under a personal context the personal-teams feed is the readiness
+  // signal (SF1 §5 — ownership, never ADMIN_ROLES).
   private _maybeOpenPendingEdit(): void {
     const teamId = this._pendingEditTeamId;
-    if (!teamId) return;
+    if (!teamId || this._subRoute !== 'teams') return;
+    if (this._isPersonalContext()) {
+      if (this._subRoute !== 'teams') return;
+      if (this._personalTeamsStatus === 'loading') return;
+      if (this._personalTeams === null) {
+        if (this._personalTeamsStatus === 'uninitialized') this.loadPersonalTeams();
+        return;
+      }
+      this._pendingEditTeamId = null;
+      const row = this._personalTeams.find((t) => t.team_id === teamId);
+      if (row && !row.archived) this._openEditModal(teamId, true);
+      return;
+    }
     if (this._myTeamsLoading || this._teamsLoading) return;
     if (!this._myTeamsLoaded && this._teams.length === 0) {
       // Managers wait for the management feed; if the self-scoped fetch
@@ -1281,6 +1575,9 @@ class BiqOnboardApp extends HTMLElement {
 
   private _closeEditModal(): void {
     this._editingTeamId = null;
+    this._editModel = null;
+    this._editLoading = false;
+    this._editSeq += 1; // an in-flight load landing after close is stale
     this._rosterDraft = [];
     this._rosterFocus = false;
     this._editError = null;
@@ -1323,9 +1620,11 @@ class BiqOnboardApp extends HTMLElement {
   // when «Plantilla» opened the modal), else on the add button itself.
   private _maybeFocusRoster(): void {
     if (!this._rosterFocus) return;
-    this._rosterFocus = false;
     const modal = this.shadow.querySelector('[data-edit-modal]');
-    if (!modal) return;
+    // The async load renders the modal shell before the roster rows —
+    // keep the intent until the model lands or the modal is gone.
+    if (!modal || this._editLoading || !this._editModel) return;
+    this._rosterFocus = false;
     const rows = modal.querySelectorAll('[data-roster-row] [data-player-name]');
     const target = (rows.length
       ? rows[rows.length - 1]
@@ -1365,8 +1664,18 @@ class BiqOnboardApp extends HTMLElement {
   // fail-closed resolver shared by render() and the section renderers —
   // unresolved ids or unauthorized roles never produce a subscreen.
   private _activeSubscreen(): 'team-edit' | 'member-edit' | null {
+    // SF1: under a personal context the roster editor shares the club
+    // editor's subscreen — authority is the live own-workspace context
+    // plus the port's typed load, never ADMIN_ROLES or a catalog row.
+    if (this._isPersonalContext()) {
+      if (this._subRoute === 'teams' && this._editingTeamId
+          && (this._editLoading || this._editModel?.id === this._editingTeamId)) {
+        return 'team-edit';
+      }
+      return null;
+    }
     if (this._subRoute === 'teams' && this._canManageTeams() && this._editingTeamId
-        && this._mergedCatalog().some((t) => t.id === this._editingTeamId)) {
+        && (this._editLoading || this._editModel?.id === this._editingTeamId)) {
       return 'team-edit';
     }
     if (this._subRoute === 'members' && this._canManageMembers() && this._editingMemberId
@@ -1932,6 +2241,19 @@ class BiqOnboardApp extends HTMLElement {
     // módulo refleja su ámbito — personal muestra el espacio privado; club
     // sigue el Mi Club de siempre.
     if (this._context?.owner_scope?.kind === 'personal') {
+      // SF1: the roster editor IS the club editor — same renderer and
+      // handler set, personal adapter. It replaces the teams host while
+      // open; closing lands back on the personal panel (never an
+      // unrelated workspace-settings surface).
+      if (this._activeSubscreen() === 'team-edit') {
+        this.shadow.innerHTML = `<style>${styles}</style>
+          <div class="onboard-app">${this._editLoading || !this._editModel
+            ? this._renderTeamEditLoading()
+            : this._renderTeamEditScreen(this._editModel)}</div>`;
+        this._wireTeamEditorEvents();
+        this._maybeFocusRoster();
+        return;
+      }
       this.shadow.innerHTML = `<style>${styles}</style>
         <div class="onboard-app">${this.renderPersonalPanel()}</div>`;
       this.wirePersonalEvents();
@@ -2708,6 +3030,7 @@ class BiqOnboardApp extends HTMLElement {
       </li>` : `
       <li class="entry-team"><strong>${escapeHtml(t.name)}</strong>
         <span>${escapeHtml(t.category_label || t.category_key)}${t.gender && t.gender !== 'X' ? ` · ${escapeHtml(t.gender)}` : ''}${t.age_band ? ` · ${escapeHtml(t.age_band)}` : ''}</span>
+        <button class="onboard-btn" data-personal-team-roster-open="${escapeHtml(t.team_id)}" ${this._entryBusy ? 'disabled' : ''}>Plantilla</button>
         <button class="onboard-btn" data-personal-team-edit-open="${escapeHtml(t.team_id)}" ${this._entryBusy ? 'disabled' : ''}>Editar</button>
         <button class="onboard-btn entry-team-delete" data-personal-team-delete="${escapeHtml(t.team_id)}" ${this._entryBusy ? 'disabled' : ''}>Eliminar</button>
       </li>`;
@@ -2815,6 +3138,19 @@ class BiqOnboardApp extends HTMLElement {
           this._entryBusy = false;
           this.render();
         }
+      });
+    });
+    // Plantilla — the shared roster editor (SF1): same renderer/handlers
+    // as the club editor, personal roster adapter underneath. The button
+    // lands the module on the canonical edit route so a refresh/deep link
+    // reproduces the same surface.
+    this.shadow.querySelectorAll('[data-personal-team-roster-open]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const teamId = (btn as HTMLElement).dataset.personalTeamRosterOpen || '';
+        if (!teamId) return;
+        this._subRoute = 'teams';
+        history.replaceState(null, '', `#/onboard/teams?edit=${encodeURIComponent(teamId)}`);
+        this._openEditModal(teamId, true);
       });
     });
     // Editar — formulario inline por equipo; PATCH con expected_revision
@@ -3130,8 +3466,9 @@ class BiqOnboardApp extends HTMLElement {
     // Section subscreen (global nav contract §C): the editor replaces the
     // Equipos list. Resolution stays fail-closed in _activeSubscreen.
     if (this._activeSubscreen() === 'team-edit') {
-      const editing = this._mergedCatalog().find((t) => t.id === this._editingTeamId)!;
-      return this._renderTeamEditScreen(editing);
+      return this._editLoading || !this._editModel
+        ? this._renderTeamEditLoading()
+        : this._renderTeamEditScreen(this._editModel);
     }
     const myTeamsBlock = this._renderMyTeamsBlock(canPick);
 
@@ -3332,7 +3669,18 @@ class BiqOnboardApp extends HTMLElement {
   // Equipos list, carries the sticky orange section subheader titled
   // «Club – <team name>», and keeps the full draft/focus contract of the
   // previous modal (data-edit-modal keeps _maybeFocusRoster's anchor).
-  private _renderTeamEditScreen(team: TeamRow): string {
+  // Shared roster-editor shell — the same section for club and personal
+  // models; loading is a separate marker so waits on [data-edit-modal]
+  // only resolve once the model's drafts are actually painted.
+  private _renderTeamEditLoading(): string {
+    return `<section class="onboard-section onboard-subscreen">
+      <div class="onboard-subscreen-card">
+        <p class="entry-loading">Cargando equipo…</p>
+      </div>
+    </section>`;
+  }
+
+  private _renderTeamEditScreen(model: TeamEditorModel): string {
     const rosterRows = this._rosterDraft.map((p, i) => `
       <div class="onboard-roster-row" data-roster-row>
         <input type="text" class="onboard-input onboard-input-sm" data-player-name="${i}" placeholder="Nombre y apellidos" aria-label="Nombre y apellidos del jugador" value="${escapeHtml(p.name)}" />
@@ -3355,7 +3703,7 @@ class BiqOnboardApp extends HTMLElement {
         </div>
         ${this._editError ? `<div class="onboard-error onboard-modal-error" role="alert">${escapeHtml(this._editError)}</div>` : ''}
         <div class="onboard-team-actions">
-          <button class="onboard-btn onboard-btn-primary" data-save-team="${escapeHtml(team.id)}" type="button">Guardar</button>
+          <button class="onboard-btn onboard-btn-primary" data-save-team="${escapeHtml(model.id)}" type="button">Guardar</button>
           <button class="onboard-btn onboard-btn-secondary" data-cancel-edit type="button">Cancelar</button>
         </div>
       </div>
@@ -3783,6 +4131,104 @@ class BiqOnboardApp extends HTMLElement {
   }
 
   // F12: Wire events for the Equipos tab.
+  // The editor's handler set — shared verbatim by the club and personal
+  // render paths (SF1 §5): cancel/add/remove/save plus draft capture.
+  // Save resolves through the context port, which carries the CAS handle
+  // (personal team_revision) or none (club PUT contract).
+  private _wireTeamEditorEvents(): void {
+    // Cancel edit (modal)
+    const cancelBtn = this.shadow.querySelector('[data-cancel-edit]');
+    if (cancelBtn) {
+      cancelBtn.addEventListener('click', () => {
+        this._closeEditModal();
+      });
+    }
+
+    // Roster editor — add/remove re-render from the draft, so the DOM is
+    // flushed into _rosterDraft first and nothing typed is lost.
+    const addPlayerBtn = this.shadow.querySelector('[data-add-player]');
+    if (addPlayerBtn) {
+      addPlayerBtn.addEventListener('click', () => {
+        this._syncEditDraftFromDom();
+        this._rosterDraft.push({ name: '', number: '' });
+        this._rosterFocus = true;
+        this.render();
+      });
+    }
+    this.shadow.querySelectorAll('[data-remove-player]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        this._syncEditDraftFromDom();
+        this._rosterDraft.splice(Number((btn as HTMLElement).dataset.removePlayer), 1);
+        this.render();
+      });
+    });
+
+    // Save team edit — the modal's DOM is flushed into the draft first, then
+    // name + competition level + full roster are sent (replace semantics).
+    this.shadow.querySelectorAll('[data-save-team]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const teamId = (btn as HTMLElement).dataset.saveTeam || '';
+        this._syncEditDraftFromDom();
+        const name = this._editNameDraft.trim();
+        const competitive_level = this._editLevelDraft.trim();
+        if (!name) {
+          this._editError = 'El nombre es obligatorio.';
+          this.render();
+          return;
+        }
+        const players: { name: string; number: number | null }[] = [];
+        let invalidNumber = false;
+        for (const p of this._rosterDraft) {
+          const pname = p.name.trim();
+          if (!pname) continue; // blank rows are ignored
+          const numStr = p.number.trim();
+          const num = numStr === '' ? null : Number.parseInt(numStr, 10);
+          if (num !== null && (!Number.isInteger(num) || num < 0 || num > 99)) {
+            invalidNumber = true;
+            break;
+          }
+          players.push({ name: pname, number: num });
+        }
+        if (invalidNumber) {
+          this._editError = 'El dorsal debe ser un número entre 0 y 99.';
+          this.render();
+          return;
+        }
+        const res = await this._teamEditorPort().save(
+          teamId,
+          { name, competitive_level, players },
+          this._editModel?.version ?? null,
+        );
+        // The context/subject may have moved while the save was in flight —
+        // a stale outcome never paints nor closes the new subject's editor.
+        if (this._editFence !== this._editFenceNow(teamId)) return;
+        if (res.kind === 'saved') {
+          this._editModel = res.model;
+          this._closeEditModal();
+          if (this._isPersonalContext()) {
+            this._personalTeams = null;
+            this._personalTeamsStatus = 'uninitialized';
+            this.loadPersonalTeams();
+          } else {
+            const clubId = this._org?.club?.id;
+            if (clubId) await this.loadTeams(clubId);
+          }
+        } else {
+          // Drafts survive every failure — nothing typed is lost; the user
+          // can fix, retry or cancel. 409 surfaces as its own typed state.
+          this._editError = res.kind === 'conflict'
+            ? 'El equipo cambió desde que lo abriste. Cierra y vuelve a abrirlo para continuar.'
+            : res.kind === 'denied'
+              ? 'No tienes permiso para guardar este equipo.'
+              : res.kind === 'not-found'
+                ? 'El equipo ya no existe.'
+                : res.message;
+          this.render();
+        }
+      });
+    });
+  }
+
   private wireTeamsEvents(clubId: string): void {
     // Navigation (same as wireEvents but routes to teams-specific wiring)
     this.shadow.querySelectorAll('[data-nav]').forEach(btn => {
@@ -3896,80 +4342,9 @@ class BiqOnboardApp extends HTMLElement {
       });
     });
 
-    // Cancel edit (modal)
-    const cancelBtn = this.shadow.querySelector('[data-cancel-edit]');
-    if (cancelBtn) {
-      cancelBtn.addEventListener('click', () => {
-        this._closeEditModal();
-      });
-    }
-
-    // Roster editor — add/remove re-render from the draft, so the DOM is
-    // flushed into _rosterDraft first and nothing typed is lost.
-    const addPlayerBtn = this.shadow.querySelector('[data-add-player]');
-    if (addPlayerBtn) {
-      addPlayerBtn.addEventListener('click', () => {
-        this._syncEditDraftFromDom();
-        this._rosterDraft.push({ name: '', number: '' });
-        this._rosterFocus = true;
-        this.render();
-      });
-    }
-    this.shadow.querySelectorAll('[data-remove-player]').forEach(btn => {
-      btn.addEventListener('click', () => {
-        this._syncEditDraftFromDom();
-        this._rosterDraft.splice(Number((btn as HTMLElement).dataset.removePlayer), 1);
-        this.render();
-      });
-    });
-
-    // Save team edit — the modal's DOM is flushed into the draft first, then
-    // name + competition level + full roster are sent (replace semantics).
-    this.shadow.querySelectorAll('[data-save-team]').forEach(btn => {
-      btn.addEventListener('click', async () => {
-        const teamId = (btn as HTMLElement).dataset.saveTeam || '';
-        this._syncEditDraftFromDom();
-        const name = this._editNameDraft.trim();
-        const competitive_level = this._editLevelDraft.trim();
-        if (!name) {
-          this._editError = 'El nombre es obligatorio.';
-          this.render();
-          return;
-        }
-        const players: { name: string; number: number | null }[] = [];
-        let invalidNumber = false;
-        for (const p of this._rosterDraft) {
-          const pname = p.name.trim();
-          if (!pname) continue; // blank rows are ignored
-          const numStr = p.number.trim();
-          const num = numStr === '' ? null : Number.parseInt(numStr, 10);
-          if (num !== null && (!Number.isInteger(num) || num < 0 || num > 99)) {
-            invalidNumber = true;
-            break;
-          }
-          players.push({ name: pname, number: num });
-        }
-        if (invalidNumber) {
-          this._editError = 'El dorsal debe ser un número entre 0 y 99.';
-          this.render();
-          return;
-        }
-        try {
-          const res = await fetch(`/api/clubs/${clubId}/teams/${teamId}`, {
-            method: 'PUT',
-            credentials: 'include',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name, competitive_level, players }),
-          });
-          if (!res.ok) throw new Error(`HTTP ${res.status}`);
-          this._closeEditModal();
-          await this.loadTeams(clubId);
-        } catch (err) {
-          this._editError = (err as Error).message;
-          this.render();
-        }
-      });
-    });
+    // Shared roster-editor wiring — identical for club and personal
+    // contexts; the data path differs only inside the context port.
+    this._wireTeamEditorEvents();
 
     // Archive team (logical — 📦 icon)
     this.shadow.querySelectorAll('[data-archive-team]').forEach(btn => {

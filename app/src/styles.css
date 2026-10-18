@@ -22,10 +22,11 @@
   padding: 4px;
   background: var(--biq-surface-2);
   border-radius: var(--onboard-radius);
+  overflow-x: auto;
 }
 
 .onboard-nav-item {
-  flex: 1;
+  flex: 1 0 auto;
   padding: 10px 16px;
   border: 0;
   background: transparent;
@@ -36,6 +37,7 @@
   border-radius: 8px;
   cursor: pointer;
   transition: background 0.15s, color 0.15s;
+  white-space: nowrap;
 }
 
 .onboard-nav-item.active {
@@ -737,7 +739,7 @@
 
 .onboard-team-row {
   padding: 8px 0;
-  border-bottom: 1px solid var(--biq-border, #f0f0f0);
+  border-bottom: 1px solid var(--biq-line, #f0f0f0);
 }
 
 .onboard-team-row-main {
@@ -790,7 +792,7 @@
 
 .onboard-myteams-chip {
   padding: 4px 10px;
-  border: 1px solid var(--biq-border, #f0f0f0);
+  border: 1px solid var(--biq-line, #f0f0f0);
   border-radius: 999px;
   background: var(--biq-surface-1, #fff);
   color: var(--biq-text, #1a1a1a);
@@ -853,7 +855,7 @@
   height: 24px;
   flex: none;
   border-radius: 8px;
-  border: 1.8px solid var(--biq-border, #d8d8d8);
+  border: 1.8px solid var(--biq-line, #d8d8d8);
   background: var(--biq-surface-2, #f5f5f5);
   color: transparent;
   transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
@@ -883,7 +885,10 @@
   color: var(--biq-orange, #E87722);
   font-size: 13px;
   font-weight: 800;
-  padding: 2px 0;
+  padding: 10px 0;
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
   cursor: pointer;
 }
 
@@ -947,7 +952,7 @@
   line-height: 1.4;
   padding: 4px 10px;
   border-radius: 999px;
-  background: var(--biq-chip, #f0f0f0);
+  background: var(--biq-surface-2, #f0f0f0);
   color: var(--biq-muted);
 }
 
@@ -1045,7 +1050,7 @@
 }
 
 .onboard-modal {
-  background: var(--biq-surface, #fff);
+  background: var(--biq-surface-1, #fff);
   border-radius: 12px;
   padding: 24px;
   max-width: 400px;
@@ -1083,7 +1088,7 @@
 
 .onboard-roster {
   margin-top: 16px;
-  border-top: 1px solid var(--biq-border, #e5e5e5);
+  border-top: 1px solid var(--biq-line, #e5e5e5);
   padding-top: 12px;
 }
 
@@ -1131,10 +1136,10 @@
 /* Mi Club Phase 4: Miembros tab */
 .onboard-invite-card {
   padding: 16px;
-  border: 1px solid var(--biq-border, #e5e5e5);
+  border: 1px solid var(--biq-line, #e5e5e5);
   border-radius: 12px;
   margin-bottom: 16px;
-  background: var(--biq-surface, #fff);
+  background: var(--biq-surface-1, #fff);
 }
 
 .onboard-invite-title {
@@ -1156,7 +1161,7 @@
 
 .onboard-member-row {
   padding: 10px 0;
-  border-bottom: 1px solid var(--biq-border, #f0f0f0);
+  border-bottom: 1px solid var(--biq-line, #f0f0f0);
 }
 
 .onboard-member-row.off {
@@ -1225,7 +1230,7 @@
   gap: 4px;
   padding: 1px 8px;
   border-radius: 999px;
-  background: var(--biq-chip, #f0f0f0);
+  background: var(--biq-surface-2, #f0f0f0);
   font-size: 11px;
   white-space: nowrap;
 }
@@ -1311,14 +1316,14 @@
 .entry-tabs { margin-bottom: 8px; }
 .entry-panel { display: flex; flex-direction: column; gap: 8px; }
 .entry-teams { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
-.entry-team { display: flex; align-items: baseline; gap: 8px; padding: 8px 10px; border: 1px solid var(--biq-border, #e0e0e0); border-radius: 8px; }
+.entry-team { display: flex; align-items: baseline; gap: 8px; padding: 8px 10px; border: 1px solid var(--biq-line, #e0e0e0); border-radius: 8px; }
 .entry-team span { color: var(--biq-muted, #666); font-size: 0.85rem; }
 .entry-team-action { padding: 4px 6px; }
 .entry-form { display: flex; flex-direction: column; gap: 10px; max-width: 320px; }
 .entry-field { display: flex; flex-direction: column; gap: 4px; }
 .entry-field label { font-size: 0.85rem; font-weight: 600; }
-.entry-field input, .entry-field select { padding: 8px 10px; border: 1px solid var(--biq-border, #e0e0e0); border-radius: 8px; font-size: 0.9rem; }
-.entry-invite { padding: 10px; border: 1px solid var(--biq-border, #e0e0e0); border-radius: 8px; display: flex; flex-direction: column; gap: 8px; max-width: 320px; }
+.entry-field input, .entry-field select { padding: 8px 10px; border: 1px solid var(--biq-line, #e0e0e0); border-radius: 8px; font-size: 0.9rem; }
+.entry-invite { padding: 10px; border: 1px solid var(--biq-line, #e0e0e0); border-radius: 8px; display: flex; flex-direction: column; gap: 8px; max-width: 320px; }
 .entry-head { display: flex; align-items: center; justify-content: space-between; }
 .entry-head .entry-h { margin: 0; }
 .entry-tab { flex: 1; position: relative; display: flex; align-items: center; justify-content: center; border-radius: 8px; transition: background 0.15s, color 0.15s; }
@@ -1334,6 +1339,6 @@
 :host-context([data-theme="dark"]) .entry-help .entry-chispa-light { display: none; }
 :host-context([data-theme="dark"]) .entry-help .entry-chispa-dark { display: block; }
 .entry-modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.45); display: flex; align-items: center; justify-content: center; z-index: 60; padding: 24px; }
-.entry-modal { background: var(--biq-surface, #fff); color: var(--biq-text, #111); border-radius: 12px; padding: 20px; max-width: 340px; display: flex; flex-direction: column; gap: 14px; box-shadow: 0 8px 32px rgba(0,0,0,0.28); }
+.entry-modal { background: var(--biq-surface-1, #fff); color: var(--biq-text, #111); border-radius: 12px; padding: 20px; max-width: 340px; display: flex; flex-direction: column; gap: 14px; box-shadow: 0 8px 32px rgba(0,0,0,0.28); }
 .entry-modal p { margin: 0; font-size: 0.95rem; line-height: 1.5; }
 :host-context([data-theme="dark"]) .entry-modal { --biq-surface: #1e1e1e; --biq-text: #eee; }

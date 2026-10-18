@@ -565,7 +565,7 @@ test('Plantilla: roster modal prefills players, add-row survives re-render, PUT 
   await browser.close();
 });
 
-test('Plantilla: remove row and empty-name rows are dropped from the PUT body', async () => {
+test('Plantilla: a blank new row blocks autosave until explicitly removed (R1)', async () => {
   const browser = await chromium.launch();
   const { page, log } = await newPage(browser);
 
@@ -586,7 +586,9 @@ test('Plantilla: remove row and empty-name rows are dropped from the PUT body', 
     return !!document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]');
   }, { timeout: 10000 });
 
-  // Two added rows: one filled, one left blank — the blank row must not be sent.
+  // Two added rows: one filled, one left blank — the blank NEW row is an
+  // incomplete edit, not a row to drop silently: autosave must refuse and
+  // surface pending feedback, never "Guardado".
   for (let i = 0; i < 2; i++) {
     await page.evaluate(() => {
       document.getElementById('app').shadowRoot.querySelector('[data-add-player]').click();
@@ -601,21 +603,37 @@ test('Plantilla: remove row and empty-name rows are dropped from the PUT body', 
     n.dispatchEvent(new Event('input', { bubbles: true }));
   });
 
-  // Remove the first (filled) row — only the blank row remains → empty roster.
+  await page.waitForFunction(() => {
+    const sr = document.getElementById('app').shadowRoot;
+    const detail = sr.querySelector('[data-edit-save-detail]');
+    return !!(detail && !detail.hidden && /fila nueva|jugador/i.test(detail.textContent));
+  }, { timeout: 10000 });
+  await page.waitForTimeout(800); // debounce settles — still no PUT
+  let puts = log.filter((e) => e.method === 'PUT' && e.url.match(/\/teams\/[^/]+$/) && !e.url.includes('archive'));
+  assert.equal(puts.length, 0, 'no PUT while a blank new row is pending');
+  const chip = await page.evaluate(() =>
+    document.getElementById('app').shadowRoot.querySelector('[data-edit-save-status]')?.textContent || '');
+  assert.ok(!/Guardado/.test(chip), `blank new row must never report saved, chip: '${chip}'`);
+
+  // Explicit remove of the blank row releases the save — an intentional
+  // delete, not an implicit drop.
   await page.evaluate(() => {
-    document.getElementById('app').shadowRoot.querySelector('[data-remove-player="0"]').click();
+    document.getElementById('app').shadowRoot.querySelector('[data-remove-player="1"]').click();
   });
   await page.waitForFunction(() => {
     const sr = document.getElementById('app').shadowRoot;
     return sr.querySelectorAll('[data-roster-row]').length === 1;
   }, { timeout: 10000 });
+  await page.waitForFunction(() => {
+    const sr = document.getElementById('app').shadowRoot;
+    return /Guardado/.test(sr.querySelector('[data-edit-save-status]')?.textContent || '');
+  }, { timeout: 10000 });
 
-  await page.waitForTimeout(1200); // remove-player acelera el autosave
-
-  const puts = log.filter((e) => e.method === 'PUT' && e.url.match(/\/teams\/[^/]+$/) && !e.url.includes('archive'));
-  assert.ok(puts.length >= 1, 'autosave PUT fired after the removal');
+  puts = log.filter((e) => e.method === 'PUT' && e.url.match(/\/teams\/[^/]+$/) && !e.url.includes('archive'));
+  assert.ok(puts.length >= 1, 'autosave PUT fired after the explicit removal');
   const body = JSON.parse(puts[puts.length - 1].postData);
-  assert.deepEqual(body.players, [], 'blank rows dropped — explicit clear is sent');
+  assert.deepEqual(body.players, [{ name: 'Marta Ruiz', number: null }],
+    'only the named row reaches the payload');
 
   await browser.close();
 });

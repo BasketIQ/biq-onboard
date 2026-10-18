@@ -488,7 +488,10 @@ class BiqOnboardApp extends HTMLElement {
   // re-render/save.
   private _editNameDraft = '';
   private _editLevelDraft = '';
-  private _rosterDraft: { name: string; number: string }[] = [];
+  // `existing` marca filas que venían persistidas al abrir el editor — un
+  // nombre borrado sobre una fila persistida NUNCA es una baja implícita
+  // (la baja solo la produce su acción explícita de quitar).
+  private _rosterDraft: { name: string; number: string; existing: boolean }[] = [];
   // SF1: the loaded editor model + async load state. `_editSeq` fences
   // load/save completions (a stale response for a closed modal or a
   // changed context never paints); `_editFence` binds the open editor to
@@ -514,6 +517,11 @@ class BiqOnboardApp extends HTMLElement {
   private _editDirty = false;
   private _editSaveStatus: 'idle' | 'pending' | 'saving' | 'saved' | 'error' | 'conflict' = 'idle';
   private _editSaveMessage: string | null = null;
+  // El innerHTML de render() suelta focusout sobre los inputs que destruye
+  // — una pasada de sync sobre ese DOM moribundo resembraría filas que el
+  // borrador ya eliminó (p. ej. quitar jugador). Mientras _paint corre, el
+  // borrador es la única autoridad: sync no puede releer el DOM viejo.
+  private _editDomFreeze = false;
   private _editSaveTimer: ReturnType<typeof setTimeout> | null = null;
   private _editSaveChain: Promise<void> = Promise.resolve();
   private _editSaveQueued = false;
@@ -1247,11 +1255,16 @@ class BiqOnboardApp extends HTMLElement {
     this._pendingRouteValue = value; // última intención manda
     if (this._routeFlushBusy) return;
     this._routeFlushBusy = true;
+    const owner = this._editOwnerNow();
     void (async () => {
       try {
-        const ok = await this._flushEditorQueue();
+        const ok = await this._flushEditorQueue(owner);
         if (!ok) {
-          // El editor queda — restaura su ruta canónica y repinta.
+          // El editor queda — restaura su ruta canónica y repinta. Pero
+          // solo si sigue siendo el mismo editor que inició el flush:
+          // una retirada+reapertura durante el await pasa el mando al
+          // editor vigente, no a esta continuación.
+          if (!this._isEditOwner(owner)) return;
           const teamId = this._editingTeamId;
           if (teamId) {
             history.replaceState(
@@ -1263,6 +1276,7 @@ class BiqOnboardApp extends HTMLElement {
           this.render();
           return;
         }
+        if (!this._isEditOwner(owner)) return;
         this._retireEditor();
         const pending = this._pendingRouteValue;
         this._pendingRouteValue = null;
@@ -1725,6 +1739,7 @@ class BiqOnboardApp extends HTMLElement {
       this._rosterDraft = m.players.map((p) => ({
         name: p.name,
         number: p.number === null || p.number === undefined ? '' : String(p.number),
+        existing: true,
       }));
     } else {
       // Typed failure fails closed: no empty draft opens over a denied or
@@ -1752,10 +1767,14 @@ class BiqOnboardApp extends HTMLElement {
     return labels[this._editSaveStatus] || '';
   }
 
-  // El draft que sale al servidor: valida nombre obligatorio y dorsales
-  // enteros 0–99. Filas sin nombre nunca persisten (una fila incompleta no
-  // es un jugador vacío). El nivel no se revalida contra el vocabulario —
-  // el <select> solo ofrece opciones canónicas + el valor almacenado
+  // El draft que sale al servidor: valida el SNAPSHOT COMPLETO — ninguna
+  // fila se descarta en silencio. La plantilla persiste por reemplazo total,
+  // así que omitir una fila sería una baja implícita: el nombre borrado de
+  // un jugador persistido lo conserva y exige corrección o su acción
+  // explícita de quitar; una fila nueva incompleta (vacía o solo dorsal)
+  // queda pendiente — ni Guardado ni requestLeave pueden afirmar cierre
+  // mientras exista. El nivel no se revalida contra el vocabulario — el
+  // <select> solo ofrece opciones canónicas + el valor almacenado
   // (texto legacy preservado por contrato, competitiveLevelOptionsHtml).
   private _editDraftPayload():
     | { ok: true; name: string; competitive_level: string; players: { name: string; number: number | null }[] }
@@ -1766,7 +1785,15 @@ class BiqOnboardApp extends HTMLElement {
     const players: { name: string; number: number | null }[] = [];
     for (const p of this._rosterDraft) {
       const pname = p.name.trim();
-      if (!pname) continue; // fila incompleta — nunca un jugador vacío
+      if (!pname) {
+        // Fila nueva totalmente vacía — edición incompleta, espera.
+        if (!p.existing && !p.number.trim()) {
+          return { ok: false, message: 'Completa o quita la fila nueva del jugador.' };
+        }
+        // Fila persistida o con dorsal pero sin nombre — conserva al
+        // jugador guardado; la baja es solo por su acción explícita.
+        return { ok: false, message: 'Cada jugador necesita un nombre — quita la fila para darlo de baja.' };
+      }
       const numStr = p.number.trim();
       const num = numStr === '' ? null
         : /^-?\d+$/.test(numStr) ? Number.parseInt(numStr, 10) : Number.NaN;
@@ -1776,6 +1803,18 @@ class BiqOnboardApp extends HTMLElement {
       players.push({ name: pname, number: num });
     }
     return { ok: true, name, competitive_level, players };
+  }
+
+  // Identidad del dueño de un job/cola: equipo + generación de editor +
+  // fence de contexto/principal. Se captura AL ENCOLAR — un callback
+  // encolado bajo A que despierta sobre B nunca muta ni libera nada.
+  private _editOwnerNow(): { teamId: string | null; seq: number; fence: string } {
+    return { teamId: this._editingTeamId, seq: this._editSeq, fence: this._editFence };
+  }
+
+  private _isEditOwner(owner: { teamId: string | null; seq: number; fence: string }): boolean {
+    return owner.teamId !== null && owner.teamId === this._editingTeamId &&
+      owner.seq === this._editSeq && owner.fence === this._editFence;
   }
 
   // Marca trabajo pendiente y programa el guardado; `accelerated` (select,
@@ -1801,19 +1840,25 @@ class BiqOnboardApp extends HTMLElement {
 
   // Cadena serial: nunca dos PUT en vuelo y como mucho UN envío en
   // espera — mientras haya una pasada encolada, las nuevas ediciones solo
-  // marcan dirty (la pasada viva lee el DOM al ejecutarse).
+  // marcan dirty (la pasada viva lee el DOM al ejecutarse). El dueño se
+  // fija al encolar: una pasada nacida en un editor ya retirado no
+  // ejecuta ni libera flags del editor vigente.
   private _queueEditorSave(): void {
     if (this._editSaveQueued) return;
     this._editSaveQueued = true;
+    const owner = this._editOwnerNow();
     this._editSaveChain = this._editSaveChain
-      .then(() => this._saveEditorOnce())
+      .then(() => this._saveEditorOnce(owner))
       .catch(() => { /* los estados tipados ya reflejan el fallo */ });
   }
 
-  private async _saveEditorOnce(): Promise<void> {
+  private async _saveEditorOnce(owner: { teamId: string | null; seq: number; fence: string }): Promise<void> {
+    // Job nacido bajo otro editor/principal — nunca muta ni libera el
+    // estado del editor vigente (incluido `_editSaveQueued`).
+    if (!this._isEditOwner(owner)) return;
     this._editSaveQueued = false;
-    const teamId = this._editingTeamId;
-    if (!teamId || !this._editModel) return;
+    const teamId = owner.teamId as string;
+    if (!this._editModel) return;
     this._syncEditDraftFromDom();
     const draft = this._editDraftPayload();
     if (!draft.ok) {
@@ -1823,20 +1868,15 @@ class BiqOnboardApp extends HTMLElement {
       this._updateEditStatusDom();
       return;
     }
-    const seq = this._editSeq;
-    const fence = this._editFence;
     const version = this._editModel.version;
     const sent = { name: draft.name, competitive_level: draft.competitive_level, players: draft.players };
     const sentJson = JSON.stringify(sent);
     this._editSaveStatus = 'saving';
     this._editSaveMessage = null;
     this._updateEditStatusDom();
-    const res = await this._teamEditorPort().save(teamId, sent, version);
-    if (
-      seq !== this._editSeq ||
-      this._editFence !== fence ||
-      this._editingTeamId !== teamId
-    ) {
+    const port = this._teamEditorPort();
+    const res = await port.save(teamId, sent, version);
+    if (!this._isEditOwner(owner)) {
       return; // respuesta fuera de orden u otro principal — se descarta
     }
     if (res.kind === 'saved') {
@@ -1869,7 +1909,10 @@ class BiqOnboardApp extends HTMLElement {
         ? 'No tienes permiso para guardar este equipo.'
         : res.kind === 'not-found'
           ? 'El equipo ya no existe.'
-          : res.message;
+          // Resultado incierto (transporte, 5xx, respuesta inválida): la
+          // escritura pudo aplicarse en el servidor — nunca se reenvía a
+          // ciegas; Reintentar primero reconcilia con una lectura.
+          : `${res.message} Reintentar comprueba el estado actual antes de reenviar.`;
     this._updateEditStatusDom();
   }
 
@@ -1897,12 +1940,15 @@ class BiqOnboardApp extends HTMLElement {
 
   // Vacía la cola antes de una transición voluntaria. Devuelve false con
   // trabajo sin persistir (validación pendiente, error, conflicto) — el
-  // editor queda con su feedback. Acotado a 8 pasadas.
-  private _flushEditorQueue(): Promise<boolean> {
+  // editor queda con su feedback. Acotado a 8 pasadas. La cola pertenece
+  // al dueño capturado al entrar: si el editor cambia de identidad durante
+  // un await (retirada forzada + reapertura), el flush se detiene en falso
+  // y jamás decide sobre el editor nuevo.
+  private _flushEditorQueue(owner = this._editOwnerNow()): Promise<boolean> {
     if (this._editFlush) return this._editFlush;
     const run = (async () => {
       for (let pass = 0; pass < 8; pass++) {
-        if (this._editingTeamId === null) return true; // retirado — nada que vaciar
+        if (!this._isEditOwner(owner)) return false;
         this._syncEditDraftFromDom();
         const pending = this._editDirty ||
           this._editSaveStatus === 'pending' ||
@@ -1915,6 +1961,7 @@ class BiqOnboardApp extends HTMLElement {
         }
         this._queueEditorSave();
         await this._editSaveChain;
+        if (!this._isEditOwner(owner)) return false;
         const s = this._editSaveStatus;
         if (s === 'error' || s === 'conflict' || s === 'pending') return false;
       }
@@ -1927,39 +1974,55 @@ class BiqOnboardApp extends HTMLElement {
     return shared;
   }
 
-  // Contrato de carcasa (App shell): se llama antes de cualquier
-  // transición voluntaria que saque de la vista actual. `false` retiene la
-  // navegación — el chip muestra el motivo y Reintentar.
+  // Contrato de carcasa (App shell), fase ADMITIR: se llama antes de
+  // cualquier transición voluntaria que saque de la vista actual. Vacía la
+  // cola y decide — NUNCA retira el editor: la retirada ocurre solo en
+  // `commitLeave`, cuando la carcasa confirma que la transición se aplicó
+  // (una navegación admitida puede morir por obsolescencia después; si
+  // requestLeave retirara, un intent viejo destruiría el editor vivo).
+  // `false` retiene la transición — el chip muestra el motivo y Reintentar.
   async requestLeave(): Promise<boolean> {
-    if (!this._editingTeamId) return true;
-    if (!this._editModel?.permissions.edit) {
-      this._retireEditor();
-      return true;
-    }
-    const ok = await this._flushEditorQueue();
-    if (ok) this._retireEditor();
-    else this._updateEditStatusDom();
+    const owner = this._editOwnerNow();
+    if (!owner.teamId) return true;
+    if (!this._editModel?.permissions.edit) return true;
+    const ok = await this._flushEditorQueue(owner);
+    if (!this._isEditOwner(owner)) return false;
+    if (!ok) this._updateEditStatusDom();
     return ok;
   }
 
+  // Contrato de carcasa, fase COMMIT: la transición admitida se aplicó —
+  // el editor se retira. La carcasa solo lo llama tras aplicar la ruta o
+  // la activación; si la transición muere por obsolescencia nunca llega y
+  // el editor queda abierto con su trabajo ya persistido.
+  commitLeave(): void {
+    if (!this._editingTeamId) return;
+    this._retireEditor();
+    this.render();
+  }
+
   // Salida voluntaria del editor (Volver / flecha de sección): vacía la
-  // cola y solo entonces cierra; con fallo el editor queda visible.
+  // cola y solo entonces cierra; con fallo el editor queda visible. La
+  // misma propiedad de dueño: una continuación vieja no cierra el editor
+  // que se abrió después.
   private async _requestEditorClose(): Promise<void> {
     if (this._closingEdit) return;
     this._closingEdit = true;
     try {
+      const owner = this._editOwnerNow();
       const writable = !!this._editModel?.permissions.edit;
       const pending = this._editDirty ||
         this._editSaveStatus === 'pending' || this._editSaveStatus === 'saving' ||
         this._editSaveStatus === 'error' || this._editSaveStatus === 'conflict';
-      if (writable && pending && this._editingTeamId) {
+      if (writable && pending && owner.teamId) {
         if (this._editSaveTimer) {
           clearTimeout(this._editSaveTimer);
           this._editSaveTimer = null;
         }
         this._editSaveStatus = 'saving';
         this._updateEditStatusDom();
-        const ok = await this._flushEditorQueue();
+        const ok = await this._flushEditorQueue(owner);
+        if (!this._isEditOwner(owner)) return;
         if (!ok) {
           this._updateEditStatusDom();
           const chip = this.shadow.querySelector('[data-edit-save-status]') as HTMLElement | null;
@@ -1986,20 +2049,18 @@ class BiqOnboardApp extends HTMLElement {
     }
   }
 
-  // Reintentar tras un 409: recarga el modelo del servidor, sube el CAS a
-  // la revisión actual y reenvía el borrador vigente del usuario.
+  // Reintentar informado (409 o resultado incierto): lectura de
+  // reconciliación — el CAS sube a la revisión del servidor — y luego se
+  // reenvía el borrador vigente del usuario. El DOM nunca se reescribe:
+  // el usuario conserva sus cambios; solo el handle de versión avanza.
   private async _reloadEditorForRetry(): Promise<void> {
-    const teamId = this._editingTeamId;
+    const owner = this._editOwnerNow();
+    const teamId = owner.teamId;
     if (!teamId) return;
-    const seq = this._editSeq;
-    const fence = this._editFence;
     this._editSaveStatus = 'saving';
     this._updateEditStatusDom();
     const res = await this._teamEditorPort().load(teamId);
-    if (
-      seq !== this._editSeq || this._editFence !== fence ||
-      this._editingTeamId !== teamId
-    ) return;
+    if (!this._isEditOwner(owner)) return;
     if (res.kind !== 'ok') {
       this._editSaveStatus = 'error';
       this._editSaveMessage = res.kind === 'denied'
@@ -2094,6 +2155,7 @@ class BiqOnboardApp extends HTMLElement {
   // Flush the open modal's DOM into the draft fields — the single place
   // where live input values are captured.
   private _syncEditDraftFromDom(): void {
+    if (this._editDomFreeze) return;
     const modal = this.shadow.querySelector('[data-edit-modal]');
     if (!modal) return;
     const nameInput = modal.querySelector('[data-edit-team-name]') as HTMLInputElement | null;
@@ -2103,7 +2165,7 @@ class BiqOnboardApp extends HTMLElement {
     modal.querySelectorAll('[data-roster-row]').forEach((row, i) => {
       const pname = row.querySelector('[data-player-name]') as HTMLInputElement | null;
       const pnum = row.querySelector('[data-player-number]') as HTMLInputElement | null;
-      if (!this._rosterDraft[i]) this._rosterDraft[i] = { name: '', number: '' };
+      if (!this._rosterDraft[i]) this._rosterDraft[i] = { name: '', number: '', existing: false };
       this._rosterDraft[i].name = pname?.value ?? '';
       this._rosterDraft[i].number = pnum?.value ?? '';
     });
@@ -2726,6 +2788,18 @@ class BiqOnboardApp extends HTMLElement {
 
   // ─── Rendering ────────────────────────────────────────────────────────
 
+  // Un solo punto de repintado: el flag congela _syncEditDraftFromDom
+  // durante la demolición del DOM (el focusout del input destruido no
+  // puede resembrar filas eliminadas ni releer inputs a medio morir).
+  private _paint(html: string): void {
+    this._editDomFreeze = true;
+    try {
+      this.shadow.innerHTML = html;
+    } finally {
+      this._editDomFreeze = false;
+    }
+  }
+
   private render(): void {
     const club = this._org?.club;
     // R6: el selector de espacios es alcanzable en TODAS las cohortes —
@@ -2734,15 +2808,15 @@ class BiqOnboardApp extends HTMLElement {
     // ausencia real de autoridad cae a la vista legacy.
     if (this._subRoute === 'spaces') {
       if (this._bootstrap && !this._bootstrapFailed) {
-        this.shadow.innerHTML = `<style>${styles}</style>
-          <div class="onboard-app onboard-clubstep">${this.renderEntryStep()}</div>`;
+        this._paint(`<style>${styles}</style>
+          <div class="onboard-app onboard-clubstep">${this.renderEntryStep()}</div>`);
         this.wireEntryEvents();
         return;
       }
       if (!this._bootstrapFailed) {
         if (!this._bootstrapLoading) this.loadBootstrap();
-        this.shadow.innerHTML = `<style>${styles}</style>
-          <div class="onboard-app onboard-clubstep"><p class="entry-loading">Cargando…</p></div>`;
+        this._paint(`<style>${styles}</style>
+          <div class="onboard-app onboard-clubstep"><p class="entry-loading">Cargando…</p></div>`);
         return;
       }
       // Sin autoridad de contexto no hay selector — la vista legacy sigue.
@@ -2756,43 +2830,43 @@ class BiqOnboardApp extends HTMLElement {
       // open; closing lands back on the personal panel (never an
       // unrelated workspace-settings surface).
       if (this._activeSubscreen() === 'team-edit') {
-        this.shadow.innerHTML = `<style>${styles}</style>
+        this._paint(`<style>${styles}</style>
           <div class="onboard-app">${this._editLoading || !this._editModel
             ? this._renderTeamEditLoading()
-            : this._renderTeamEditScreen(this._editModel)}</div>`;
+            : this._renderTeamEditScreen(this._editModel)}</div>`);
         this._wireTeamEditorEvents();
         this._maybeFocusRoster();
         return;
       }
-      this.shadow.innerHTML = `<style>${styles}</style>
-        <div class="onboard-app">${this.renderPersonalPanel()}</div>`;
+      this._paint(`<style>${styles}</style>
+        <div class="onboard-app">${this.renderPersonalPanel()}</div>`);
       this.wirePersonalEvents();
       return;
     }
     if (!club) {
       if (this._bootstrapLoading) {
-        this.shadow.innerHTML = `<style>${styles}</style>
-          <div class="onboard-app onboard-clubstep"><p class="entry-loading">Cargando…</p></div>`;
+        this._paint(`<style>${styles}</style>
+          <div class="onboard-app onboard-clubstep"><p class="entry-loading">Cargando…</p></div>`);
         return;
       }
       if (this._bootstrap && !this._bootstrapFailed) {
         // Context entry selector: dos pestañas (personal / club) sobre el
         // bootstrap autoritativo — no hay club resuelto pero sí estado.
-        this.shadow.innerHTML = `<style>${styles}</style>
-          <div class="onboard-app onboard-clubstep">${this.renderEntryStep()}</div>`;
+        this._paint(`<style>${styles}</style>
+          <div class="onboard-app onboard-clubstep">${this.renderEntryStep()}</div>`);
         this.wireEntryEvents();
         return;
       }
       if (!this._bootstrapFailed) {
         this.loadBootstrap();
-        this.shadow.innerHTML = `<style>${styles}</style>
-          <div class="onboard-app onboard-clubstep"><p class="entry-loading">Cargando…</p></div>`;
+        this._paint(`<style>${styles}</style>
+          <div class="onboard-app onboard-clubstep"><p class="entry-loading">Cargando…</p></div>`);
         return;
       }
       // ADDENDUM-07 §6 — paso de club: sin club resuelto este módulo ES el
       // paso 2 del onboarding (picker / unirse por ID / crear club).
-      this.shadow.innerHTML = `<style>${styles}</style>
-        <div class="onboard-app onboard-clubstep">${this.renderClubStep()}</div>`;
+      this._paint(`<style>${styles}</style>
+        <div class="onboard-app onboard-clubstep">${this.renderClubStep()}</div>`);
       this.wireClubStepEvents();
       return;
     }
@@ -2814,7 +2888,7 @@ class BiqOnboardApp extends HTMLElement {
       content = this.renderClubDetails(club);
     }
 
-    this.shadow.innerHTML = `<style>${styles}</style>
+    this._paint(`<style>${styles}</style>
       <div class="onboard-app">
         ${this._renderSectionSubhead(this._subheadSpec(section, canManageMembers))}
         ${inSubscreen ? '' : `<nav class="onboard-nav">
@@ -2825,7 +2899,7 @@ class BiqOnboardApp extends HTMLElement {
           <button class="onboard-nav-item" data-nav="spaces">Espacios</button>
         </nav>`}
         ${content}
-      </div>`;
+      </div>`);
     // One subhead per render — the back wiring resolves the destination
     // from live state (editor close paths vs. list → Mi Club landing).
     this.shadow.querySelector('[data-section-back]')?.addEventListener('click', () => this._sectionBack());
@@ -4675,16 +4749,16 @@ class BiqOnboardApp extends HTMLElement {
       });
     }
 
-    // Reintentar — error reenvía el borrador vigente; conflicto recarga la
-    // revisión del servidor y reenvía sobre el nuevo CAS.
+    // Reintentar — SIEMPRE informado: primero una lectura de
+    // reconciliación (conflicto 409 o resultado incierto — la escritura
+    // pudo haberse aplicado en el servidor), luego el borrador vigente se
+    // reenvía sobre la revisión fresca. Nunca un reenvío a ciegas.
     this.shadow.querySelector('[data-edit-retry]')?.addEventListener('click', () => {
-      if (this._editSaveStatus === 'conflict') {
+      if (
+        (this._editSaveStatus === 'conflict' || this._editSaveStatus === 'error') &&
+        this._editingTeamId && this._editModel?.permissions.edit
+      ) {
         void this._reloadEditorForRetry();
-      } else if (this._editingTeamId && this._editModel?.permissions.edit) {
-        this._editDirty = true;
-        this._editSaveStatus = 'pending';
-        this._updateEditStatusDom();
-        this._queueEditorSave();
       }
     });
 
@@ -4694,9 +4768,12 @@ class BiqOnboardApp extends HTMLElement {
     if (addPlayerBtn) {
       addPlayerBtn.addEventListener('click', () => {
         this._syncEditDraftFromDom();
-        this._rosterDraft.push({ name: '', number: '' });
+        this._rosterDraft.push({ name: '', number: '', existing: false });
         this._rosterFocus = true;
         this.render();
+        // La fila nueva vacía es un borrador incompleto — se marca
+        // pendiente de inmediato (nunca «Guardado» con edición incompleta).
+        this._scheduleEditorSave(false);
       });
     }
     this.shadow.querySelectorAll('[data-remove-player]').forEach(btn => {

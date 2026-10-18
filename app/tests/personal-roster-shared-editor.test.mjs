@@ -23,7 +23,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const APP_ROOT = resolve(__dirname, '..');
 const REPO_ROOT = resolve(APP_ROOT, '..');
 const DIST_EMBED = join(REPO_ROOT, 'dist', 'embed', 'biq-onboard.js');
-const PORT = 9147;
+const PORT = 9154; // was 9147 — collided with navigation-contract under parallel `node --test`
 
 if (!existsSync(DIST_EMBED)) {
   throw new Error('Build output not found. Run `npm run build:lib` first.');

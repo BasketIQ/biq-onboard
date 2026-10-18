@@ -495,7 +495,6 @@ class BiqOnboardApp extends HTMLElement {
   // the context id+epoch+owner+team it was opened under.
   private _editModel: TeamEditorModel | null = null;
   private _editLoading = false;
-  private _editSaving = false;
   private _editSeq = 0;
   private _editFence = '';
   // Stored fingerprint of the last injected context descriptor — detects
@@ -824,7 +823,6 @@ class BiqOnboardApp extends HTMLElement {
     this._editSeq += 1;
     this._editModel = null;
     this._editLoading = false;
-    this._editSaving = false;
     this._editingTeamId = null;
     this._rosterDraft = [];
     this._editError = null;
@@ -1671,6 +1669,13 @@ class BiqOnboardApp extends HTMLElement {
   // discards live input values). The model loads through the context port —
   // actual roster readiness, never `players ?? []` on a metadata row.
   private _openEditModal(teamId: string, rosterFocus: boolean): void {
+    // Re-entrega de la misma ruta (p.ej. restauración del hash tras una
+    // retención de requestLeave): el editor ya está montado sobre este
+    // equipo — reabrirlo descartaría el borrador y su feedback.
+    if (this._editingTeamId === teamId) {
+      this._pendingEditTeamId = null;
+      return;
+    }
     this._editingTeamId = teamId;
     this._editModel = null;
     this._editNameDraft = '';
@@ -1682,7 +1687,6 @@ class BiqOnboardApp extends HTMLElement {
     this._teamsError = null;
     this._editError = null;
     this._editLoading = true;
-    this._editSaving = false; // a prior generation's in-flight save is stale
     // Autosave: la nueva apertura arranca limpia — sin cola ni borrador
     // heredado del equipo/contexto anterior.
     if (this._editSaveTimer) {
@@ -2056,7 +2060,6 @@ class BiqOnboardApp extends HTMLElement {
     this._editingTeamId = null;
     this._editModel = null;
     this._editLoading = false;
-    this._editSaving = false;
     this._editSeq += 1; // an in-flight load landing after close is stale
     this._rosterDraft = [];
     this._rosterFocus = false;

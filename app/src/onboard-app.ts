@@ -528,8 +528,29 @@ class BiqOnboardApp extends HTMLElement {
   private _editFlush: Promise<boolean> | null = null;
   private _editSavedChanges = false; // refrescar catálogos al salir, nunca con el editor abierto
   private _pendingRouteValue: string | null = null; // última intención de sub-ruta
-  private _routeFlushBusy = false;
-  private _closingEdit = false;
+  // Ownership de salidas (R2-D3-2): no booleanos globales — cada operación
+  // lleva su propio token. Retirar el editor libera el token del trabajo
+  // viejo para que la nueva operación no espere una petición colgada de la
+  // anterior; el finally tardío solo lo suelta si sigue siendo el suyo.
+  private _routeFlushOp: object | null = null;
+  private _closingEditOp: object | null = null;
+  // Grant de admisión ligado a la salida concreta: la carcasa pasa un token
+  // a requestLeave y lo repite en commitLeave — un commit de una admisión
+  // vieja nunca retira un editor abierto después en el mismo elemento.
+  // `_admittedDraftJson` fija el estado del borrador EN la admisión: un
+  // commit no cierra cambios tecleados tras la preparación — primero se
+  // vacían, y solo se retira si el servidor confirma.
+  private _admittedLeaveGrant: unknown = null;
+  private _admittedDraftJson: string | null = null;
+  private _admittedSeq = 0; // generación admitida — una reapertura la invalida
+  // R2-D3-1: reconciliación de contenido tras 409/resultado incierto.
+  // `_editSentSnapshot` es el payload JSON del último PUT despachado — si
+  // la lectura de reconciliación lo encuentra ya persistido (ACK perdido),
+  // no hay ningún PUT extra por el mismo snapshot. `_editNeedsReconcile`
+  // bloquea todo reenvío automático hasta que la lectura decida.
+  private _editSentSnapshot: string | null = null;
+  private _editNeedsReconcile = false;
+  private _editConflictServer: TeamEditorModel | null = null;
   // Set by the «Plantilla» row action and by «Añadir jugador»: focus lands
   // on the roster editor after the next render, then the flag clears.
   private _rosterFocus = false;
@@ -850,6 +871,16 @@ class BiqOnboardApp extends HTMLElement {
     this._editSaveMessage = null;
     this._editFlush = null;
     this._editSavedChanges = false;
+    // El retiro libera los tokens de las operaciones colgadas del editor
+    // viejo (Volver/flush de ruta que nunca resolvieron) — la siguiente
+    // operación no espera a una petición de un editor muerto.
+    this._routeFlushOp = null;
+    this._closingEditOp = null;
+    this._admittedLeaveGrant = null;
+    this._admittedDraftJson = null;
+    this._editSentSnapshot = null;
+    this._editNeedsReconcile = false;
+    this._editConflictServer = null;
   }
 
   private _teamEditorPort(): TeamEditorPort {
@@ -1145,6 +1176,7 @@ class BiqOnboardApp extends HTMLElement {
       params.set('edit', teamId);
       history.replaceState(null, '', `#/onboard/teams?${params.toString()}`);
       this._subRoute = 'teams';
+      this._reportAppliedRoute();
       this._maybeOpenPendingEdit();
       return;
     }
@@ -1253,8 +1285,12 @@ class BiqOnboardApp extends HTMLElement {
 
   private _applyRouteAfterFlush(value: string): void {
     this._pendingRouteValue = value; // última intención manda
-    if (this._routeFlushBusy) return;
-    this._routeFlushBusy = true;
+    if (this._routeFlushOp) return;
+    // Token de operación, no booleano: el finally solo lo suelta si sigue
+    // siendo el suyo — una liberación tardía de la operación retirada no
+    // puede apagar el busy de la ruta del editor nuevo.
+    const op: object = {};
+    this._routeFlushOp = op;
     const owner = this._editOwnerNow();
     void (async () => {
       try {
@@ -1274,6 +1310,7 @@ class BiqOnboardApp extends HTMLElement {
           }
           this._subRoute = 'teams';
           this.render();
+          this._reportAppliedRoute();
           return;
         }
         if (!this._isEditOwner(owner)) return;
@@ -1282,7 +1319,7 @@ class BiqOnboardApp extends HTMLElement {
         this._pendingRouteValue = null;
         this._applyRoute(pending ?? '');
       } finally {
-        this._routeFlushBusy = false;
+        if (this._routeFlushOp === op) this._routeFlushOp = null;
       }
     })();
   }
@@ -1335,6 +1372,10 @@ class BiqOnboardApp extends HTMLElement {
     if (this._subRoute === 'members' && clubId) {
       this._ensureMembersData(clubId);
     }
+    // La aplicación de la sub-ruta puede haber sido asíncrona (flush previo
+    // en el setter): la confirmación a la carcasa va tras aplicar — nunca
+    // antes; su bookkeeping sigue la ruta realmente vigente.
+    this._reportAppliedRoute();
   }
   get route(): string { return this._subRoute; }
 
@@ -1715,6 +1756,16 @@ class BiqOnboardApp extends HTMLElement {
     this._editFlush = null;
     this._editSavedChanges = false;
     this._pendingRouteValue = null;
+    // La reapertura es una identidad nueva: los tokens de salida, el grant
+    // de admisión y el estado de reconciliación del editor anterior no se
+    // heredan — un commit/flush tardío del viejo no puede cerrar el nuevo.
+    this._routeFlushOp = null;
+    this._closingEditOp = null;
+    this._admittedLeaveGrant = null;
+    this._admittedDraftJson = null;
+    this._editSentSnapshot = null;
+    this._editNeedsReconcile = false;
+    this._editConflictServer = null;
     this._editFence = this._editFenceNow(teamId);
     const seq = ++this._editSeq;
     this.render();
@@ -1823,8 +1874,12 @@ class BiqOnboardApp extends HTMLElement {
     if (!this._editingTeamId || !this._editModel?.permissions.edit) return;
     this._syncEditDraftFromDom();
     this._editDirty = true;
-    this._editSaveStatus = 'pending';
-    this._editSaveMessage = null;
+    // Un conflicto sin decidir no se diluye a «pendiente»: el usuario sigue
+    // viendo la decisión explícita — ningún autosave escribe hasta elegir.
+    if (!this._editConflictServer) {
+      this._editSaveStatus = 'pending';
+      this._editSaveMessage = null;
+    }
     this._updateEditStatusDom();
     if (this._editSaveTimer) clearTimeout(this._editSaveTimer);
     if (accelerated) {
@@ -1859,6 +1914,19 @@ class BiqOnboardApp extends HTMLElement {
     this._editSaveQueued = false;
     const teamId = owner.teamId as string;
     if (!this._editModel) return;
+    // R2-D3-1: tras un 409 o un resultado incierto NINGÚN PUT posterior va a
+    // ciegas — autosave, flush, Volver y reintentos pasan primero por la
+    // lectura de reconciliación (detecta ACK perdido, mezcla cambios
+    // disjuntos o exige decisión explícita de conflicto).
+    if (this._editNeedsReconcile) {
+      const reconciled = await this._reconcileEditor(owner);
+      if (!this._isEditOwner(owner)) return;
+      if (reconciled === 'already-persisted') {
+        this._finishSavedEquivalent();
+        return;
+      }
+      if (reconciled !== 'resolved') return; // conflicto a la vista o fallo de lectura
+    }
     this._syncEditDraftFromDom();
     const draft = this._editDraftPayload();
     if (!draft.ok) {
@@ -1875,6 +1943,7 @@ class BiqOnboardApp extends HTMLElement {
     this._editSaveMessage = null;
     this._updateEditStatusDom();
     const port = this._teamEditorPort();
+    this._editSentSnapshot = sentJson; // payload realmente despachado — clave del detector de ACK perdido
     const res = await port.save(teamId, sent, version);
     if (!this._isEditOwner(owner)) {
       return; // respuesta fuera de orden u otro principal — se descarta
@@ -1903,8 +1972,11 @@ class BiqOnboardApp extends HTMLElement {
       return;
     }
     this._editSaveStatus = res.kind === 'conflict' ? 'conflict' : 'error';
+    // Todo resultado no-confirmado exige reconciliación antes del siguiente
+    // PUT — incluidos autosave, flush y Volver (pasan por la misma cadena).
+    this._editNeedsReconcile = true;
     this._editSaveMessage = res.kind === 'conflict'
-      ? 'El equipo cambió fuera de este editor. Reintenta para cargar la versión actual.'
+      ? 'El equipo cambió fuera de este editor. Reintenta para comparar con la versión actual.'
       : res.kind === 'denied'
         ? 'No tienes permiso para guardar este equipo.'
         : res.kind === 'not-found'
@@ -1914,6 +1986,210 @@ class BiqOnboardApp extends HTMLElement {
           // ciegas; Reintentar primero reconcilia con una lectura.
           : `${res.message} Reintentar comprueba el estado actual antes de reenviar.`;
     this._updateEditStatusDom();
+  }
+
+  // Snapshot canónico {name, competitive_level, players} de un modelo —
+  // la forma exacta que viaja por PUT, para comparar contenido (no el CAS).
+  private _editModelSnapshot(model: TeamEditorModel): string {
+    return JSON.stringify({
+      name: model.name,
+      competitive_level: model.competitive_level,
+      players: model.players.map((p) => ({ name: p.name, number: p.number ?? null })),
+    });
+  }
+
+  // El servidor ya contiene el snapshot cuyo ACK se perdió: adopta el
+  // handle de revisión fresco y repite la lógica de post-guardado (cero
+  // PUT extra por el mismo snapshot; las ediciones posteriores se
+  // procesan aparte, con la revisión nueva).
+  private _finishSavedEquivalent(): void {
+    this._syncEditDraftFromDom();
+    const now = this._editDraftPayload();
+    const nowJson = now.ok
+      ? JSON.stringify({ name: now.name, competitive_level: now.competitive_level, players: now.players })
+      : null;
+    if (nowJson !== null && nowJson === this._editSentSnapshot) {
+      this._editDirty = false;
+      this._editSavedChanges = true; // el servidor ya lo persistió — catálogos pendientes de refresco
+      this._editSaveStatus = 'saved';
+      this._editSaveMessage = null;
+    } else {
+      this._editSaveStatus = 'pending';
+      this._editSaveMessage = now.ok ? null : now.message;
+      this._queueEditorSave();
+    }
+    this._updateEditStatusDom();
+  }
+
+  // Lectura de reconciliación (R2-D3-1). Resultados:
+  //  - 'already-persisted': el servidor YA tiene exactamente el snapshot
+  //    enviado — el ACK se perdió; se adopta la revisión y NO hay PUT.
+  //  - 'resolved': mezcla segura — campos que solo cambiaron en el
+  //    servidor se adoptan (draft+DOM), los campos que editó el usuario
+  //    se conservan; el siguiente PUT va sobre la revisión fresca.
+  //  - 'conflict': el mismo campo divergió en ambos lados — decisión
+  //    explícita con la información del servidor a la vista.
+  //  - 'failed': la lectura no pudo — estado de error con feedback.
+  private async _reconcileEditor(
+    owner: { teamId: string | null; seq: number; fence: string },
+  ): Promise<'already-persisted' | 'resolved' | 'conflict' | 'failed'> {
+    const teamId = owner.teamId as string;
+    // Conflicto ya expuesto y sin decidir: NUNCA se re-analiza contra un
+    // base ya actualizado — con la versión del servidor como nuevo base el
+    // draft del usuario parecería un cambio unilateral y reenviarlo sería
+    // el sobreescribir a ciegas que esta reconciliación existe para evitar.
+    // El estado es pegajoso hasta «Mantener mis cambios» / «Cargar versión
+    // actual» (si el servidor se mueve otra vez, el PUT con la decisión
+    // recibirá un 409 real y reconciliará de nuevo).
+    if (this._editConflictServer) return 'conflict';
+    this._editSaveStatus = 'saving';
+    this._editSaveMessage = null;
+    this._updateEditStatusDom();
+    if (!this._isPersonalContext()) {
+      // El puerto club lee la caché del feed de gestión — una
+      // reconciliación real exige refetch primero (limitación sin CAS
+      // declarada: la comparación es de contenido, no de revisión).
+      const clubId = this._org?.club?.id;
+      if (clubId) await this.loadTeams(clubId);
+      if (!this._isEditOwner(owner)) return 'failed';
+    }
+    const res = await this._teamEditorPort().load(teamId);
+    if (!this._isEditOwner(owner)) return 'failed';
+    if (res.kind !== 'ok') {
+      this._editSaveStatus = 'error';
+      this._editSaveMessage = res.kind === 'denied'
+        ? 'No tienes permiso para editar este equipo.'
+        : res.kind === 'not-found'
+          ? 'El equipo ya no existe.'
+          : res.message;
+      this._updateEditStatusDom();
+      return 'failed';
+    }
+    const server = res.model;
+    const serverSnap = this._editModelSnapshot(server);
+    // ¿El servidor ya persistió justo lo que enviamos? ACK perdido.
+    if (this._editSentSnapshot !== null && serverSnap === this._editSentSnapshot) {
+      this._editModel = server;
+      this._editNeedsReconcile = false;
+      return 'already-persisted';
+    }
+    // Mezcla a tres bandas por campo: base = último snapshot confirmado
+    // por el servidor (el modelo vigente), draft = lo que el usuario ve.
+    const base = this._editModel;
+    const baseSnap = base ? this._editModelSnapshot(base) : null;
+    const baseObj = baseSnap
+      ? (JSON.parse(baseSnap) as { name: string; competitive_level: string; players: { name: string; number: number | null }[] })
+      : null;
+    const serverObj = JSON.parse(serverSnap) as { name: string; competitive_level: string; players: { name: string; number: number | null }[] };
+    this._syncEditDraftFromDom();
+    const draft = this._editDraftPayload();
+    if (!draft.ok) {
+      // Borrador inválido: no hay nada enviable — adopta la revisión
+      // fresca, conserva el DOM del usuario y queda en validación.
+      this._editModel = server;
+      this._editNeedsReconcile = false;
+      this._editSaveStatus = 'pending';
+      this._editSaveMessage = draft.message;
+      this._updateEditStatusDom();
+      return 'resolved';
+    }
+    const draftObj = { name: draft.name, competitive_level: draft.competitive_level, players: draft.players };
+    const fields: Array<{ key: 'name' | 'competitive_level' | 'players'; label: string }> = [
+      { key: 'name', label: 'el nombre' },
+      { key: 'competitive_level', label: 'el nivel' },
+      { key: 'players', label: 'la plantilla' },
+    ];
+    const conflicts: string[] = [];
+    const serverWins: typeof fields[number]['key'][] = [];
+    for (const { key, label } of fields) {
+      const serverChanged = JSON.stringify(serverObj[key]) !== JSON.stringify(baseObj?.[key] ?? null) || baseObj === null;
+      const draftChanged = JSON.stringify(draftObj[key]) !== JSON.stringify(baseObj?.[key] ?? null) || baseObj === null;
+      if (serverChanged && draftChanged && JSON.stringify(serverObj[key]) !== JSON.stringify(draftObj[key])) {
+        conflicts.push(label);
+      } else if (serverChanged && !draftChanged) {
+        serverWins.push(key);
+      }
+    }
+    this._editModel = server; // handle CAS fresco en todos los desenlaces
+    this._editNeedsReconcile = false;
+    if (conflicts.length) {
+      // Decisión explícita — nunca sobreescribir datos ajenos por un
+      // Reintentar genérico: la plantilla del servidor queda descrita.
+      // La bandera se mantiene: ningún autosave/flush posterior escribe a
+      // ciegas mientras el conflicto siga sin decidir — cada pasada
+      // reconcilia de nuevo hasta la elección del usuario.
+      this._editNeedsReconcile = true;
+      this._editConflictServer = server;
+      const rosterSummary = serverObj.players.length
+        ? ` Plantilla actual: ${serverObj.players.map((p) => p.number !== null ? `${p.name} (${p.number})` : p.name).join(', ')}.`
+        : ' Plantilla actual: sin jugadores.';
+      this._editSaveStatus = 'conflict';
+      this._editSaveMessage =
+        `Otro cambio modificó ${conflicts.join(' y ')}.${rosterSummary} ` +
+        'Elige «Mantener mis cambios» o «Cargar versión actual».';
+      this._updateEditStatusDom();
+      return 'conflict';
+    }
+    // Mezcla disjunta: adopta los campos que solo cambió el servidor —
+    // el DOM se actualiza solo en esos campos, nunca el texto del usuario.
+    if (serverWins.includes('name')) {
+      this._editNameDraft = server.name;
+      const input = this.shadow.querySelector('[data-edit-team-name]') as HTMLInputElement | null;
+      if (input) input.value = server.name;
+    }
+    if (serverWins.includes('competitive_level')) {
+      this._editLevelDraft = server.competitive_level;
+      const sel = this.shadow.querySelector('[data-edit-team-level]') as HTMLSelectElement | null;
+      if (sel) sel.value = server.competitive_level;
+    }
+    if (serverWins.includes('players')) {
+      this._rosterDraft = server.players.map((p) => ({
+        name: p.name,
+        number: p.number === null || p.number === undefined ? '' : String(p.number),
+        existing: true,
+      }));
+      this._paintRosterRows();
+    }
+    if (serverWins.length) {
+      this._editSaveMessage = 'Se incorporaron los cambios hechos en otro lugar.';
+    }
+    this._editSaveStatus = 'pending';
+    this._updateEditStatusDom();
+    return 'resolved';
+  }
+
+  // Repinta solo las filas de plantilla tras adoptar el roster del
+  // servidor — sin rebuild del modal (el usuario puede estar tecleando en
+  // otro campo). El freeze impide que el focusout de las filas moribundas
+  // re-siombre el draft durante la demolición.
+  private _paintRosterRows(): void {
+    const modal = this.shadow.querySelector('[data-edit-modal]');
+    const holder = modal?.querySelector('[data-edit-roster-rows]');
+    if (!holder) return;
+    const readOnly = !this._editModel?.permissions.edit;
+    const off = readOnly ? ' disabled' : '';
+    const rowsHtml = this._rosterDraft.map((p, i) => `
+      <div class="onboard-roster-row" data-roster-row>
+        <input type="text" class="onboard-input onboard-input-sm" data-player-name="${i}" placeholder="Nombre y apellidos" aria-label="Nombre y apellidos del jugador" value="${escapeHtml(p.name)}"${off} />
+        <input type="text" class="onboard-input onboard-input-sm onboard-player-num" data-player-number="${i}" placeholder="Nº" aria-label="Dorsal" inputmode="numeric" maxlength="2" value="${escapeHtml(p.number)}"${off} />
+        ${readOnly ? '' : `<button class="onboard-icon-btn onboard-icon-btn-danger" data-remove-player="${i}" type="button" title="Quitar jugador" aria-label="Quitar jugador"${off}>${ICON_TRASH}</button>`}
+      </div>`).join('');
+    this._editDomFreeze = true;
+    try {
+      holder.innerHTML = rowsHtml ||
+        '<p class="onboard-card-desc onboard-roster-empty">Sin jugadores todavía — añade el primero con «Añadir jugador».</p>';
+    } finally {
+      this._editDomFreeze = false;
+    }
+    // Los botones de quitar recién pintados no tienen wiring — reengancha.
+    holder.querySelectorAll('[data-remove-player]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        this._syncEditDraftFromDom();
+        this._rosterDraft.splice(Number((btn as HTMLElement).dataset.removePlayer), 1);
+        this.render();
+        this._scheduleEditorSave(true);
+      });
+    });
   }
 
   // Parcheo en sitio del chip/disclaimer — nunca un re-render (un render
@@ -1934,8 +2210,14 @@ class BiqOnboardApp extends HTMLElement {
     const retry = this.shadow.querySelector('[data-edit-retry]');
     if (retry) {
       retry.toggleAttribute('hidden',
-        !(this._editSaveStatus === 'error' || this._editSaveStatus === 'conflict'));
+        !(this._editSaveStatus === 'error' ||
+          (this._editSaveStatus === 'conflict' && !this._editConflictServer)));
     }
+    const conflictChoice = this._editSaveStatus === 'conflict' && !!this._editConflictServer;
+    const keepMine = this.shadow.querySelector('[data-edit-keep-mine]');
+    if (keepMine) keepMine.toggleAttribute('hidden', !conflictChoice);
+    const loadServer = this.shadow.querySelector('[data-edit-load-server]');
+    if (loadServer) loadServer.toggleAttribute('hidden', !conflictChoice);
   }
 
   // Vacía la cola antes de una transición voluntaria. Devuelve false con
@@ -1981,24 +2263,87 @@ class BiqOnboardApp extends HTMLElement {
   // (una navegación admitida puede morir por obsolescencia después; si
   // requestLeave retirara, un intent viejo destruiría el editor vivo).
   // `false` retiene la transición — el chip muestra el motivo y Reintentar.
-  async requestLeave(): Promise<boolean> {
+  async requestLeave(grant?: unknown): Promise<boolean> {
+    // Cada admisión invalida la anterior: un commit de una intención vieja
+    // no debe encontrar un grant vivo sobre este editor.
+    this._admittedLeaveGrant = null;
+    this._admittedDraftJson = null;
     const owner = this._editOwnerNow();
     if (!owner.teamId) return true;
     if (!this._editModel?.permissions.edit) return true;
     const ok = await this._flushEditorQueue(owner);
     if (!this._isEditOwner(owner)) return false;
-    if (!ok) this._updateEditStatusDom();
-    return ok;
+    if (!ok) {
+      this._updateEditStatusDom();
+      return false;
+    }
+    // El grant queda ligado a ESTA admisión concreta — commitLeave solo
+    // retira si la carcasa repite el mismo token. La huella del borrador
+    // se fija aquí: cambios tecleados tras la preparación no se descartan
+    // en el commit — se vacían primero.
+    this._admittedLeaveGrant = grant ?? null;
+    this._admittedSeq = this._editSeq;
+    this._syncEditDraftFromDom();
+    const admittedDraft = this._editDraftPayload();
+    this._admittedDraftJson = admittedDraft.ok
+      ? JSON.stringify({
+          name: admittedDraft.name,
+          competitive_level: admittedDraft.competitive_level,
+          players: admittedDraft.players,
+        })
+      : null;
+    return true;
   }
 
   // Contrato de carcasa, fase COMMIT: la transición admitida se aplicó —
-  // el editor se retira. La carcasa solo lo llama tras aplicar la ruta o
-  // la activación; si la transición muere por obsolescencia nunca llega y
-  // el editor queda abierto con su trabajo ya persistido.
-  commitLeave(): void {
+  // el editor se retira. `grant` debe ser el token exacto de la admisión:
+  // si el elemento persistió a través de una reapertura, un commit tardío
+  // de la admisión vieja no puede cerrar el editor nuevo. Si se tecleó
+  // después de preparar la salida, esos cambios no se descartan: un último
+  // flush y solo retira si el servidor confirma (si falla, el editor
+  // queda con su chip visible para reintentar).
+  commitLeave(grant?: unknown): void {
     if (!this._editingTeamId) return;
-    this._retireEditor();
-    this.render();
+    // La admisión con grant solo la consume el mismo token; una admisión
+    // sin grant (caller legado) solo la consume un commit sin grant — y
+    // en ambos casos exige la misma generación de editor admitida.
+    if (this._admittedSeq !== this._editSeq) return;
+    if (this._admittedLeaveGrant !== null
+      ? grant !== this._admittedLeaveGrant
+      : grant !== undefined) return;
+    const owner = this._editOwnerNow();
+    const admittedJson = this._admittedDraftJson;
+    this._admittedLeaveGrant = null;
+    this._admittedDraftJson = null;
+    this._syncEditDraftFromDom();
+    const draft = this._editDraftPayload();
+    const nowJson = draft.ok
+      ? JSON.stringify({ name: draft.name, competitive_level: draft.competitive_level, players: draft.players })
+      : null;
+    if (nowJson === admittedJson) {
+      this._retireEditor();
+      this.render();
+      return;
+    }
+    void this._flushEditorQueue(owner).then((ok) => {
+      if (ok && this._isEditOwner(owner)) {
+        this._retireEditor();
+        this.render();
+      }
+    });
+  }
+
+  // La ruta interna la aplica el módulo de forma asíncrona (puede retener
+  // tras un flush): la carcasa no debe adelantar su bookkeeping — confirma
+  // la ruta realmente aplicada/denegada con este evento.
+  private _reportAppliedRoute(): void {
+    try {
+      this.dispatchEvent(new CustomEvent('biq-module:route-applied', {
+        bubbles: true,
+        composed: true,
+        detail: { hash: window.location.hash || '' },
+      }));
+    } catch { /* sin carcasa escuchando — standalone */ }
   }
 
   // Salida voluntaria del editor (Volver / flecha de sección): vacía la
@@ -2006,8 +2351,12 @@ class BiqOnboardApp extends HTMLElement {
   // misma propiedad de dueño: una continuación vieja no cierra el editor
   // que se abrió después.
   private async _requestEditorClose(): Promise<void> {
-    if (this._closingEdit) return;
-    this._closingEdit = true;
+    // Token por operación (R2-D3-2): retirar el editor libera el token del
+    // cierre viejo — un «Volver» del editor nuevo nunca espera una petición
+    // colgada del retirado; el finally solo suelta el token que lo creó.
+    if (this._closingEditOp) return;
+    const op: object = {};
+    this._closingEditOp = op;
     try {
       const owner = this._editOwnerNow();
       const writable = !!this._editModel?.permissions.edit;
@@ -2045,35 +2394,20 @@ class BiqOnboardApp extends HTMLElement {
         }
       }
     } finally {
-      this._closingEdit = false;
+      if (this._closingEditOp === op) this._closingEditOp = null;
     }
   }
 
-  // Reintentar informado (409 o resultado incierto): lectura de
-  // reconciliación — el CAS sube a la revisión del servidor — y luego se
-  // reenvía el borrador vigente del usuario. El DOM nunca se reescribe:
-  // el usuario conserva sus cambios; solo el handle de versión avanza.
-  private async _reloadEditorForRetry(): Promise<void> {
-    const owner = this._editOwnerNow();
-    const teamId = owner.teamId;
-    if (!teamId) return;
+  // Reintentar informado: pasa por la cadena serial, donde la bandera de
+  // reconciliación fuerza la lectura-comparación antes de cualquier PUT —
+  // detecta ACK perdido (cero reenvío), mezcla cambios disjuntos y exige
+  // decisión explícita cuando el mismo campo divergió en ambos lados.
+  // El DOM del usuario nunca se reescribe salvo campos que solo cambió el
+  // servidor.
+  private _reloadEditorForRetry(): void {
+    if (!this._editingTeamId) return;
     this._editSaveStatus = 'saving';
-    this._updateEditStatusDom();
-    const res = await this._teamEditorPort().load(teamId);
-    if (!this._isEditOwner(owner)) return;
-    if (res.kind !== 'ok') {
-      this._editSaveStatus = 'error';
-      this._editSaveMessage = res.kind === 'denied'
-        ? 'No tienes permiso para editar este equipo.'
-        : res.kind === 'not-found'
-          ? 'El equipo ya no existe.'
-          : res.message;
-      this._updateEditStatusDom();
-      return;
-    }
-    this._editModel = res.model; // nueva revisión CAS; el DOM conserva el borrador
-    this._editDirty = true;
-    this._editSaveStatus = 'pending';
+    this._editSaveMessage = null;
     this._updateEditStatusDom();
     this._queueEditorSave();
   }
@@ -2136,6 +2470,11 @@ class BiqOnboardApp extends HTMLElement {
     this._editFlush = null;
     this._editSavedChanges = false;
     this._pendingRouteValue = null;
+    this._admittedLeaveGrant = null;
+    this._admittedDraftJson = null;
+    this._editSentSnapshot = null;
+    this._editNeedsReconcile = false;
+    this._editConflictServer = null;
     this.render();
     // The ?edit=<id> intent is consumed once — drop it from the hash so a
     // refresh or back-forward doesn't reopen the modal (replaceState, no
@@ -2148,6 +2487,7 @@ class BiqOnboardApp extends HTMLElement {
         params.delete('edit');
         const query = params.toString();
         history.replaceState(null, '', `${hash.slice(0, qIdx)}${query ? `?${query}` : ''}`);
+        this._reportAppliedRoute();
       }
     }
   }
@@ -2308,6 +2648,7 @@ class BiqOnboardApp extends HTMLElement {
     this.render();
     if ((window.location.hash || '') !== '#/onboard') {
       history.replaceState(null, '', '#/onboard');
+      this._reportAppliedRoute();
     }
   }
 
@@ -4290,13 +4631,17 @@ class BiqOnboardApp extends HTMLElement {
             <h4 class="onboard-roster-title">Plantilla</h4>
             ${readOnly ? '' : `<button class="onboard-linkbtn" data-add-player type="button"${off}>+ Añadir jugador</button>`}
           </div>
-          ${rosterRows || '<p class="onboard-card-desc onboard-roster-empty">Sin jugadores todavía — añade el primero con «Añadir jugador».</p>'}
+          <div class="onboard-roster-rows" data-edit-roster-rows>
+            ${rosterRows || '<p class="onboard-card-desc onboard-roster-empty">Sin jugadores todavía — añade el primero con «Añadir jugador».</p>'}
+          </div>
         </div>
         ${this._editError ? `<div class="onboard-error onboard-modal-error" role="alert">${escapeHtml(this._editError)}</div>` : ''}
         ${readOnly ? '' : `<div class="onboard-save-state">
           <span class="onboard-save-chip is-${this._editSaveStatus}" data-edit-save-status role="status" aria-live="polite" tabindex="-1"${this._editSaveStatus === 'idle' ? ' hidden' : ''}>${this._editSaveStatusLabel()}</span>
           <span class="onboard-save-detail" data-edit-save-detail role="alert"${this._editSaveMessage ? '' : ' hidden'}>${escapeHtml(this._editSaveMessage || '')}</span>
-          <button class="onboard-btn onboard-btn-sm" data-edit-retry type="button"${this._editSaveStatus === 'error' || this._editSaveStatus === 'conflict' ? '' : ' hidden'}>Reintentar</button>
+          <button class="onboard-btn onboard-btn-sm" data-edit-retry type="button"${this._editSaveStatus === 'error' || (this._editSaveStatus === 'conflict' && !this._editConflictServer) ? '' : ' hidden'}>Reintentar</button>
+          <button class="onboard-btn onboard-btn-sm" data-edit-keep-mine type="button"${this._editSaveStatus === 'conflict' && this._editConflictServer ? '' : ' hidden'}>Mantener mis cambios</button>
+          <button class="onboard-btn onboard-btn-sm onboard-btn-quiet" data-edit-load-server type="button"${this._editSaveStatus === 'conflict' && this._editConflictServer ? '' : ' hidden'}>Cargar versión actual</button>
         </div>`}
         <div class="onboard-team-actions">
           <button class="onboard-btn onboard-btn-secondary" data-cancel-edit type="button">Volver</button>
@@ -4760,6 +5105,45 @@ class BiqOnboardApp extends HTMLElement {
       ) {
         void this._reloadEditorForRetry();
       }
+    });
+
+    // Decisión explícita de conflicto (R2-D3-1): «Mantener mis cambios»
+    // adopta el handle de revisión del servidor y reenvía el borrador del
+    // usuario; «Cargar versión actual» descarta el borrador y adopta la
+    // versión del servidor (DOM incluido). Ninguna es un reenvío a ciegas.
+    this.shadow.querySelector('[data-edit-keep-mine]')?.addEventListener('click', () => {
+      // La decisión queda anclada a `_editConflictServer` (pegajosa) — el
+      // chip puede haber seguido mostrando «conflicto» incluso si el
+      // usuario tecleó después del diagnóstico.
+      if (!this._editConflictServer) return;
+      this._editModel = this._editConflictServer;
+      this._editConflictServer = null;
+      this._editNeedsReconcile = false;
+      this._editDirty = true;
+      this._editSaveStatus = 'pending';
+      this._editSaveMessage = null;
+      this._updateEditStatusDom();
+      this._queueEditorSave();
+    });
+    this.shadow.querySelector('[data-edit-load-server]')?.addEventListener('click', () => {
+      if (!this._editConflictServer) return;
+      const server = this._editConflictServer;
+      this._editModel = server;
+      this._editConflictServer = null;
+      this._editNeedsReconcile = false;
+      this._editNameDraft = server.name;
+      this._editLevelDraft = server.competitive_level;
+      this._rosterDraft = server.players.map((p) => ({
+        name: p.name,
+        number: p.number === null || p.number === undefined ? '' : String(p.number),
+        existing: true,
+      }));
+      this._editDirty = false;
+      this._editSaveStatus = 'saved';
+      this._editSaveMessage = 'Se cargó la versión actual del equipo.';
+      // Render completo: la elección es explícita — el borrador descartado
+      // desaparece de todos los campos, no solo del modelo.
+      this.render();
     });
 
     // Roster editor — add/remove re-render from the draft, so the DOM is

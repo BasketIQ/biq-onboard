@@ -1164,3 +1164,37 @@ test('OB60-3: disconnect mid-flight aborts — late body cannot resurrect the fe
     await browser.close();
   }
 });
+
+test('entry head carries a right-aligned Salir that posts logout and redirects to /login', async () => {
+  const browser = await chromium.launch();
+  try {
+    const { page, log } = await newEntryPage(browser);
+    const head = await page.evaluate(() => {
+      const el = document.getElementById('app');
+      const headEl = el.shadowRoot.querySelector('.entry-head');
+      const title = headEl?.querySelector('.entry-title')?.textContent.trim();
+      const btn = headEl?.querySelector('[data-entry-logout]');
+      const style = headEl ? getComputedStyle(headEl) : null;
+      return {
+        title,
+        btnText: btn?.textContent.trim(),
+        justify: style?.justifyContent,
+      };
+    });
+    assert.equal(head.title, 'Elige tu perfil');
+    assert.equal(head.btnText, 'Salir');
+    assert.equal(head.justify, 'space-between', 'Salir stays right-aligned to the title');
+
+    await page.evaluate(() => {
+      document.getElementById('app').shadowRoot.querySelector('[data-entry-logout]').click();
+    });
+    await page.waitForURL('**/login', { timeout: 10000 });
+    assert.ok(
+      log.some((r) => r.method === 'POST' && r.url.includes('/api/auth/logout')),
+      'Salir must close the session server-side',
+    );
+    await page.close();
+  } finally {
+    await browser.close();
+  }
+});

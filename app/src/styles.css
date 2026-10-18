@@ -1239,7 +1239,9 @@
 
 /* ─── Working-context entry selector (BIQ-PERSONAL-CLUB-CONTEXT) ─────── */
 .entry-step { display: flex; flex-direction: column; gap: 12px; }
+.entry-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .entry-title { font-size: 1.25rem; font-weight: 700; margin: 0; }
+.entry-logout { flex-shrink: 0; }
 .entry-h { font-size: 0.95rem; font-weight: 600; margin: 12px 0 6px; }
 .entry-empty { color: var(--biq-muted); font-size: 0.9rem; margin: 12px 0; text-align: center; }
 .entry-p, .entry-note { color: var(--biq-muted, #666); font-size: 0.9rem; margin: 4px 0; }

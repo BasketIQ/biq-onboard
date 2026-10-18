@@ -2047,7 +2047,16 @@ class BiqOnboardApp extends HTMLElement {
     // El estado es pegajoso hasta «Mantener mis cambios» / «Cargar versión
     // actual» (si el servidor se mueve otra vez, el PUT con la decisión
     // recibirá un 409 real y reconciliará de nuevo).
-    if (this._editConflictServer) return 'conflict';
+    if (this._editConflictServer) {
+      // El conflicto está expuesto y sin decidir: restituye estado y
+      // controles — Volver/requestLeave/commitLeave ponen 'saving' antes
+      // del flush y _updateEditStatusDom oculta ambas decisiones; sin el
+      // restablecimiento el editor queda retenido en Guardando sin poder
+      // elegir (R3-D3-3). Cero PUT hasta la elección explícita.
+      this._editSaveStatus = 'conflict';
+      this._updateEditStatusDom();
+      return 'conflict';
+    }
     this._editSaveStatus = 'saving';
     this._editSaveMessage = null;
     this._updateEditStatusDom();
@@ -2090,14 +2099,19 @@ class BiqOnboardApp extends HTMLElement {
     this._syncEditDraftFromDom();
     const draft = this._editDraftPayload();
     if (!draft.ok) {
-      // Borrador inválido: no hay nada enviable — adopta la revisión
-      // fresca, conserva el DOM del usuario y queda en validación.
-      this._editModel = server;
-      this._editNeedsReconcile = false;
+      // Borrador inválido: no hay nada enviable AHORA, pero la base
+      // confirmada se conserva (_editModel NO se mueve al servidor) y la
+      // obligación de reconciliar sigue puesta. Adoptar `server` aquí
+      // convertiría el draft del usuario en cambio unilateral sobre la
+      // revisión nueva — al reparar el campo, el autosave reenviaría el
+      // DOM viejo sin comparación ni decisión y borraría datos ajenos
+      // (R3-D3-1). La próxima pasada — tras corregir la validación —
+      // relee el servidor y hace la mezcla a tres bandas antes de
+      // cualquier PUT.
       this._editSaveStatus = 'pending';
       this._editSaveMessage = draft.message;
       this._updateEditStatusDom();
-      return 'resolved';
+      return 'failed';
     }
     const draftObj = { name: draft.name, competitive_level: draft.competitive_level, players: draft.players };
     const fields: Array<{ key: 'name' | 'competitive_level' | 'players'; label: string }> = [
@@ -2306,17 +2320,22 @@ class BiqOnboardApp extends HTMLElement {
   // si el elemento persistió a través de una reapertura, un commit tardío
   // de la admisión vieja no puede cerrar el editor nuevo. Si se tecleó
   // después de preparar la salida, esos cambios no se descartan: un último
-  // flush y solo retira si el servidor confirma (si falla, el editor
-  // queda con su chip visible para reintentar).
-  commitLeave(grant?: unknown): void {
-    if (!this._editingTeamId) return;
+  // flush y solo retira si el servidor confirma.
+  // R3-D3-2: la fase es ESPERABLE — resuelve true solo cuando el editor
+  // quedó retirado (o no había nada que retirar); false retiene la
+  // transición (grant obsoleto, flush colgado/fallido/inválido, conflicto
+  // sin decidir) y el editor conserva su estado con sus controles. La
+  // carcasa revalida su intención tras el await — si el dueño se movió
+  // durante el flush el commit no retira el editor nuevo.
+  commitLeave(grant?: unknown): Promise<boolean> {
+    if (!this._editingTeamId) return Promise.resolve(true);
     // La admisión con grant solo la consume el mismo token; una admisión
     // sin grant (caller legado) solo la consume un commit sin grant — y
     // en ambos casos exige la misma generación de editor admitida.
-    if (this._admittedSeq !== this._editSeq) return;
+    if (this._admittedSeq !== this._editSeq) return Promise.resolve(false);
     if (this._admittedLeaveGrant !== null
       ? grant !== this._admittedLeaveGrant
-      : grant !== undefined) return;
+      : grant !== undefined) return Promise.resolve(false);
     const owner = this._editOwnerNow();
     const admittedJson = this._admittedDraftJson;
     this._admittedLeaveGrant = null;
@@ -2329,13 +2348,19 @@ class BiqOnboardApp extends HTMLElement {
     if (nowJson === admittedJson) {
       this._retireEditor();
       this.render();
-      return;
+      return Promise.resolve(true);
     }
-    void this._flushEditorQueue(owner).then((ok) => {
+    return this._flushEditorQueue(owner).then((ok) => {
       if (ok && this._isEditOwner(owner)) {
         this._retireEditor();
         this.render();
+        return true;
       }
+      // Retenido: el editor conserva su feedback (conflicto restablecido,
+      // error con Reintentar, validación pendiente) — la carcasa no
+      // desmonta ni muta la autoridad sobre un commit no confirmado.
+      this._updateEditStatusDom();
+      return false;
     });
   }
 

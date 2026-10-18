@@ -408,6 +408,12 @@ class BiqOnboardApp extends HTMLElement {
   private shadow: ShadowRoot;
   private _org: OrgContext | null = null;
   private _user: string | null = null;
+  // Declaraciones de hospedaje inyectadas por la carcasa (assign-only —
+  // `declare` para no emitir un campo que pise lo inyectado):
+  // shellHosted=true declara el hosting; requestLogout es el puente al
+  // cierre de sesión canónico del shell (opcional en documentos viejos).
+  declare shellHosted: boolean;
+  declare requestLogout?: () => Promise<void> | void;
   // Working-context entry state (BIQ-PERSONAL-CLUB-CONTEXT)
   private _context: ContextDescriptor | null = null;
   private _bootstrap: BootstrapPayload | null = null;
@@ -2942,13 +2948,30 @@ class BiqOnboardApp extends HTMLElement {
     }
   }
 
-  // «Salir» en el paso de entrada: aquí no hay contexto activo ni módulos
-  // ligados a scope que vaciar — el cierre es POST /api/auth/logout +
-  // claves de sesión del equipo activo + /login, la misma semántica del
-  // logout del shell (la navegación descarta el shell embebido entero).
+  // «Salir» en el paso de entrada: hospedado, el cierre lo posee la
+  // carcasa — la capacidad requestLogout activa la valla sessionClosing
+  // síncronamente y ejecuta teardown/POST/limpieza/navegación canónicos.
+  // Sin capacidad (documento viejo) se falla CERRADO con feedback
+  // acotado — nunca un bypass local. Solo en standalone real (sin
+  // carcasa) el módulo cierra por su cuenta.
   private async _entryLogout(): Promise<void> {
     this._entryBusy = true;
     this.render();
+    if (this.shellHosted) {
+      if (typeof this.requestLogout !== 'function') {
+        this._entryLogoutFailed();
+        return;
+      }
+      try {
+        const result = this.requestLogout();
+        if (result && typeof result.catch === 'function') {
+          result.catch(() => this._entryLogoutFailed());
+        }
+      } catch {
+        this._entryLogoutFailed();
+      }
+      return; // la carcasa desmonta — no se repinta ni hay POST local
+    }
     try {
       await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' });
     } catch { /* red no disponible: redirigimos igualmente */ }
@@ -2961,6 +2984,13 @@ class BiqOnboardApp extends HTMLElement {
       keys.forEach((key) => sessionStorage.removeItem(key));
     } catch { /* storage no disponible */ }
     location.replace('/login');
+  }
+
+  private _entryLogoutFailed(): void {
+    if (!this.isConnected) return; // la carcasa ya desmontó el módulo
+    this._entryBusy = false;
+    this._entryError = 'No se pudo cerrar la sesión. Reintenta o recarga la página.';
+    this.render();
   }
 
   private wireEntryEvents(): void {

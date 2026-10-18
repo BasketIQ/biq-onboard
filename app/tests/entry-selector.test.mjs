@@ -1165,7 +1165,7 @@ test('OB60-3: disconnect mid-flight aborts — late body cannot resurrect the fe
   }
 });
 
-test('entry head carries a right-aligned Salir that posts logout and redirects to /login', async () => {
+test('entry head carries a right-aligned Salir — standalone posts logout and redirects to /login', async () => {
   const browser = await chromium.launch();
   try {
     const { page, log } = await newEntryPage(browser);
@@ -1193,6 +1193,60 @@ test('entry head carries a right-aligned Salir that posts logout and redirects t
       log.some((r) => r.method === 'POST' && r.url.includes('/api/auth/logout')),
       'Salir must close the session server-side',
     );
+    await page.close();
+  } finally {
+    await browser.close();
+  }
+});
+
+test('hosted Salir delegates to requestLogout once — never a local POST/redirect (F1)', async () => {
+  const browser = await chromium.launch();
+  try {
+    const { page, log } = await newEntryPage(browser);
+    await page.evaluate(() => {
+      const el = document.getElementById('app');
+      el.shellHosted = true;
+      window.__logoutCalls = 0;
+      el.requestLogout = () => { window.__logoutCalls += 1; return Promise.resolve(); };
+    });
+    await page.evaluate(() => {
+      document.getElementById('app').shadowRoot.querySelector('[data-entry-logout]').click();
+    });
+    await page.waitForTimeout(400);
+    const calls = await page.evaluate(() => window.__logoutCalls);
+    assert.equal(calls, 1, 'the hosted capability is invoked exactly once');
+    assert.equal(
+      log.filter((r) => r.url.includes('/api/auth/logout')).length, 0,
+      'hosted Salir never emits a module-side logout POST',
+    );
+    assert.ok(!page.url().endsWith('/login'), 'no local redirect — the host owns navigation');
+    await page.close();
+  } finally {
+    await browser.close();
+  }
+});
+
+test('hosted Salir without the capability fails closed — feedback, no POST, no redirect', async () => {
+  const browser = await chromium.launch();
+  try {
+    const { page, log } = await newEntryPage(browser);
+    await page.evaluate(() => {
+      const el = document.getElementById('app');
+      el.shellHosted = true; // hosted document lacks requestLogout
+    });
+    await page.evaluate(() => {
+      document.getElementById('app').shadowRoot.querySelector('[data-entry-logout]').click();
+    });
+    await page.waitForFunction(() => {
+      const el = document.getElementById('app');
+      const err = el.shadowRoot.querySelector('.entry-error');
+      return !!(err && /cerrar la sesión/i.test(err.textContent));
+    }, { timeout: 10000 });
+    assert.equal(
+      log.filter((r) => r.url.includes('/api/auth/logout')).length, 0,
+      'hosted without capability never falls back to the local bypass',
+    );
+    assert.ok(!page.url().endsWith('/login'));
     await page.close();
   } finally {
     await browser.close();

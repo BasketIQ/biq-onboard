@@ -227,6 +227,9 @@ class TestRedeem:
         membership = org.get_registry().get_user(d["membership_subject_id"])
         assert membership is not None
         assert membership.club_id == "c1"
+        # La casilla verificada queda persistida — Miembros la muestra como
+        # identidad de fila (nunca el id f1f2m_* ni un vacío).
+        assert membership.email == _RECIPIENT
         # Single-use: replay is 409.
         replay = client.post(
             "/api/ops/invitations/redeem",

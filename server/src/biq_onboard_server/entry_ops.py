@@ -235,7 +235,10 @@ async def invitation_redeem(request: Request) -> dict:
             member = User(
                 id=membership_id,
                 club_id=inv.club_id,
-                email="",
+                # La casilla verificada de la invitación es la identidad de
+                # contacto del nuevo miembro — escribirla aquí evita filas
+                # «Email no disponible» en Miembros para altas por invitación.
+                email=recipient,
                 display_name="",
                 role=roles[0],
                 status="active",

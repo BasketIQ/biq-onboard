@@ -177,6 +177,22 @@ async function newPersonalPage(browser, { routeQuery = null, rosterStatus = 200,
 
 const sr = () => document.getElementById('app').shadowRoot;
 
+// Autosave helpers (UX v2): edición real = value + input event; el debounce
+// (~600ms) encola el PUT. `saveSettles` espera a que la petición aterrice.
+const typeIn = (el, value) => {
+  el.value = value;
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+};
+async function waitForPuts(log, n, timeout = 8000) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < timeout) {
+    const puts = log.filter((e) => e.method === 'PUT' && e.url.includes('/roster'));
+    if (puts.length >= n) return puts;
+    await new Promise((r) => setTimeout(r, 60));
+  }
+  return log.filter((e) => e.method === 'PUT' && e.url.includes('/roster'));
+}
+
 test.before(async () => { await startServer(); });
 test.after(async () => { await stopServer(); });
 
@@ -209,42 +225,79 @@ test('personal teams?edit opens the SHARED editor via the roster API', async () 
   }
 });
 
-test('save sends expected_revision + full replace roster to the roster API', async () => {
+test('autosave sends expected_revision + full replace roster to the roster API', async () => {
   const browser = await chromium.launch();
   try {
     const { page, log } = await newPersonalPage(browser, { routeQuery: 'teams?edit=pt-1' });
     await page.waitForFunction(() =>
       !!document.getElementById('app').shadowRoot.querySelector('[data-player-name="0"]'),
     { timeout: 10000 });
+    // No Guardar/Cancelar — autosave chip present instead.
+    const controls = await page.evaluate(() => {
+      const m = document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]');
+      return {
+        save: !!m.querySelector('[data-save-team]'),
+        chip: !!m.querySelector('[data-edit-save-status]'),
+        back: m.querySelector('[data-cancel-edit]')?.textContent.trim(),
+      };
+    });
+    assert.equal(controls.save, false, 'no Guardar control under autosave');
+    assert.equal(controls.chip, true, 'discrete save-state chip present');
+    assert.equal(controls.back, 'Volver');
     // Draft survives add-row re-render (shared draft capture path).
     await page.evaluate(() => {
       const m = document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]');
-      m.querySelector('[data-player-name="0"]').value = 'Ana Sol Editada';
+      const p = m.querySelector('[data-player-name="0"]');
+      p.value = 'Ana Sol Editada';
+      p.dispatchEvent(new Event('input', { bubbles: true }));
       m.querySelector('[data-add-player]').click();
     });
     await page.waitForFunction(() =>
       !!document.getElementById('app').shadowRoot.querySelector('[data-player-name="1"]'),
     { timeout: 10000 });
+    // A queued debounce may already be in flight from the first edit —
+    // the second edit coalesces into the serial chain, never duplicates.
     await page.evaluate(() => {
       const m = document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]');
-      // Row added BEFORE its input renders — draft kept the edited name.
-      m.querySelector('[data-player-name="1"]').value = 'Bert Luz';
-      m.querySelector('[data-player-number="1"]').value = '12';
-      m.querySelector('[data-save-team]').click();
+      const n = m.querySelector('[data-player-name="1"]');
+      const d = m.querySelector('[data-player-number="1"]');
+      n.value = 'Bert Luz';
+      n.dispatchEvent(new Event('input', { bubbles: true }));
+      d.value = '12';
+      d.dispatchEvent(new Event('input', { bubbles: true }));
     });
-    await page.waitForFunction(() =>
-      !document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]'),
-    { timeout: 10000 });
-    const puts = log.filter((e) => e.method === 'PUT' && e.url.includes('/roster'));
-    assert.equal(puts.length, 1, 'exactly one roster PUT');
-    const body = JSON.parse(puts[0].postData);
-    assert.equal(body.expected_revision, 1, 'CAS handle travels as expected_revision');
+    // The serial queue converges: the LAST PUT carries the complete draft.
+    const t0 = Date.now();
+    let puts = [];
+    let body = null;
+    while (Date.now() - t0 < 10000) {
+      puts = log.filter((e) => e.method === 'PUT' && e.url.includes('/roster'));
+      body = puts.length ? JSON.parse(puts[puts.length - 1].postData) : null;
+      if (
+        body && body.players?.length === 2 &&
+        body.players[0].name === 'Ana Sol Editada' &&
+        body.players[1].name === 'Bert Luz'
+      ) break;
+      await page.waitForTimeout(80);
+    }
+    assert.ok(body, 'autosave PUT landed');
+    // CAS progression is serial: every PUT carries revision+1 over the last.
+    const revs = puts.map((p) => JSON.parse(p.postData).expected_revision);
+    assert.deepEqual(revs, revs.map((_, i) => revs[0] + i),
+      'CAS handle travels as expected_revision and advances serially');
     assert.equal(body.competitive_level, 'regional');
     assert.deepEqual(body.players, [
       { name: 'Ana Sol Editada', number: 7 },
       { name: 'Bert Luz', number: 12 },
     ]);
-    // After save the host is the personal panel — not a settings form.
+    // The chip settles on Guardado — the editor stays open (autosave).
+    await page.waitForFunction(() =>
+      document.getElementById('app').shadowRoot
+        .querySelector('[data-edit-save-status]')?.classList.contains('is-saved'),
+    { timeout: 10000 });
+    // Volver vacía la cola y cierra — host = personal panel after.
+    await page.evaluate(() =>
+      document.getElementById('app').shadowRoot.querySelector('[data-cancel-edit]')?.click());
     await page.waitForFunction(() =>
       !!document.getElementById('app').shadowRoot.querySelector('.entry-teams'),
     { timeout: 10000 });
@@ -271,14 +324,24 @@ test('legacy spaces?edit forwards to the canonical shared editor route', async (
 test('reopen reads the freshly saved roster — no cached players', async () => {
   const browser = await chromium.launch();
   try {
-    const { page } = await newPersonalPage(browser, { routeQuery: 'teams?edit=pt-1' });
+    const { page, log } = await newPersonalPage(browser, { routeQuery: 'teams?edit=pt-1' });
     await page.waitForFunction(() =>
       !!document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]'),
     { timeout: 10000 });
+    // Edit → autosave persists; Volver closes only after the queue drains.
     await page.evaluate(() => {
       const m = document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]');
-      m.querySelector('[data-save-team]').click();
+      const p = m.querySelector('[data-player-name="0"]');
+      p.value = 'Ana Sol Editada';
+      p.dispatchEvent(new Event('input', { bubbles: true }));
     });
+    await waitForPuts(log, 1);
+    await page.waitForFunction(() =>
+      document.getElementById('app').shadowRoot
+        .querySelector('[data-edit-save-status]')?.classList.contains('is-saved'),
+    { timeout: 10000 });
+    await page.evaluate(() =>
+      document.getElementById('app').shadowRoot.querySelector('[data-cancel-edit]')?.click());
     await page.waitForFunction(() =>
       !document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]'),
     { timeout: 10000 });
@@ -293,11 +356,14 @@ test('reopen reads the freshly saved roster — no cached players', async () => 
     await page.waitForFunction(() =>
       !!document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]'),
     { timeout: 10000 });
-    const rev = await page.evaluate(() =>
-      document.getElementById('app').shadowRoot
+    const view = await page.evaluate(() => ({
+      name: document.getElementById('app').shadowRoot
         .querySelector('[data-edit-team-name]').value,
-    );
-    assert.equal(rev, 'Paquetillos 1');
+      player: document.getElementById('app').shadowRoot
+        .querySelector('[data-player-name="0"]')?.value,
+    }));
+    assert.equal(view.name, 'Paquetillos 1');
+    assert.equal(view.player, 'Ana Sol Editada', 'reopen serves the autosaved roster');
   } finally {
     await browser.close();
   }
@@ -349,120 +415,150 @@ test('a denied roster load fails closed — no empty draft opens', async () => {
   }
 });
 
-test('a 409 keeps the draft and shows the conflict inside the modal', async () => {
+test('a 409 keeps the draft, shows the conflict chip, and Reintentar recovers', async () => {
   const browser = await chromium.launch();
   try {
-    const { page, log } = await newPersonalPage(browser, { routeQuery: 'teams?edit=pt-1' });
+    const { page } = await newPersonalPage(browser, { routeQuery: 'teams?edit=pt-1' });
     await page.waitForFunction(() =>
       !!document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]'),
     { timeout: 10000 });
-    // Server says the revision moved — next save conflicts. Count PUTs
-    // locally: this override consumes them (they never reach `log`).
+    // Server says the revision moved — the first save conflicts; reloads
+    // serve revision 2 and later PUTs commit it.
     let puts = 0;
     await page.route('**/api/context/v1/personal-teams/*/roster', async (route) => {
       if (route.request().method() === 'PUT') {
         puts += 1;
-        await route.fulfill({ status: 409, contentType: 'application/json', body: '{"detail":"stale team revision"}' });
-        return;
+        if (puts === 1) {
+          await route.fulfill({ status: 409, contentType: 'application/json', body: '{"detail":"stale team revision"}' });
+          return;
+        }
+        const body = JSON.parse(route.request().postData() || '{}');
+        ROSTER = {
+          name: body.name, competitive_level: body.competitive_level,
+          players: body.players, team_revision: ROSTER.team_revision + 1,
+        };
       }
       await route.fulfill({
         status: 200, contentType: 'application/json',
-        body: JSON.stringify({
-          schema_version: '1.0', context_id: 'ctx-personal-1', context_epoch: 3,
-          owner_scope: PERSONAL_CONTEXT.owner_scope,
-          team: { id: 'pt-1', name: 'Paquetillos 1', competitive_level: 'regional', players: [], team_revision: 2 },
-        }),
+        body: JSON.stringify(rosterPayload()),
       });
     });
     await page.evaluate(() => {
       const m = document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]');
-      m.querySelector('[data-edit-team-name]').value = 'Nombre Nuevo';
-      m.querySelector('[data-save-team]').click();
+      const n = m.querySelector('[data-edit-team-name]');
+      n.value = 'Nombre Nuevo';
+      n.dispatchEvent(new Event('input', { bubbles: true }));
     });
+    // Conflict state: chip + Reintentar visible, draft preserved, no retry.
     await page.waitForFunction(() => {
       const m = document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]');
-      return m && m.querySelector('.onboard-modal-error');
+      return m && m.querySelector('[data-edit-save-status]')?.classList.contains('is-conflict');
     }, { timeout: 10000 });
     const state = await page.evaluate(() => {
       const m = document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]');
       return {
-        error: m.querySelector('.onboard-modal-error').textContent,
+        chip: m.querySelector('[data-edit-save-status]').textContent.trim(),
+        detail: m.querySelector('[data-edit-save-detail]').textContent.trim(),
+        retry: !m.querySelector('[data-edit-retry]').hidden,
         draft: m.querySelector('[data-edit-team-name]').value,
       };
     });
-    assert.match(state.error, /cambi[oó]|revisi[oó]n|conflict/i);
+    assert.match(state.chip, /cambi[oó]/i);
+    assert.match(state.detail, /reintent|cargar/i);
+    assert.equal(state.retry, true, 'Reintentar visible on conflict');
     assert.equal(state.draft, 'Nombre Nuevo', 'draft survives the conflict');
-    // No silent retry or rebase — exactly one PUT.
-    assert.equal(puts, 1);
+    assert.equal(puts, 1, 'no silent retry or rebase — exactly one PUT');
+    // Reintentar recarga la revisión y reenvía el borrador — PUT con CAS 2.
+    await page.evaluate(() =>
+      document.getElementById('app').shadowRoot.querySelector('[data-edit-retry]')?.click());
+    await page.waitForFunction(() =>
+      document.getElementById('app').shadowRoot
+        .querySelector('[data-edit-save-status]')?.classList.contains('is-saved'),
+    { timeout: 10000 });
+    assert.equal(puts, 2, 'retry re-sends over the reloaded revision');
   } finally {
     await browser.close();
   }
 });
 
-test('a late save completion never closes a reopened same-team editor', async () => {
+test('a stale save completion never touches a retired editor generation', async () => {
   const browser = await chromium.launch();
   try {
     let release;
     const hold = new Promise((r) => { release = r; });
-    const { page } = await newPersonalPage(browser, { routeQuery: 'teams?edit=pt-1', putHold: hold });
+    const { page, log } = await newPersonalPage(browser, { routeQuery: 'teams?edit=pt-1', putHold: hold });
     await page.waitForFunction(() =>
       !!document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]'),
     { timeout: 10000 });
-    // Save A — parked in flight.
+    // Edit → autosave PUT parks in flight (generation A).
     await page.evaluate(() => {
       const m = document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]');
-      m.querySelector('[data-edit-team-name]').value = 'Nombre A';
-      m.querySelector('[data-save-team]').click();
+      const n = m.querySelector('[data-edit-team-name]');
+      n.value = 'Nombre A';
+      n.dispatchEvent(new Event('input', { bubbles: true }));
     });
-    await page.waitForTimeout(300);
-    // Close and reopen the SAME team — a new generation. Draft B must not
-    // be closed or overwritten when A's response finally lands.
-    await page.evaluate(() =>
-      document.getElementById('app').shadowRoot.querySelector('[data-cancel-edit]')?.click());
-    await page.evaluate(() => { document.getElementById('app').route = 'teams?edit=pt-1'; });
-    await page.waitForFunction(() => {
-      const m = document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]');
-      return m && m.querySelector('[data-edit-team-name]');
-    }, { timeout: 10000 });
+    await waitForPuts(log, 1);
+    // A forced context/scope change retires the editor mid-flight —
+    // unlike Volver (which flushes), scope changes invalidate the fence.
     await page.evaluate(() => {
-      document.getElementById('app').shadowRoot
-        .querySelector('[data-edit-team-name]').value = 'Nombre B';
-    });
-    release();
-    await page.waitForTimeout(500);
-    const state = await page.evaluate(() => {
-      const m = document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]');
-      return {
-        open: !!m,
-        name: m?.querySelector('[data-edit-team-name]')?.value ?? null,
-        error: m?.querySelector('.onboard-modal-error')?.textContent ?? null,
+      document.getElementById('app').context = {
+        context_id: 'ctx-personal-2',
+        context_epoch: 4,
+        owner_scope: { kind: 'personal', workspace_id: 'ws-2', account_id: 'acc-2' },
+        team_ids: [], working_team_ids: [],
       };
     });
-    assert.equal(state.open, true, 'late save A must not close editor B');
-    assert.equal(state.name, 'Nombre B', 'late save A must not overwrite B');
-    assert.equal(state.error, null, 'late save A must not paint into B');
+    await page.waitForFunction(() =>
+      !document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]'),
+    { timeout: 10000 });
+    release();
+    await page.waitForTimeout(400);
+    // The late response is dropped: nothing repaints, no successor saves.
+    const puts = log.filter((e) => e.method === 'PUT' && e.url.includes('/roster'));
+    assert.equal(puts.length, 1, 'retired generation spawns no successor PUTs');
+    const closed = await page.evaluate(() =>
+      !document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]'));
+    assert.equal(closed, true, 'late save A cannot resurrect the retired editor');
   } finally {
     await browser.close();
   }
 });
 
-test('double save serializes — exactly one roster PUT', async () => {
+test('rapid edits coalesce into one PUT; later edits serialize behind it', async () => {
   const browser = await chromium.launch();
   try {
     const { page, log } = await newPersonalPage(browser, { routeQuery: 'teams?edit=pt-1' });
     await page.waitForFunction(() =>
       !!document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]'),
     { timeout: 10000 });
+    // Burst of edits inside the debounce window → a single autosave PUT.
     await page.evaluate(() => {
       const m = document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]');
-      const save = () => m.querySelector('[data-save-team]').click();
-      save(); save(); save();
+      const n = m.querySelector('[data-edit-team-name]');
+      for (const v of ['Nombre 1', 'Nombre 12', 'Nombre 123']) {
+        n.value = v;
+        n.dispatchEvent(new Event('input', { bubbles: true }));
+      }
     });
-    await page.waitForFunction(() =>
-      !document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]'),
-    { timeout: 10000 });
-    const puts = log.filter((e) => e.method === 'PUT' && e.url.includes('/roster'));
-    assert.equal(puts.length, 1, 'serialized saves — one PUT for many clicks');
+    const puts1 = await waitForPuts(log, 1);
+    assert.equal(puts1.length, 1, 'debounce coalesces the burst into one PUT');
+    await page.waitForTimeout(900); // let any extra debounce windows expire
+    const putsAfter = log.filter((e) => e.method === 'PUT' && e.url.includes('/roster'));
+    assert.equal(putsAfter.length, 1, 'no duplicate saves for the same draft');
+    // A later edit starts a second save — serial, CAS advances to rev 2.
+    await page.evaluate(() => {
+      const n = document.getElementById('app').shadowRoot
+        .querySelector('[data-edit-team-name]');
+      n.value = 'Nombre Final';
+      n.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    const puts2 = await waitForPuts(log, 2);
+    assert.equal(puts2.length, 2, 'second edit serializes a second PUT');
+    assert.equal(
+      JSON.parse(puts2[1].postData).expected_revision,
+      JSON.parse(puts2[0].postData).expected_revision + 1,
+      'second save sends the post-save revision');
+    assert.equal(JSON.parse(puts2[1].postData).name, 'Nombre Final');
   } finally {
     await browser.close();
   }
@@ -510,12 +606,14 @@ test('a readable own team outside the working set opens read-only', async () => 
       return {
         note: !!m.querySelector('[data-edit-readonly-note]'),
         save: !!m.querySelector('[data-save-team]'),
+        saveState: !!m.querySelector('.onboard-save-state'),
         add: !!m.querySelector('[data-add-player]'),
         nameDisabled: m.querySelector('[data-edit-team-name]').disabled,
       };
     });
     assert.equal(view.note, true, 'read-only note is rendered');
     assert.equal(view.save, false, 'no save affordance');
+    assert.equal(view.saveState, false, 'no autosave state in read-only mode');
     assert.equal(view.add, false, 'no add-player affordance');
     assert.equal(view.nameDisabled, true, 'inputs are disabled');
   } finally {
@@ -556,7 +654,7 @@ test('a roster response echoing the wrong binding fails closed', async () => {
   }
 });
 
-test('G2: a stale save completion never releases another save\'s busy state', async () => {
+test('G2: edits during an in-flight save queue serially — order and CAS preserved', async () => {
   const browser = await chromium.launch();
   try {
     // Per-request gates: save A and save B park on distinct holds.
@@ -569,58 +667,86 @@ test('G2: a stale save completion never releases another save\'s busy state', as
     await page.waitForFunction(
       (m) => !!document.getElementById('app').shadowRoot.querySelector(m),
       '[data-edit-modal]', { timeout: 10000 });
-    // Save A — parked in flight.
+    // Edit A → autosave PUT parks in flight.
     await page.evaluate(() => {
       const m = document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]');
-      m.querySelector('[data-edit-team-name]').value = 'Nombre A';
-      m.querySelector('[data-save-team]').click();
+      const n = m.querySelector('[data-edit-team-name]');
+      n.value = 'Nombre A';
+      n.dispatchEvent(new Event('input', { bubbles: true }));
     });
-    await page.waitForTimeout(300);
-    // Close + reopen the SAME team → new generation; B starts its own save.
-    await page.evaluate(() =>
-      document.getElementById('app').shadowRoot.querySelector('[data-cancel-edit]')?.click());
-    await page.evaluate(() => { document.getElementById('app').route = 'teams?edit=pt-1'; });
-    await page.waitForFunction(() => {
-      const m = document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]');
-      return m && m.querySelector('[data-edit-team-name]');
-    }, { timeout: 10000 });
+    await waitForPuts(log, 1);
+    // Edit B while A is parked — the serial queue must NOT issue a
+    // parallel PUT; it waits for A to complete then sends B with the
+    // advanced revision.
     await page.evaluate(() => {
       const m = document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]');
-      m.querySelector('[data-edit-team-name]').value = 'Nombre B';
-      m.querySelector('[data-save-team]').click();
+      const n = m.querySelector('[data-edit-team-name]');
+      n.value = 'Nombre B';
+      n.dispatchEvent(new Event('input', { bubbles: true }));
     });
-    await page.waitForTimeout(300);
-    // A's completion lands — stale. B must keep its busy state.
-    gates[0]();
-    await page.waitForTimeout(400);
-    // Force a rerender under the still-pending B (same fingerprint → no
-    // retirement, just a paint) — the regression showed enabled controls
-    // right here.
-    await page.evaluate(() => {
-      const el = document.getElementById('app');
-      el.context = { ...el.context };
-    });
-    await page.waitForTimeout(200);
-    const mid = await page.evaluate(() => {
+    await page.waitForTimeout(900); // debounce expires; queue holds for A
+    let puts = log.filter((e) => e.method === 'PUT' && e.url.includes('/roster'));
+    assert.equal(puts.length, 1, 'no parallel PUT while save A is in flight');
+    const midState = await page.evaluate(() => {
       const m = document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]');
       return {
-        open: !!m,
-        name: m?.querySelector('[data-edit-team-name]')?.value ?? null,
-        saveDisabled: m?.querySelector('[data-save-team]')?.disabled ?? null,
-        nameDisabled: m?.querySelector('[data-edit-team-name]')?.disabled ?? null,
+        chip: m?.querySelector('[data-edit-save-status]')?.className || '',
+        draft: m?.querySelector('[data-edit-team-name]')?.value,
+        nameEnabled: m?.querySelector('[data-edit-team-name]')?.disabled === false,
       };
     });
-    assert.equal(mid.open, true, 'late A must not close editor B');
-    assert.equal(mid.name, 'Nombre B', 'late A must not repaint B');
-    assert.equal(mid.saveDisabled, true, 'B save stays busy through rerender');
-    assert.equal(mid.nameDisabled, true, 'B inputs stay disabled while B saves');
-    // Releasing B's own completion is the only thing allowed to close it.
+    assert.match(midState.chip, /is-(saving|pending)/, 'chip stays busy/pending while A flies');
+    assert.equal(midState.draft, 'Nombre B', 'latest draft kept in the input');
+    assert.equal(midState.nameEnabled, true, 'inputs stay usable while saving');
+    // Release A — the queued B save must run automatically (no retype).
+    gates[0]();
+    const puts2 = await waitForPuts(log, 2);
+    assert.equal(puts2.length, 2, 'queued save fires after A completes');
+    const bodyB = JSON.parse(puts2[1].postData);
+    assert.equal(bodyB.name, 'Nombre B', 'queued save carries the latest draft');
+    assert.equal(bodyB.expected_revision,
+      JSON.parse(puts2[0].postData).expected_revision + 1,
+      'queued save uses the post-A revision');
+    // Releasing B settles the chain — chip returns to saved.
     gates[1]();
+    await page.waitForFunction(() =>
+      document.getElementById('app').shadowRoot
+        .querySelector('[data-edit-save-status]')?.classList.contains('is-saved'),
+    { timeout: 10000 });
+    puts = log.filter((e) => e.method === 'PUT' && e.url.includes('/roster'));
+    assert.equal(puts.length, 2, 'exactly one PUT each for A and B — no duplicates');
+  } finally {
+    await browser.close();
+  }
+});
+
+test('Volver flushes a parked save before closing — never drops the draft', async () => {
+  const browser = await chromium.launch();
+  try {
+    let release;
+    const hold = new Promise((r) => { release = r; });
+    const { page, log } = await newPersonalPage(browser, { routeQuery: 'teams?edit=pt-1', putHold: hold });
+    await page.waitForFunction(() =>
+      !!document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]'),
+    { timeout: 10000 });
+    await page.evaluate(() => {
+      const m = document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]');
+      const n = m.querySelector('[data-edit-team-name]');
+      n.value = 'Nombre Hold';
+      n.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await waitForPuts(log, 1);
+    // Volver while the PUT is parked → the editor stays open until it lands.
+    await page.evaluate(() =>
+      document.getElementById('app').shadowRoot.querySelector('[data-cancel-edit]')?.click());
+    await page.waitForTimeout(400);
+    const stillOpen = await page.evaluate(() =>
+      !!document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]'));
+    assert.equal(stillOpen, true, 'Volver waits on the in-flight save — no draft loss');
+    release();
     await page.waitForFunction(() =>
       !document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]'),
     { timeout: 10000 });
-    const puts = log.filter((e) => e.method === 'PUT' && e.url.includes('/roster'));
-    assert.equal(puts.length, 2, 'one PUT each for A and B — no duplicate B PUT');
   } finally {
     await browser.close();
   }

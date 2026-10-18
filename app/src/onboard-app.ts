@@ -246,6 +246,15 @@ interface MemberRow {
   status: string;
 }
 
+// Geometría aprobada en club-members-icons.json (paquete UX v2, 18/10):
+// trazo 24×24 a currentColor; el target ≥44px lo da el botón contenedor.
+const MEMBER_ICONS = {
+  edit: '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4 15 12-12 5 5L9 20l-6 1ZM13 6l5 5"/></svg>',
+  deactivate: '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 4v16M17 4v16"/></svg>',
+  reactivate: '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m7 3 14 9-14 9Z"/></svg>',
+  delete: '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7"/></svg>',
+} as const;
+
 interface MemberAssignment {
   id: string;
   user_id: string;
@@ -497,6 +506,23 @@ class BiqOnboardApp extends HTMLElement {
   // z-index 1000, so the section-level _teamsError banner would sit behind
   // it invisible. Cleared on open/close/success.
   private _editError: string | null = null;
+  // UX v2 autosave (TEAM-AUTOSAVE): sin «Guardar»/«Cancelar» — cada edición
+  // encola un guardado con debounce ~600ms en una cadena serial; el chip
+  // discreto es el único indicador (pendiente/guardando/guardado/error).
+  // `_editSaveSeq`-style fencing lo dan `_editSeq`+`_editFence`: una
+  // respuesta fuera de orden o de otra generación nunca libera ni altera
+  // la operación nueva.
+  private _editDirty = false;
+  private _editSaveStatus: 'idle' | 'pending' | 'saving' | 'saved' | 'error' | 'conflict' = 'idle';
+  private _editSaveMessage: string | null = null;
+  private _editSaveTimer: ReturnType<typeof setTimeout> | null = null;
+  private _editSaveChain: Promise<void> = Promise.resolve();
+  private _editSaveQueued = false;
+  private _editFlush: Promise<boolean> | null = null;
+  private _editSavedChanges = false; // refrescar catálogos al salir, nunca con el editor abierto
+  private _pendingRouteValue: string | null = null; // última intención de sub-ruta
+  private _routeFlushBusy = false;
+  private _closingEdit = false;
   // Set by the «Plantilla» row action and by «Añadir jugador»: focus lands
   // on the roster editor after the next render, then the flag clears.
   private _rosterFocus = false;
@@ -556,6 +582,9 @@ class BiqOnboardApp extends HTMLElement {
   // Watches body[data-shell-chrome] (global nav contract §2) so the section
   // subhead's sticky offset follows the shell chrome's shown/collapsed state.
   private _shellChromeObserver: MutationObserver | null = null;
+  // UX v2: aviso beforeunload best-effort con autosave pendiente — nunca se
+  // promete persistencia en cierre forzado (ni sendBeacon como garantía).
+  private _beforeUnloadHandler: ((e: BeforeUnloadEvent) => void) | null = null;
 
   constructor() {
     super();
@@ -801,6 +830,20 @@ class BiqOnboardApp extends HTMLElement {
     this._editError = null;
     this._editFence = '';
     this._rosterFocus = false;
+    // Purga de autosave: un cambio de principal/contexto nunca arrastra el
+    // borrador ni deja mutaciones en cola — la cadena reiniciada suelta las
+    // tareas pendientes y el seq bump entierra la respuesta en vuelo.
+    if (this._editSaveTimer) {
+      clearTimeout(this._editSaveTimer);
+      this._editSaveTimer = null;
+    }
+    this._editSaveChain = Promise.resolve();
+    this._editSaveQueued = false;
+    this._editDirty = false;
+    this._editSaveStatus = 'idle';
+    this._editSaveMessage = null;
+    this._editFlush = null;
+    this._editSavedChanges = false;
   }
 
   private _teamEditorPort(): TeamEditorPort {
@@ -1180,6 +1223,59 @@ class BiqOnboardApp extends HTMLElement {
   }
 
   set route(value: string) {
+    // Autosave: una sub-ruta nueva con el editor sucio espera a vaciar la
+    // cola antes de aplicarse. Una ruta que apunta al MISMO editor abierto
+    // (teams?edit=<id>) no es una transición — pasa directa.
+    const raw = value || '';
+    const qIdx = raw.indexOf('?');
+    const targetSub = qIdx >= 0 ? raw.slice(0, qIdx) : raw;
+    const targetParams = qIdx >= 0 ? new URLSearchParams(raw.slice(qIdx + 1)) : null;
+    const keepsEditor =
+      targetSub === 'teams' && (targetParams?.get('edit') || '') === this._editingTeamId;
+    if (
+      !keepsEditor &&
+      this._editingTeamId && this._editModel?.permissions.edit &&
+      (this._editDirty || this._editSaveStatus === 'pending' ||
+        this._editSaveStatus === 'saving' || this._editSaveStatus === 'error' ||
+        this._editSaveStatus === 'conflict')
+    ) {
+      this._applyRouteAfterFlush(value);
+      return;
+    }
+    this._applyRoute(value);
+  }
+
+  private _applyRouteAfterFlush(value: string): void {
+    this._pendingRouteValue = value; // última intención manda
+    if (this._routeFlushBusy) return;
+    this._routeFlushBusy = true;
+    void (async () => {
+      try {
+        const ok = await this._flushEditorQueue();
+        if (!ok) {
+          // El editor queda — restaura su ruta canónica y repinta.
+          const teamId = this._editingTeamId;
+          if (teamId) {
+            history.replaceState(
+              null, '',
+              `#/onboard/teams?edit=${encodeURIComponent(teamId)}`,
+            );
+          }
+          this._subRoute = 'teams';
+          this.render();
+          return;
+        }
+        this._retireEditor();
+        const pending = this._pendingRouteValue;
+        this._pendingRouteValue = null;
+        this._applyRoute(pending ?? '');
+      } finally {
+        this._routeFlushBusy = false;
+      }
+    })();
+  }
+
+  private _applyRoute(value: string): void {
     // Deep links may carry a query ("teams?return=cycle" from the mandatory
     // selection gate). Path and query are parsed separately — _subRoute is
     // always the bare tab id; _returnRoute preserves the continuation intent
@@ -1587,6 +1683,20 @@ class BiqOnboardApp extends HTMLElement {
     this._editError = null;
     this._editLoading = true;
     this._editSaving = false; // a prior generation's in-flight save is stale
+    // Autosave: la nueva apertura arranca limpia — sin cola ni borrador
+    // heredado del equipo/contexto anterior.
+    if (this._editSaveTimer) {
+      clearTimeout(this._editSaveTimer);
+      this._editSaveTimer = null;
+    }
+    this._editSaveChain = Promise.resolve();
+    this._editSaveQueued = false;
+    this._editDirty = false;
+    this._editSaveStatus = 'idle';
+    this._editSaveMessage = null;
+    this._editFlush = null;
+    this._editSavedChanges = false;
+    this._pendingRouteValue = null;
     this._editFence = this._editFenceNow(teamId);
     const seq = ++this._editSeq;
     this.render();
@@ -1626,6 +1736,281 @@ class BiqOnboardApp extends HTMLElement {
       else this._teamsError = message;
     }
     this.render();
+  }
+
+  // ─── UX v2: autosave del editor de equipo ──────────────────────────────
+  private _editSaveStatusLabel(): string {
+    const labels: Record<string, string> = {
+      idle: '', pending: 'Cambios pendientes', saving: 'Guardando…',
+      saved: 'Guardado', error: 'No se pudo guardar',
+      conflict: 'El equipo cambió en otro lugar',
+    };
+    return labels[this._editSaveStatus] || '';
+  }
+
+  // El draft que sale al servidor: valida nombre obligatorio y dorsales
+  // enteros 0–99. Filas sin nombre nunca persisten (una fila incompleta no
+  // es un jugador vacío). El nivel no se revalida contra el vocabulario —
+  // el <select> solo ofrece opciones canónicas + el valor almacenado
+  // (texto legacy preservado por contrato, competitiveLevelOptionsHtml).
+  private _editDraftPayload():
+    | { ok: true; name: string; competitive_level: string; players: { name: string; number: number | null }[] }
+    | { ok: false; message: string } {
+    const name = this._editNameDraft.trim();
+    if (!name) return { ok: false, message: 'El nombre es obligatorio.' };
+    const competitive_level = this._editLevelDraft.trim();
+    const players: { name: string; number: number | null }[] = [];
+    for (const p of this._rosterDraft) {
+      const pname = p.name.trim();
+      if (!pname) continue; // fila incompleta — nunca un jugador vacío
+      const numStr = p.number.trim();
+      const num = numStr === '' ? null
+        : /^-?\d+$/.test(numStr) ? Number.parseInt(numStr, 10) : Number.NaN;
+      if (num !== null && (!Number.isInteger(num) || num < 0 || num > 99)) {
+        return { ok: false, message: 'El dorsal debe ser un número entero entre 0 y 99.' };
+      }
+      players.push({ name: pname, number: num });
+    }
+    return { ok: true, name, competitive_level, players };
+  }
+
+  // Marca trabajo pendiente y programa el guardado; `accelerated` (select,
+  // blur, quitar jugador) salta el debounce.
+  private _scheduleEditorSave(accelerated = false): void {
+    if (!this._editingTeamId || !this._editModel?.permissions.edit) return;
+    this._syncEditDraftFromDom();
+    this._editDirty = true;
+    this._editSaveStatus = 'pending';
+    this._editSaveMessage = null;
+    this._updateEditStatusDom();
+    if (this._editSaveTimer) clearTimeout(this._editSaveTimer);
+    if (accelerated) {
+      this._editSaveTimer = null;
+      this._queueEditorSave();
+      return;
+    }
+    this._editSaveTimer = setTimeout(() => {
+      this._editSaveTimer = null;
+      this._queueEditorSave();
+    }, 600);
+  }
+
+  // Cadena serial: nunca dos PUT en vuelo y como mucho UN envío en
+  // espera — mientras haya una pasada encolada, las nuevas ediciones solo
+  // marcan dirty (la pasada viva lee el DOM al ejecutarse).
+  private _queueEditorSave(): void {
+    if (this._editSaveQueued) return;
+    this._editSaveQueued = true;
+    this._editSaveChain = this._editSaveChain
+      .then(() => this._saveEditorOnce())
+      .catch(() => { /* los estados tipados ya reflejan el fallo */ });
+  }
+
+  private async _saveEditorOnce(): Promise<void> {
+    this._editSaveQueued = false;
+    const teamId = this._editingTeamId;
+    if (!teamId || !this._editModel) return;
+    this._syncEditDraftFromDom();
+    const draft = this._editDraftPayload();
+    if (!draft.ok) {
+      // La validación se queda pendiente — no hay escritura posible.
+      this._editSaveStatus = 'pending';
+      this._editSaveMessage = draft.message;
+      this._updateEditStatusDom();
+      return;
+    }
+    const seq = this._editSeq;
+    const fence = this._editFence;
+    const version = this._editModel.version;
+    const sent = { name: draft.name, competitive_level: draft.competitive_level, players: draft.players };
+    const sentJson = JSON.stringify(sent);
+    this._editSaveStatus = 'saving';
+    this._editSaveMessage = null;
+    this._updateEditStatusDom();
+    const res = await this._teamEditorPort().save(teamId, sent, version);
+    if (
+      seq !== this._editSeq ||
+      this._editFence !== fence ||
+      this._editingTeamId !== teamId
+    ) {
+      return; // respuesta fuera de orden u otro principal — se descarta
+    }
+    if (res.kind === 'saved') {
+      // Solo el handle CAS del modelo se actualiza: los inputs del DOM
+      // pueden llevar texto nuevo tecleado durante el vuelo.
+      this._editModel = res.model;
+      this._editSavedChanges = true;
+      this._syncEditDraftFromDom();
+      const now = this._editDraftPayload();
+      const nowJson = now.ok
+        ? JSON.stringify({ name: now.name, competitive_level: now.competitive_level, players: now.players })
+        : null;
+      if (nowJson === sentJson) {
+        this._editDirty = false;
+        this._editSaveStatus = 'saved';
+        this._editSaveMessage = null;
+      } else {
+        // Hay ediciones posteriores — se encola el siguiente envío.
+        this._editSaveStatus = 'pending';
+        this._editSaveMessage = now.ok ? null : now.message;
+        this._queueEditorSave();
+      }
+      this._updateEditStatusDom();
+      return;
+    }
+    this._editSaveStatus = res.kind === 'conflict' ? 'conflict' : 'error';
+    this._editSaveMessage = res.kind === 'conflict'
+      ? 'El equipo cambió fuera de este editor. Reintenta para cargar la versión actual.'
+      : res.kind === 'denied'
+        ? 'No tienes permiso para guardar este equipo.'
+        : res.kind === 'not-found'
+          ? 'El equipo ya no existe.'
+          : res.message;
+    this._updateEditStatusDom();
+  }
+
+  // Parcheo en sitio del chip/disclaimer — nunca un re-render (un render
+  // completo borraría el texto a medio teclear).
+  private _updateEditStatusDom(): void {
+    const chip = this.shadow.querySelector('[data-edit-save-status]');
+    if (chip) {
+      const status = this._editSaveStatus;
+      chip.textContent = this._editSaveStatusLabel();
+      chip.className = `onboard-save-chip is-${status}`;
+      chip.toggleAttribute('hidden', status === 'idle');
+    }
+    const detail = this.shadow.querySelector('[data-edit-save-detail]');
+    if (detail) {
+      detail.textContent = this._editSaveMessage || '';
+      detail.toggleAttribute('hidden', !this._editSaveMessage);
+    }
+    const retry = this.shadow.querySelector('[data-edit-retry]');
+    if (retry) {
+      retry.toggleAttribute('hidden',
+        !(this._editSaveStatus === 'error' || this._editSaveStatus === 'conflict'));
+    }
+  }
+
+  // Vacía la cola antes de una transición voluntaria. Devuelve false con
+  // trabajo sin persistir (validación pendiente, error, conflicto) — el
+  // editor queda con su feedback. Acotado a 8 pasadas.
+  private _flushEditorQueue(): Promise<boolean> {
+    if (this._editFlush) return this._editFlush;
+    const run = (async () => {
+      for (let pass = 0; pass < 8; pass++) {
+        if (this._editingTeamId === null) return true; // retirado — nada que vaciar
+        this._syncEditDraftFromDom();
+        const pending = this._editDirty ||
+          this._editSaveStatus === 'pending' ||
+          this._editSaveStatus === 'error' ||
+          this._editSaveStatus === 'conflict';
+        if (!pending && this._editSaveStatus !== 'saving') return true;
+        if (this._editSaveTimer) {
+          clearTimeout(this._editSaveTimer);
+          this._editSaveTimer = null;
+        }
+        this._queueEditorSave();
+        await this._editSaveChain;
+        const s = this._editSaveStatus;
+        if (s === 'error' || s === 'conflict' || s === 'pending') return false;
+      }
+      return this._editSaveStatus === 'saved' || this._editSaveStatus === 'idle';
+    })();
+    const shared = run.finally(() => {
+      if (this._editFlush === shared) this._editFlush = null;
+    });
+    this._editFlush = shared;
+    return shared;
+  }
+
+  // Contrato de carcasa (App shell): se llama antes de cualquier
+  // transición voluntaria que saque de la vista actual. `false` retiene la
+  // navegación — el chip muestra el motivo y Reintentar.
+  async requestLeave(): Promise<boolean> {
+    if (!this._editingTeamId) return true;
+    if (!this._editModel?.permissions.edit) {
+      this._retireEditor();
+      return true;
+    }
+    const ok = await this._flushEditorQueue();
+    if (ok) this._retireEditor();
+    else this._updateEditStatusDom();
+    return ok;
+  }
+
+  // Salida voluntaria del editor (Volver / flecha de sección): vacía la
+  // cola y solo entonces cierra; con fallo el editor queda visible.
+  private async _requestEditorClose(): Promise<void> {
+    if (this._closingEdit) return;
+    this._closingEdit = true;
+    try {
+      const writable = !!this._editModel?.permissions.edit;
+      const pending = this._editDirty ||
+        this._editSaveStatus === 'pending' || this._editSaveStatus === 'saving' ||
+        this._editSaveStatus === 'error' || this._editSaveStatus === 'conflict';
+      if (writable && pending && this._editingTeamId) {
+        if (this._editSaveTimer) {
+          clearTimeout(this._editSaveTimer);
+          this._editSaveTimer = null;
+        }
+        this._editSaveStatus = 'saving';
+        this._updateEditStatusDom();
+        const ok = await this._flushEditorQueue();
+        if (!ok) {
+          this._updateEditStatusDom();
+          const chip = this.shadow.querySelector('[data-edit-save-status]') as HTMLElement | null;
+          chip?.focus?.();
+          return;
+        }
+      }
+      const refresh = this._editSavedChanges;
+      this._closeEditModal();
+      // Catálogos refrescados solo con el editor ya cerrado — un render
+      // con el editor abierto borraría texto a medio teclear.
+      if (refresh) {
+        if (this._isPersonalContext()) {
+          this._personalTeams = null;
+          this._personalTeamsStatus = 'uninitialized';
+          void this.loadPersonalTeams();
+        } else {
+          const clubId = this._org?.club?.id;
+          if (clubId) void this.loadTeams(clubId);
+        }
+      }
+    } finally {
+      this._closingEdit = false;
+    }
+  }
+
+  // Reintentar tras un 409: recarga el modelo del servidor, sube el CAS a
+  // la revisión actual y reenvía el borrador vigente del usuario.
+  private async _reloadEditorForRetry(): Promise<void> {
+    const teamId = this._editingTeamId;
+    if (!teamId) return;
+    const seq = this._editSeq;
+    const fence = this._editFence;
+    this._editSaveStatus = 'saving';
+    this._updateEditStatusDom();
+    const res = await this._teamEditorPort().load(teamId);
+    if (
+      seq !== this._editSeq || this._editFence !== fence ||
+      this._editingTeamId !== teamId
+    ) return;
+    if (res.kind !== 'ok') {
+      this._editSaveStatus = 'error';
+      this._editSaveMessage = res.kind === 'denied'
+        ? 'No tienes permiso para editar este equipo.'
+        : res.kind === 'not-found'
+          ? 'El equipo ya no existe.'
+          : res.message;
+      this._updateEditStatusDom();
+      return;
+    }
+    this._editModel = res.model; // nueva revisión CAS; el DOM conserva el borrador
+    this._editDirty = true;
+    this._editSaveStatus = 'pending';
+    this._updateEditStatusDom();
+    this._queueEditorSave();
   }
 
   // Consume the `?edit=<teamId>` deep-link intent once every teams feed has
@@ -1676,6 +2061,17 @@ class BiqOnboardApp extends HTMLElement {
     this._rosterDraft = [];
     this._rosterFocus = false;
     this._editError = null;
+    if (this._editSaveTimer) {
+      clearTimeout(this._editSaveTimer);
+      this._editSaveTimer = null;
+    }
+    this._editSaveChain = Promise.resolve();
+    this._editDirty = false;
+    this._editSaveStatus = 'idle';
+    this._editSaveMessage = null;
+    this._editFlush = null;
+    this._editSavedChanges = false;
+    this._pendingRouteValue = null;
     this.render();
     // The ?edit=<id> intent is consumed once — drop it from the hash so a
     // refresh or back-forward doesn't reopen the modal (replaceState, no
@@ -1835,7 +2231,7 @@ class BiqOnboardApp extends HTMLElement {
   private _sectionBack(): void {
     const sub = this._activeSubscreen();
     if (sub === 'team-edit') {
-      this._closeEditModal();
+      void this._requestEditorClose();
       return;
     }
     if (sub === 'member-edit') {
@@ -1996,9 +2392,25 @@ class BiqOnboardApp extends HTMLElement {
       this._shellChromeObserver.disconnect();
       this._shellChromeObserver = null;
     }
+    if (this._beforeUnloadHandler) {
+      window.removeEventListener('beforeunload', this._beforeUnloadHandler);
+      this._beforeUnloadHandler = null;
+    }
+    // Desmontaje (logout/teardown/remount): el borrador y la cola son del
+    // principal que los creó — purga completa, nunca arrastrados.
+    this._retireEditor();
   }
 
   connectedCallback(): void {
+    this._beforeUnloadHandler = (e: BeforeUnloadEvent) => {
+      const pending = this._editDirty ||
+        this._editSaveStatus === 'pending' || this._editSaveStatus === 'saving' ||
+        this._editSaveStatus === 'error' || this._editSaveStatus === 'conflict';
+      if (pending && this._editingTeamId && this._editModel?.permissions.edit) {
+        e.preventDefault();
+      }
+    };
+    window.addEventListener('beforeunload', this._beforeUnloadHandler);
     // C11: Resume polling on visibility/entry if theme job is pending/running
     this._visibilityHandler = () => {
       if (document.visibilityState === 'visible') {
@@ -3778,9 +4190,10 @@ class BiqOnboardApp extends HTMLElement {
   private _renderTeamEditScreen(model: TeamEditorModel): string {
     // permissions.edit=false renders the truthful read-only state — a
     // readable own team outside the working set is never shown writable.
+    // Con autosave los inputs NO se deshabilitan durante el vuelo — teclear
+    // mientras guarda es el caso central; la cola serial lo ordena.
     const readOnly = !model.permissions.edit;
-    const busy = this._editSaving;
-    const off = readOnly || busy ? ' disabled' : '';
+    const off = readOnly ? ' disabled' : '';
     const rosterRows = this._rosterDraft.map((p, i) => `
       <div class="onboard-roster-row" data-roster-row>
         <input type="text" class="onboard-input onboard-input-sm" data-player-name="${i}" placeholder="Nombre y apellidos" aria-label="Nombre y apellidos del jugador" value="${escapeHtml(p.name)}"${off} />
@@ -3803,9 +4216,13 @@ class BiqOnboardApp extends HTMLElement {
           ${rosterRows || '<p class="onboard-card-desc onboard-roster-empty">Sin jugadores todavía — añade el primero con «Añadir jugador».</p>'}
         </div>
         ${this._editError ? `<div class="onboard-error onboard-modal-error" role="alert">${escapeHtml(this._editError)}</div>` : ''}
+        ${readOnly ? '' : `<div class="onboard-save-state">
+          <span class="onboard-save-chip is-${this._editSaveStatus}" data-edit-save-status role="status" aria-live="polite" tabindex="-1"${this._editSaveStatus === 'idle' ? ' hidden' : ''}>${this._editSaveStatusLabel()}</span>
+          <span class="onboard-save-detail" data-edit-save-detail role="alert"${this._editSaveMessage ? '' : ' hidden'}>${escapeHtml(this._editSaveMessage || '')}</span>
+          <button class="onboard-btn onboard-btn-sm" data-edit-retry type="button"${this._editSaveStatus === 'error' || this._editSaveStatus === 'conflict' ? '' : ' hidden'}>Reintentar</button>
+        </div>`}
         <div class="onboard-team-actions">
-          ${readOnly ? '' : `<button class="onboard-btn onboard-btn-primary" data-save-team="${escapeHtml(model.id)}" type="button"${busy ? ' disabled' : ''}>${busy ? 'Guardando…' : 'Guardar'}</button>`}
-          <button class="onboard-btn onboard-btn-secondary" data-cancel-edit type="button">${readOnly ? 'Volver' : 'Cancelar'}</button>
+          <button class="onboard-btn onboard-btn-secondary" data-cancel-edit type="button">Volver</button>
         </div>
       </div>
     </section>`;
@@ -3932,25 +4349,34 @@ class BiqOnboardApp extends HTMLElement {
 
     const statusBadge = deactivated
       ? '<span class="onboard-status-badge off">Desactivado</span>' : '';
+    // V2 Miembros (UX-15/16): el email es la única identidad de la fila —
+    // nunca display_name ni id técnicos como cabecera. Un email genuinamente
+    // ausente es incidencia explícita, no un fallback fabricado.
+    const email = (m.email || '').trim();
+    const identity = email ? escapeHtml(email) : '';
+    const identityForLabel = email ? escapeHtml(email) : 'miembro sin email disponible';
     const actions = canEdit ? `
-      <button class="onboard-btn onboard-btn-sm" data-member-edit="${escapeHtml(m.id)}">Editar</button>
-      <button class="onboard-btn onboard-btn-sm" data-member-status="${escapeHtml(m.id)}"
-        data-status="${deactivated ? 'active' : 'deactivated'}">
-        ${deactivated ? 'Reactivar' : 'Desactivar'}</button>
-      ${isAdminTier ? (this._deleteConfirmUserId === m.id
-        ? `<button class="onboard-btn onboard-btn-sm onboard-btn-danger" data-member-delete="${escapeHtml(m.id)}">Confirmar</button>`
-        : `<button class="onboard-btn onboard-btn-sm onboard-btn-danger" data-member-delete="${escapeHtml(m.id)}">Eliminar</button>`)
-      : ''}` : '';
+      <div class="onboard-member-actions">
+        <button class="onboard-icon-btn onboard-icon-btn-lg" data-member-edit="${escapeHtml(m.id)}" type="button"
+          aria-label="Editar a ${identityForLabel}" title="Editar a ${identityForLabel}">${MEMBER_ICONS.edit}</button>
+        <button class="onboard-icon-btn onboard-icon-btn-lg" data-member-status="${escapeHtml(m.id)}" type="button"
+          data-status="${deactivated ? 'active' : 'deactivated'}"
+          aria-label="${deactivated ? 'Reactivar' : 'Desactivar'} a ${identityForLabel}"
+          title="${deactivated ? 'Reactivar' : 'Desactivar'} a ${identityForLabel}">${deactivated ? MEMBER_ICONS.reactivate : MEMBER_ICONS.deactivate}</button>
+        ${isAdminTier ? (this._deleteConfirmUserId === m.id
+          ? `<button class="onboard-btn onboard-btn-sm onboard-btn-danger" data-member-delete="${escapeHtml(m.id)}" type="button"
+              aria-label="Confirmar eliminación de ${identityForLabel}">Confirmar</button>`
+          : `<button class="onboard-icon-btn onboard-icon-btn-lg onboard-icon-btn-danger" data-member-delete="${escapeHtml(m.id)}" type="button"
+              aria-label="Eliminar a ${identityForLabel}" title="Eliminar a ${identityForLabel}">${MEMBER_ICONS.delete}</button>`)
+        : ''}
+      </div>` : '';
     return `<div class="onboard-member-row${deactivated ? ' off' : ''}" data-member-row="${escapeHtml(m.id)}">
-      <div class="onboard-member-line1">
-        <span class="onboard-member-name">${escapeHtml(m.display_name || m.email || m.id)}</span>
-        ${statusBadge}
+      <div class="onboard-member-main">
+        <span class="onboard-member-email${email ? '' : ' missing'}">${email ? identity : 'Email no disponible'}</span>
+        ${actions}
       </div>
-      <div class="onboard-member-line2">
-        <span class="onboard-member-email">${escapeHtml(m.email || '')}</span>
-        <span class="onboard-member-roles">${roleBadges}</span>
-        <span class="onboard-member-actions">${actions}</span>
-      </div>
+      <div class="onboard-member-meta">${roleBadges}${statusBadge}</div>
+      ${email ? '' : '<p class="onboard-member-note">Debe recuperarse el email desde la fuente autorizada.</p>'}
     </div>`;
   }
 
@@ -4237,13 +4663,27 @@ class BiqOnboardApp extends HTMLElement {
   // Save resolves through the context port, which carries the CAS handle
   // (personal team_revision) or none (club PUT contract).
   private _wireTeamEditorEvents(): void {
-    // Cancel edit (modal)
+    // Volver (salida voluntaria): vacía la cola de autosave antes de
+    // cerrar; con fallo el editor queda visible con su feedback.
     const cancelBtn = this.shadow.querySelector('[data-cancel-edit]');
     if (cancelBtn) {
       cancelBtn.addEventListener('click', () => {
-        this._closeEditModal();
+        void this._requestEditorClose();
       });
     }
+
+    // Reintentar — error reenvía el borrador vigente; conflicto recarga la
+    // revisión del servidor y reenvía sobre el nuevo CAS.
+    this.shadow.querySelector('[data-edit-retry]')?.addEventListener('click', () => {
+      if (this._editSaveStatus === 'conflict') {
+        void this._reloadEditorForRetry();
+      } else if (this._editingTeamId && this._editModel?.permissions.edit) {
+        this._editDirty = true;
+        this._editSaveStatus = 'pending';
+        this._updateEditStatusDom();
+        this._queueEditorSave();
+      }
+    });
 
     // Roster editor — add/remove re-render from the draft, so the DOM is
     // flushed into _rosterDraft first and nothing typed is lost.
@@ -4261,92 +4701,32 @@ class BiqOnboardApp extends HTMLElement {
         this._syncEditDraftFromDom();
         this._rosterDraft.splice(Number((btn as HTMLElement).dataset.removePlayer), 1);
         this.render();
+        this._scheduleEditorSave(true); // borrado persistido — envío inmediato
       });
     });
 
-    // Save team edit — the modal's DOM is flushed into the draft first, then
-    // name + competition level + full roster are sent (replace semantics).
-    this.shadow.querySelectorAll('[data-save-team]').forEach(btn => {
-      btn.addEventListener('click', async () => {
-        const teamId = (btn as HTMLElement).dataset.saveTeam || '';
-        this._syncEditDraftFromDom();
-        const name = this._editNameDraft.trim();
-        const competitive_level = this._editLevelDraft.trim();
-        if (!name) {
-          this._editError = 'El nombre es obligatorio.';
-          this.render();
-          return;
-        }
-        const players: { name: string; number: number | null }[] = [];
-        let invalidNumber = false;
-        for (const p of this._rosterDraft) {
-          const pname = p.name.trim();
-          if (!pname) continue; // blank rows are ignored
-          const numStr = p.number.trim();
-          const num = numStr === '' ? null : Number.parseInt(numStr, 10);
-          if (num !== null && (!Number.isInteger(num) || num < 0 || num > 99)) {
-            invalidNumber = true;
-            break;
-          }
-          players.push({ name: pname, number: num });
-        }
-        if (invalidNumber) {
-          this._editError = 'El dorsal debe ser un número entre 0 y 99.';
-          this.render();
-          return;
-        }
-        // Serialized saves: a second click while the payload is in flight
-        // is ignored, and inputs are disabled for the duration so the
-        // submitted draft can't silently diverge from what was sent.
-        if (this._editSaving) return;
-        // Capture the opening generation + full scope identity + target
-        // BEFORE the await — closing and reopening the SAME team starts a
-        // new generation, so a late completion from the old one must be
-        // dropped, never paint into or close the new editor.
-        const seq = this._editSeq;
-        const fence = this._editFence;
-        const version = this._editModel?.version ?? null;
-        this._editSaving = true;
-        this.render();
-        const res = await this._teamEditorPort().save(
-          teamId,
-          { name, competitive_level, players },
-          version,
-        );
-        if (
-          seq !== this._editSeq ||
-          this._editFence !== fence ||
-          this._editingTeamId !== teamId
-        ) {
-          return; // stale — drop the outcome entirely; another operation's
-                  // busy/error state is never ours to release
-        }
-        this._editSaving = false;
-        if (res.kind === 'saved') {
-          this._editModel = res.model;
-          this._closeEditModal();
-          if (this._isPersonalContext()) {
-            this._personalTeams = null;
-            this._personalTeamsStatus = 'uninitialized';
-            this.loadPersonalTeams();
-          } else {
-            const clubId = this._org?.club?.id;
-            if (clubId) await this.loadTeams(clubId);
-          }
-        } else {
-          // Drafts survive every failure — nothing typed is lost; the user
-          // can fix, retry or cancel. 409 surfaces as its own typed state.
-          this._editError = res.kind === 'conflict'
-            ? 'El equipo cambió desde que lo abriste. Cierra y vuelve a abrirlo para continuar.'
-            : res.kind === 'denied'
-              ? 'No tienes permiso para guardar este equipo.'
-              : res.kind === 'not-found'
-                ? 'El equipo ya no existe.'
-                : res.message;
-          this.render();
-        }
+    // Autosave: teclear programa (debounce ~600ms); select y blur aceleran.
+    // El borrador se vuelca del DOM en cada envío — teclear durante el
+    // vuelo queda cubierto por la siguiente pasada de la cola serial.
+    const modal = this.shadow.querySelector('[data-edit-modal]');
+    if (modal && this._editModel?.permissions.edit) {
+      const isField = (el: EventTarget | null) =>
+        (el as HTMLElement | null)?.closest?.(
+          '[data-edit-team-name],[data-edit-team-level],[data-player-name],[data-player-number]',
+        ) !== null;
+      modal.addEventListener('input', (e) => {
+        if (isField(e.target)) this._scheduleEditorSave(false);
       });
-    });
+      modal.addEventListener('change', (e) => {
+        if (isField(e.target)) this._scheduleEditorSave(true);
+      });
+      // focusout acelera el envío solo si hay borrador — un blur sin
+      // edición (p. ej. re-render que suelta el input enfocado al añadir
+      // fila) nunca dispara un PUT de contenido idéntico.
+      modal.addEventListener('focusout', (e) => {
+        if (isField(e.target) && this._editDirty) this._scheduleEditorSave(true);
+      });
+    }
   }
 
   private wireTeamsEvents(clubId: string): void {

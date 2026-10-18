@@ -932,6 +932,47 @@
   white-space: nowrap;
 }
 
+/* UX v2 TEAM-AUTOSAVE: estado discreto del guardado — chip + detalle +
+   Reintentar, sin botones Guardar/Cancelar. */
+.onboard-save-state {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+  flex-wrap: wrap;
+}
+
+.onboard-save-chip {
+  font-size: 12px;
+  line-height: 1.4;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--biq-chip, #f0f0f0);
+  color: var(--biq-muted);
+}
+
+.onboard-save-chip.is-saving {
+  color: var(--biq-text);
+}
+
+.onboard-save-chip.is-saved {
+  background: var(--biq-green-soft, #e8f5e9);
+  color: var(--biq-green, #1b5e20);
+}
+
+.onboard-save-chip.is-error,
+.onboard-save-chip.is-conflict {
+  background: var(--biq-red-soft, #FCEAEC);
+  color: var(--biq-red, #d32f2f);
+}
+
+.onboard-save-detail {
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--biq-muted);
+  overflow-wrap: anywhere;
+}
+
 /* F12: Category header row — title left, + button right-aligned with action icons */
 .onboard-team-header {
   display: flex;
@@ -1122,33 +1163,54 @@
   opacity: 0.55;
 }
 
-.onboard-member-line1 {
+/* Email a la izquierda + acciones centradas a la derecha en la misma
+   fila; el email largo envuelve sin empujar los iconos (UX-15/16). */
+.onboard-member-main {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 14px;
-  overflow-wrap: anywhere;
-}
-
-.onboard-member-name {
-  flex: 1 1 auto;
-  min-width: 0;
-  font-weight: 500;
-}
-
-.onboard-member-line2 {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 4px;
-  font-size: 12px;
-  color: var(--biq-muted);
-  flex-wrap: wrap;
+  min-height: 44px;
 }
 
 .onboard-member-email {
+  flex: 1 1 auto;
   min-width: 0;
   overflow-wrap: anywhere;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.onboard-member-email.missing {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--biq-muted);
+}
+
+.onboard-member-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  flex-wrap: wrap;
+}
+
+.onboard-member-note {
+  font-size: 12px;
+  line-height: 1.5;
+  margin: 6px 0 0;
+  color: var(--biq-muted);
+}
+
+/* UX-15/16: acciones de fila a 44px (target táctil) — variante grande del
+   .onboard-icon-btn compartido, mismo trazo currentColor. */
+.onboard-icon-btn-lg {
+  width: 44px;
+  height: 44px;
+}
+
+.onboard-icon-btn-lg svg {
+  width: 24px;
+  height: 24px;
 }
 
 .onboard-member-roles {

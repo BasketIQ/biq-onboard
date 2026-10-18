@@ -151,17 +151,28 @@ test('P4: member list renders name, email, roles, status', async () => {
     const txt = await page.evaluate(() => {
       const sr = document.getElementById('app').shadowRoot;
       const row = (id) => sr.querySelector(`[data-member-row="${id}"]`);
+      const actionLabel = (id, sel) =>
+        row(id).querySelector(sel)?.getAttribute('aria-label') || '';
       return {
         u1: row('u1').textContent,
         u2: row('u2').textContent,
+        u2Label: row('u2').innerHTML,
         badges: row('u1').querySelectorAll('.onboard-role-badge').length,
+        u2StatusLabel: actionLabel('u2', '[data-member-status]'),
+        u1EditLabel: actionLabel('u1', '[data-member-edit]'),
+        u1DeleteLabel: actionLabel('u1', '[data-member-delete]'),
       };
     });
-    assert.ok(txt.u1.includes('Ana Entrenadora') && txt.u1.includes('ana@club.es'));
+    // V2: el email es la única identidad de fila — el nombre nunca pinta.
+    assert.ok(txt.u1.includes('ana@club.es'), 'email is the row identity');
+    assert.ok(!txt.u1.includes('Ana Entrenadora'), 'display name must not head the row');
     assert.ok(txt.u1.includes('Entrenador') && txt.u1.includes('Coordinador'));
     assert.equal(txt.badges, 2, 'primary + secondary role badges');
     assert.ok(txt.u2.includes('Desactivado'), 'deactivated badge shown');
-    assert.ok(txt.u2.includes('Reactivar'), 'reactivate action shown');
+    assert.ok(txt.u2StatusLabel.startsWith('Reactivar '), 'reactivate icon labelled');
+    assert.ok(txt.u2StatusLabel.includes('luis@club.es'), 'action label carries member email');
+    assert.equal(txt.u1EditLabel, 'Editar a ana@club.es', 'edit icon labelled with email');
+    assert.equal(txt.u1DeleteLabel, 'Eliminar a ana@club.es', 'delete icon labelled with email');
   } finally {
     await browser.close();
   }
@@ -550,7 +561,8 @@ test('P4-nav: club switch drops a late response from the previous club', async (
     const txt = await page.evaluate(() =>
       document.getElementById('app').shadowRoot
         .querySelector('[data-testid="members-tab"]').textContent);
-    assert.ok(!txt.includes('Pedro Viejo'), 'stale club1 member never rendered');
+    assert.ok(!txt.includes('Pedro Viejo') && !txt.includes('p@old.es'),
+      'stale club1 member never rendered');
     assert.ok(log.some((e) => e.url.includes('/api/clubs/club2/users')), 'club2 roster fetched');
   } finally {
     await browser.close();
@@ -607,7 +619,7 @@ test('P4-r1: club switch clears roster+edit state synchronously, stale response 
         frames.push({
           rows: el.shadowRoot.querySelectorAll('[data-member-row]').length,
           editOpen: !!el.shadowRoot.querySelector('[data-edit-name]'),
-          staleName: el.shadowRoot.textContent.includes('Ana Entrenadora'),
+          staleName: el.shadowRoot.textContent.includes('ana@club.es'),
         });
       };
       el.org = { club: { id: 'club2', name: 'Club Dos' }, role: 'administrator' };
@@ -617,7 +629,7 @@ test('P4-r1: club switch clears roster+edit state synchronously, stale response 
         rows: sr.querySelectorAll('[data-member-row]').length,
         editOpen: !!sr.querySelector('[data-edit-name]'),
         badges: sr.querySelectorAll('.onboard-role-badge').length,
-        staleNameVisible: sr.textContent.includes('Ana Entrenadora'),
+        staleNameVisible: sr.textContent.includes('ana@club.es'),
         membersState: el._members,
         assignmentsState: el._memberAssignments,
         editingState: el._editingMemberId,

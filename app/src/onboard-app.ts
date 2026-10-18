@@ -417,6 +417,12 @@ class BiqOnboardApp extends HTMLElement {
   private shadow: ShadowRoot;
   private _org: OrgContext | null = null;
   private _user: string | null = null;
+  // Declaraciones de hospedaje inyectadas por la carcasa (assign-only —
+  // `declare` para no emitir un campo que pise lo inyectado):
+  // shellHosted=true declara el hosting; requestLogout es el puente al
+  // cierre de sesión canónico del shell (opcional en documentos viejos).
+  declare shellHosted: boolean;
+  declare requestLogout?: () => Promise<void> | void;
   // Working-context entry state (BIQ-PERSONAL-CLUB-CONTEXT)
   private _context: ContextDescriptor | null = null;
   private _bootstrap: BootstrapPayload | null = null;
@@ -3728,7 +3734,10 @@ class BiqOnboardApp extends HTMLElement {
 
     return `
       <div class="entry-step">
-        <h2 class="entry-title">Elige tu espacio de trabajo</h2>
+        <div class="entry-head">
+          <h2 class="entry-title">Elige tu perfil</h2>
+          <button class="onboard-btn entry-logout" type="button" data-entry-logout ${this._entryBusy ? 'disabled' : ''}>Salir</button>
+        </div>
         ${activeLabel ? `<p class="entry-active">Trabajando en <strong>${escapeHtml(activeLabel)}</strong></p>` : ''}
         ${this._entryError ? `<p class="entry-error" role="alert">${escapeHtml(this._entryError)}</p>` : ''}
         <nav class="onboard-nav entry-tabs">
@@ -3769,6 +3778,51 @@ class BiqOnboardApp extends HTMLElement {
     }
   }
 
+  // «Salir» en el paso de entrada: hospedado, el cierre lo posee la
+  // carcasa — la capacidad requestLogout activa la valla sessionClosing
+  // síncronamente y ejecuta teardown/POST/limpieza/navegación canónicos.
+  // Sin capacidad (documento viejo) se falla CERRADO con feedback
+  // acotado — nunca un bypass local. Solo en standalone real (sin
+  // carcasa) el módulo cierra por su cuenta.
+  private async _entryLogout(): Promise<void> {
+    this._entryBusy = true;
+    this.render();
+    if (this.shellHosted) {
+      if (typeof this.requestLogout !== 'function') {
+        this._entryLogoutFailed();
+        return;
+      }
+      try {
+        const result = this.requestLogout();
+        if (result && typeof result.catch === 'function') {
+          result.catch(() => this._entryLogoutFailed());
+        }
+      } catch {
+        this._entryLogoutFailed();
+      }
+      return; // la carcasa desmonta — no se repinta ni hay POST local
+    }
+    try {
+      await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' });
+    } catch { /* red no disponible: redirigimos igualmente */ }
+    try {
+      const keys: string[] = [];
+      for (let i = 0; i < sessionStorage.length; i += 1) {
+        const key = sessionStorage.key(i);
+        if (key?.startsWith('biq.activeTeamId.')) keys.push(key);
+      }
+      keys.forEach((key) => sessionStorage.removeItem(key));
+    } catch { /* storage no disponible */ }
+    location.replace('/login');
+  }
+
+  private _entryLogoutFailed(): void {
+    if (!this.isConnected) return; // la carcasa ya desmontó el módulo
+    this._entryBusy = false;
+    this._entryError = 'No se pudo cerrar la sesión. Reintenta o recarga la página.';
+    this.render();
+  }
+
   private wireEntryEvents(): void {
     const inviteAllowed =
       this._bootstrap?.entry_actions?.['club.invitation.redeem']?.allowed !== false;
@@ -3776,6 +3830,12 @@ class BiqOnboardApp extends HTMLElement {
       btn.addEventListener('click', () => {
         this._entryTab = (btn as HTMLElement).dataset.entryTab as 'personal' | 'club';
         this.render();
+      });
+    });
+
+    this.shadow.querySelectorAll('[data-entry-logout]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        void this._entryLogout();
       });
     });
 

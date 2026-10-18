@@ -61,11 +61,15 @@ const MY_CATALOG = [
   { id: 'team_club1_cadete_m', club_id: 'club1', name: 'Cadete Masculino', category: 'cadete', gender: 'M', label: '2011', archived: false },
 ];
 const MGMT_TEAMS = [
-  ...MY_CATALOG,
+  // The management feed is the roster-bearing read — every row carries an
+  // explicit players array (possibly empty); my-teams stays metadata-only.
+  ...MY_CATALOG.map((t) => ({ ...t, players: [] })),
   { id: 'team_club1_junior_f', club_id: 'club1', name: 'Junior Femenino', category: 'junior', gender: 'F', label: '', archived: false, players: [{ name: 'Ana García', number: 7 }] },
 ];
 
-// state: { role }
+// state: { role, mgmtStatus, mgmtHold, mgmtTeams }
+// mgmtStatus fails the management feed; mgmtHold parks it until released
+// (delayed-roster coverage); mgmtTeams replaces the served rows.
 async function newPage(browser, state) {
   const page = await browser.newPage();
   const log = [];
@@ -89,7 +93,13 @@ async function newPage(browser, state) {
       return;
     }
     if (u.match(/\/teams$/) && method === 'GET') {
-      await json({ teams: MGMT_TEAMS, total: MGMT_TEAMS.length });
+      if (state.mgmtStatus) {
+        await json({ detail: 'boom' }, state.mgmtStatus);
+        return;
+      }
+      if (state.mgmtHold) await state.mgmtHold;
+      const teams = state.mgmtTeams || MGMT_TEAMS;
+      await json({ teams, total: teams.length });
       return;
     }
     await json({ ok: true });
@@ -245,6 +255,111 @@ test('a later route without ?edit does not reopen the modal', async () => {
     await page.waitForTimeout(300);
     const view = await page.evaluate(modalState);
     assert.equal(view.modal, false, 'route without ?edit must not reopen the modal');
+  } finally {
+    await browser.close();
+  }
+});
+
+test('metadata feed OK + management feed failed → no editable empty draft, no PUT', async () => {
+  const browser = await chromium.launch();
+  try {
+    const { page, log } = await newPage(browser, { role: 'administrator', mgmtStatus: 500 });
+    await page.evaluate(() => {
+      const el = document.getElementById('app');
+      el.route = 'teams?edit=team_club1_senior_m';
+      el.org = { club: { id: 'club1', name: 'Club Test' }, role: 'administrator' };
+      el.user = 'admin';
+    });
+    // my-teams resolves; the edit intent drains into the port — a metadata
+    // row is NOT a roster. The editor must fail closed, not open players:[].
+    await page.waitForFunction(() => {
+      const el = document.getElementById('app');
+      return el._myTeamsLoaded === true && el._teamsLoading === false;
+    }, { timeout: 10000 });
+    await page.waitForTimeout(400);
+    const view = await page.evaluate(() => {
+      const sr = document.getElementById('app').shadowRoot;
+      const modal = sr.querySelector('[data-edit-modal]');
+      return {
+        draft: !!(modal && modal.querySelector('[data-player-name="0"], [data-add-player]')),
+        modal: !!modal,
+        error: sr.querySelector('.onboard-error')?.textContent?.trim() || '',
+      };
+    });
+    assert.equal(view.draft, false, 'a metadata row never opens a roster draft');
+    assert.match(view.error, /plantilla|equipo|cargar|HTTP/i, 'truthful unavailable state');
+    const puts = log.filter((e) => e.method === 'PUT' && /\/teams\//.test(e.url));
+    assert.equal(puts.length, 0, 'no full-replace PUT can erase a real roster');
+  } finally {
+    await browser.close();
+  }
+});
+
+test('management row missing players → unavailable, not a phantom empty roster', async () => {
+  const browser = await chromium.launch();
+  try {
+    // The feed answers but the row carries no roster field — malformed,
+    // never a known-empty draft.
+    const { page, log } = await newPage(browser, {
+      role: 'administrator',
+      mgmtTeams: [
+        { id: 'team_club1_senior_m', club_id: 'club1', name: 'Senior Masculino', category: 'senior', gender: 'M', label: '', archived: false },
+      ],
+    });
+    await page.evaluate(() => {
+      const el = document.getElementById('app');
+      el.route = 'teams?edit=team_club1_senior_m';
+      el.org = { club: { id: 'club1', name: 'Club Test' }, role: 'administrator' };
+      el.user = 'admin';
+    });
+    await page.waitForFunction(() => {
+      const el = document.getElementById('app');
+      return el._myTeamsLoaded === true && el._teamsLoading === false;
+    }, { timeout: 10000 });
+    await page.waitForTimeout(400);
+    const view = await page.evaluate(() => {
+      const sr = document.getElementById('app').shadowRoot;
+      return {
+        modal: !!sr.querySelector('[data-edit-modal]'),
+        error: sr.querySelector('.onboard-error')?.textContent?.trim() || '',
+      };
+    });
+    assert.equal(view.modal, false, 'missing players is unavailable, not empty');
+    assert.match(view.error, /plantilla|inválida|cargar/i);
+    const puts = log.filter((e) => e.method === 'PUT' && /\/teams\//.test(e.url));
+    assert.equal(puts.length, 0);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('delayed management feed → the edit intent waits, then opens the confirmed roster', async () => {
+  const browser = await chromium.launch();
+  try {
+    let release;
+    const hold = new Promise((r) => { release = r; });
+    const { page } = await newPage(browser, { role: 'administrator', mgmtHold: hold });
+    await page.evaluate(() => {
+      const el = document.getElementById('app');
+      el.route = 'teams?edit=team_club1_junior_f';
+      el.org = { club: { id: 'club1', name: 'Club Test' }, role: 'administrator' };
+      el.user = 'admin';
+    });
+    await page.waitForFunction(() =>
+      document.getElementById('app')._myTeamsLoaded === true,
+    { timeout: 10000 });
+    await page.waitForTimeout(400);
+    const early = await page.evaluate(() =>
+      !!document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]'));
+    assert.equal(early, false, 'no draft while the roster read is still pending');
+    release();
+    await page.waitForFunction(() => {
+      const m = document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]');
+      return m && m.querySelector('[data-player-name="0"]');
+    }, { timeout: 10000 });
+    const name = await page.evaluate(() =>
+      document.getElementById('app').shadowRoot.querySelector('[data-player-name="0"]').value);
+    assert.equal(name, 'Ana García', 'confirmed roster-bearing read opens the editor');
   } finally {
     await browser.close();
   }

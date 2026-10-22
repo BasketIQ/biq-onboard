@@ -59,9 +59,15 @@ draft and reports inside the modal.
   generation, so a late save can never close or repaint the fresh
   editor. Context setter retires the editor whenever the fingerprint
   changes (including same-epoch working-set/principal transitions).
-- Saves serialize: inputs and the save control are disabled while a
+- ~~Saves serialize: inputs and the save control are disabled while a
   payload is in flight, and a second submission is dropped — a stale
-  completion can never discard newer typed edits.
+  completion can never discard newer typed edits.~~
+  **Superseded 2026-10-22 by UX/UI V2 autosave** (biq-onboard #65): there
+  is no save control; inputs stay editable while saving and a serial
+  queue sends later edits next — see
+  `2026-10-23-team-editor-autosave-contract.md`. The guarantee that a
+  stale completion never discards newer typed edits still holds (owner
+  fencing + post-save DOM comparison).
 - Personal `toModel` echo-validates the served envelope before any
   model exists: `team_id` echo, `schema_version: "1.0"`, context
   id/epoch match, complete `owner_scope` union against the active

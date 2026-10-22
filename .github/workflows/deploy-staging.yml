@@ -62,22 +62,22 @@ jobs:
       - name: Setup self-hosted env
         uses: ./.github/actions/setup-self-hosted-env
 
-      - name: Authenticate to Google Cloud
+      - name: Authenticate to Google Cloud (GAR token only — no ADC)
+        id: auth
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ vars.GCP_BIQ_WIF_PROVIDER }}
           service_account: ${{ vars.GCP_DEPLOYER_SA }}
-          create_credentials_file: true
-          export_environment_variables: true
-      - name: Set up gcloud
-        uses: google-github-actions/setup-gcloud@v2
+          token_format: access_token
+          create_credentials_file: false
+          export_environment_variables: false
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - name: Install server dependencies
         run: |
-          TOKEN="$(gcloud auth print-access-token)"
+          TOKEN="${{ steps.auth.outputs.access_token }}"
           python3 -m pip install --upgrade pip
           # Version comes from server/pyproject.toml (single source of truth).
           BIQ_CORE_VERSION=$(grep 'biq-core\[org\]==' server/pyproject.toml | head -1 | sed 's/.*==\([^"]*\).*/\1/')
@@ -86,6 +86,9 @@ jobs:
           python3 -m pip install -e "./server[firestore,test]"
       - name: Run pytest
         run: python3 -m pytest server/tests -q
+      - name: CI AI guard (rule 10)
+        # -q hides test ids; this run makes the guard's execution visible.
+        run: python3 -m pytest -q -rA server/tests/test_ci_ai_guard.py
 
   staging:
     needs: [test]

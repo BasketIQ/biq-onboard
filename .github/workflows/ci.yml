@@ -50,18 +50,19 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Authenticate to Google Cloud (biq-core[org] lives in private GAR)
+      - name: Authenticate to Google Cloud (GAR token only — no ADC)
+        id: auth
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ vars.GCP_BIQ_WIF_PROVIDER }}
           service_account: ${{ vars.GCP_DEPLOYER_SA }}
-
-      - name: Set up gcloud
-        uses: google-github-actions/setup-gcloud@v2
+          token_format: access_token
+          create_credentials_file: false
+          export_environment_variables: false
 
       - name: Install server (test extra) — biq-core from GAR (ADR-009)
         run: |
-          TOKEN="$(gcloud auth print-access-token)"
+          TOKEN="${{ steps.auth.outputs.access_token }}"
           pip install "./server[test]" \
             --extra-index-url "https://oauth2accesstoken:${TOKEN}@europe-west1-python.pkg.dev/basketiq-platform-prod/basketiq-python/simple/"
 
@@ -80,4 +81,9 @@ jobs:
           BIQ_ORG_STORE: memory
           BIQ_ROLES_STORE: memory
         run: pytest -q
+        working-directory: server
+
+      - name: CI AI guard (rule 10)
+        # -q hides test ids; this run makes the guard's execution visible.
+        run: python -m pytest -q -rA tests/test_ci_ai_guard.py
         working-directory: server

@@ -59,6 +59,9 @@ jobs:
         with:
           ref: ${{ github.event_name == 'pull_request' && github.head_ref || github.ref_name }}
           persist-credentials: false
+      - name: Setup self-hosted env
+        uses: ./.github/actions/setup-self-hosted-env
+
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
         with:

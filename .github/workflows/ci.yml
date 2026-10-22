@@ -82,3 +82,8 @@ jobs:
           BIQ_ROLES_STORE: memory
         run: pytest -q
         working-directory: server
+
+      - name: CI AI guard (rule 10)
+        # -q hides test ids; this run makes the guard's execution visible.
+        run: python -m pytest -q -rA tests/test_ci_ai_guard.py
+        working-directory: server

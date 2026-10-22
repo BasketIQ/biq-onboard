@@ -86,6 +86,9 @@ jobs:
           python3 -m pip install -e "./server[firestore,test]"
       - name: Run pytest
         run: python3 -m pytest server/tests -q
+      - name: CI AI guard (rule 10)
+        # -q hides test ids; this run makes the guard's execution visible.
+        run: python3 -m pytest -q -rA server/tests/test_ci_ai_guard.py
 
   staging:
     needs: [test]

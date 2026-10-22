@@ -51,6 +51,9 @@ async function startServer() {
 }
 
 async function stopServer() {
+  // A failed test can skip its browser.close() (no try/finally) — drain
+  // lingering keep-alive sockets so close() cannot hang the suite.
+  server.closeAllConnections?.();
   await new Promise((r) => server.close(r));
 }
 
@@ -212,16 +215,15 @@ test('F12: Edit team opens inline form and saves via PUT', async () => {
     return !!(el.shadowRoot && el.shadowRoot.querySelector('[data-edit-team-name]'));
   }, { timeout: 10000 });
 
-  // Change the name and save
+  // Change the name — autosave serializes the PUT (no explicit save).
   await page.evaluate(() => {
     const input = document.getElementById('app').shadowRoot.querySelector('[data-edit-team-name]');
     input.value = 'Senior Masculino Editado';
     input.dispatchEvent(new Event('input', { bubbles: true }));
-    document.getElementById('app').shadowRoot.querySelector('[data-save-team]').click();
   });
 
-  // Wait for the PUT request
-  await page.waitForTimeout(500);
+  // Wait for the autosave PUT request (debounce + network)
+  await page.waitForTimeout(1200);
   const putCalls = log.filter((e) => e.method === 'PUT' && !e.url.includes('archive') && !e.url.includes('unarchive'));
   assert.ok(putCalls.length >= 1, 'PUT request made to update team');
   const body = JSON.parse(putCalls[0].postData || '{}');
@@ -371,9 +373,8 @@ test('Item 28: inline edit sends competitive_level in the PUT body', async () =>
     const sel = document.getElementById('app').shadowRoot.querySelector('[data-edit-team-level]');
     sel.value = 'national';
     sel.dispatchEvent(new Event('change', { bubbles: true }));
-    document.getElementById('app').shadowRoot.querySelector('[data-save-team]').click();
   });
-  await page.waitForTimeout(500);
+  await page.waitForTimeout(1200); // autosave: change acelera el envío
 
   const puts = log.filter((e) => e.method === 'PUT' && e.url.match(/\/teams\/[^/]+$/) && !e.url.includes('archive'));
   assert.equal(puts.length, 1, 'exactly one update request');
@@ -539,7 +540,7 @@ test('Plantilla: roster modal prefills players, add-row survives re-render, PUT 
   });
   assert.equal(survived, 'Ana García|7', 'existing roster row survives add-row re-render');
 
-  // Type into the new row, then save.
+  // Type into the new row — autosave persists without an explicit save.
   await page.evaluate(() => {
     const sr = document.getElementById('app').shadowRoot;
     const n = sr.querySelector('[data-player-name="1"]');
@@ -548,9 +549,8 @@ test('Plantilla: roster modal prefills players, add-row survives re-render, PUT 
     const num = sr.querySelector('[data-player-number="1"]');
     num.value = '12';
     num.dispatchEvent(new Event('input', { bubbles: true }));
-    sr.querySelector('[data-save-team]').click();
   });
-  await page.waitForTimeout(500);
+  await page.waitForTimeout(1200);
 
   const puts = log.filter((e) => e.method === 'PUT' && e.url.match(/\/teams\/[^/]+$/) && !e.url.includes('archive'));
   assert.equal(puts.length, 1, 'exactly one update request');
@@ -565,7 +565,7 @@ test('Plantilla: roster modal prefills players, add-row survives re-render, PUT 
   await browser.close();
 });
 
-test('Plantilla: remove row and empty-name rows are dropped from the PUT body', async () => {
+test('Plantilla: a blank new row blocks autosave until explicitly removed (R1)', async () => {
   const browser = await chromium.launch();
   const { page, log } = await newPage(browser);
 
@@ -586,7 +586,9 @@ test('Plantilla: remove row and empty-name rows are dropped from the PUT body', 
     return !!document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]');
   }, { timeout: 10000 });
 
-  // Two added rows: one filled, one left blank — the blank row must not be sent.
+  // Two added rows: one filled, one left blank — the blank NEW row is an
+  // incomplete edit, not a row to drop silently: autosave must refuse and
+  // surface pending feedback, never "Guardado".
   for (let i = 0; i < 2; i++) {
     await page.evaluate(() => {
       document.getElementById('app').shadowRoot.querySelector('[data-add-player]').click();
@@ -601,24 +603,37 @@ test('Plantilla: remove row and empty-name rows are dropped from the PUT body', 
     n.dispatchEvent(new Event('input', { bubbles: true }));
   });
 
-  // Remove the first (filled) row — only the blank row remains → empty roster.
+  await page.waitForFunction(() => {
+    const sr = document.getElementById('app').shadowRoot;
+    const detail = sr.querySelector('[data-edit-save-detail]');
+    return !!(detail && !detail.hidden && /fila nueva|jugador/i.test(detail.textContent));
+  }, { timeout: 10000 });
+  await page.waitForTimeout(800); // debounce settles — still no PUT
+  let puts = log.filter((e) => e.method === 'PUT' && e.url.match(/\/teams\/[^/]+$/) && !e.url.includes('archive'));
+  assert.equal(puts.length, 0, 'no PUT while a blank new row is pending');
+  const chip = await page.evaluate(() =>
+    document.getElementById('app').shadowRoot.querySelector('[data-edit-save-status]')?.textContent || '');
+  assert.ok(!/Guardado/.test(chip), `blank new row must never report saved, chip: '${chip}'`);
+
+  // Explicit remove of the blank row releases the save — an intentional
+  // delete, not an implicit drop.
   await page.evaluate(() => {
-    document.getElementById('app').shadowRoot.querySelector('[data-remove-player="0"]').click();
+    document.getElementById('app').shadowRoot.querySelector('[data-remove-player="1"]').click();
   });
   await page.waitForFunction(() => {
     const sr = document.getElementById('app').shadowRoot;
     return sr.querySelectorAll('[data-roster-row]').length === 1;
   }, { timeout: 10000 });
+  await page.waitForFunction(() => {
+    const sr = document.getElementById('app').shadowRoot;
+    return /Guardado/.test(sr.querySelector('[data-edit-save-status]')?.textContent || '');
+  }, { timeout: 10000 });
 
-  await page.evaluate(() => {
-    document.getElementById('app').shadowRoot.querySelector('[data-save-team]').click();
-  });
-  await page.waitForTimeout(500);
-
-  const puts = log.filter((e) => e.method === 'PUT' && e.url.match(/\/teams\/[^/]+$/) && !e.url.includes('archive'));
-  assert.equal(puts.length, 1);
-  const body = JSON.parse(puts[0].postData);
-  assert.deepEqual(body.players, [], 'blank rows dropped — explicit clear is sent');
+  puts = log.filter((e) => e.method === 'PUT' && e.url.match(/\/teams\/[^/]+$/) && !e.url.includes('archive'));
+  assert.ok(puts.length >= 1, 'autosave PUT fired after the explicit removal');
+  const body = JSON.parse(puts[puts.length - 1].postData);
+  assert.deepEqual(body.players, [{ name: 'Marta Ruiz', number: null }],
+    'only the named row reaches the payload');
 
   await browser.close();
 });
@@ -643,10 +658,13 @@ test('Plantilla: dorsal out of range shows the error inside the modal and no PUT
     return !!document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]');
   }, { timeout: 10000 });
 
-  // No error on open.
+  // No error on open — the autosave detail span carries role="alert" but
+  // stays hidden until there is a message.
   const openError = await page.evaluate(() => {
     const m = document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]');
-    return m.querySelector('[role="alert"]')?.textContent ?? null;
+    const visible = Array.from(m.querySelectorAll('[role="alert"]'))
+      .find((a) => !a.hidden && a.textContent.trim());
+    return visible ? visible.textContent : null;
   });
   assert.equal(openError, null, 'error cleared on open');
 
@@ -663,22 +681,23 @@ test('Plantilla: dorsal out of range shows the error inside the modal and no PUT
   assert.ok(widths.name >= widths.num * 2, 'name field takes the remaining width');
   assert.equal(widths.numMaxLength, '2', 'dorsal limited to 2 characters');
 
-  // Set dorsal 100 (> 99) on the seeded row, then save.
+  // Set dorsal 100 (> 99) on the seeded row — autosave validation blocks
+  // the send and surfaces the reason inside the modal.
   await page.evaluate(() => {
     const sr = document.getElementById('app').shadowRoot;
     const num = sr.querySelector('[data-player-number="0"]');
     num.value = '100';
     num.dispatchEvent(new Event('input', { bubbles: true }));
-    sr.querySelector('[data-save-team]').click();
   });
   await page.waitForFunction(() => {
     const m = document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]');
-    return !!(m && m.querySelector('[role="alert"]'));
+    return !!(m && m.querySelector('[data-edit-save-detail][role="alert"]') &&
+      !m.querySelector('[data-edit-save-detail]').hidden);
   }, { timeout: 10000 });
 
   const alertText = await page.evaluate(() => {
     const m = document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]');
-    return m.querySelector('[role="alert"]').textContent;
+    return m.querySelector('[data-edit-save-detail]').textContent;
   });
   assert.match(alertText, /dorsal/i, 'in-modal alert explains the dorsal range');
   const puts = log.filter((e) => e.method === 'PUT' && e.url.match(/\/teams\/[^/]+$/) && !e.url.includes('archive'));

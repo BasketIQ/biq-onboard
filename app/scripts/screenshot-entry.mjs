@@ -92,7 +92,9 @@ const CASES = {
     bootstrap: { ...BASE_BOOTSTRAP, contexts: [CLUB('club-1', 'Club Baloncesto Prueba')] },
     teams: [],
   },
-  '1team-5clubs': {
+  // PD-ENTRY: a coach (≥1 active coached team) sees «Mi equipo» only —
+  // «Mi club» is hidden even with memberships present.
+  '1team-5clubs-coach': {
     bootstrap: { ...BASE_BOOTSTRAP, contexts: [
       CLUB('club-1', 'Club Baloncesto Prueba'),
       CLUB('club-2', 'Escuela Deportiva Norte'),
@@ -101,6 +103,34 @@ const CASES = {
       CLUB('club-5', 'Club Polideportivo Este'),
     ] },
     teams: [TEAM('pt-1', 'Paquetillos Infantil')],
+  },
+  // PD-CLUBS: ≥3 clubs for a non-coach member — the neutral
+  // «Elegir club» access (no valid reciente datum).
+  '0teams-5clubs': {
+    bootstrap: { ...BASE_BOOTSTRAP, contexts: [
+      CLUB('club-1', 'Club Baloncesto Prueba'),
+      CLUB('club-2', 'Escuela Deportiva Norte'),
+      CLUB('club-3', 'Asociación Basket Sur'),
+      CLUB('club-4', 'CB Linares Academy'),
+      CLUB('club-5', 'Club Polideportivo Este'),
+    ] },
+    teams: [],
+  },
+  // PD-CLUBS: an active club context is a valid reciente datum — the
+  // club card is the main access, the picker stays for the rest.
+  '0teams-5clubs-reciente': {
+    bootstrap: { ...BASE_BOOTSTRAP, contexts: [
+      CLUB('club-1', 'Club Baloncesto Prueba'),
+      CLUB('club-2', 'Escuela Deportiva Norte'),
+      CLUB('club-3', 'Asociación Basket Sur'),
+      CLUB('club-4', 'CB Linares Academy'),
+      CLUB('club-5', 'Club Polideportivo Este'),
+    ], active: {
+      context_id: 'ctx-1', context_epoch: 1,
+      owner_scope: { kind: 'club', club_id: 'club-2' },
+      team_ids: [], working_team_ids: [],
+    } },
+    teams: [],
   },
   '0teams-0clubs': {
     bootstrap: { ...BASE_BOOTSTRAP, contexts: [] },
@@ -149,7 +179,7 @@ const results = [];
 const failures = [];
 
 const browser = await chromium.launch();
-async function shoot(caseName, width, theme, spec, openHelp = false) {
+async function shoot(caseName, width, theme, spec, openDialog = null) {
   const page = await browser.newPage();
   await page.setViewportSize({ width, height: 800 });
   await page.route('**/api/**', async (route) => {
@@ -184,12 +214,18 @@ async function shoot(caseName, width, theme, spec, openHelp = false) {
       || !!el.shadowRoot.querySelector('[data-entry-personal-enter-team]')
       || !!el.shadowRoot.querySelector('.entry-note');
   }, { timeout: 15000 });
-  if (openHelp) {
+  if (openDialog === 'help') {
     await page.evaluate(() => {
       document.getElementById('app').shadowRoot.querySelector('[data-entry-help]').click();
     });
     await page.waitForFunction(() =>
       !!document.getElementById('app').shadowRoot.querySelector('[role="dialog"]'), { timeout: 10000 });
+  } else if (openDialog === 'picker') {
+    await page.evaluate(() => {
+      document.getElementById('app').shadowRoot.querySelector('[data-entry-club-picker-open]').click();
+    });
+    await page.waitForFunction(() =>
+      !!document.getElementById('app').shadowRoot.querySelector('.entry-picker-dialog'), { timeout: 10000 });
   }
   await page.waitForTimeout(350);
 
@@ -199,13 +235,14 @@ async function shoot(caseName, width, theme, spec, openHelp = false) {
   if (!overflow) failures.push(`${caseName}-${width}-${theme}: horizontal overflow`);
   results.push({ case: caseName, width, theme, check: 'scrollWidth<=innerWidth', ok: overflow });
 
-  if (openHelp) {
-    const m = await page.evaluate(() => {
+  if (openDialog === 'help' || openDialog === 'picker') {
+    const picker = openDialog === 'picker';
+    const m = await page.evaluate((p) => {
       const sr = document.getElementById('app').shadowRoot;
-      const dlg = sr.querySelector('.entry-help-dialog');
-      const title = sr.querySelector('.entry-help-title');
-      const para = sr.querySelector('.entry-help-dialog p');
-      const close = sr.querySelector('.entry-help-close');
+      const dlg = sr.querySelector(p ? '.entry-picker-dialog' : '.entry-help-dialog');
+      const title = sr.querySelector(p ? '.entry-picker-title' : '.entry-help-title');
+      const para = sr.querySelector(p ? '[data-entry-club-picker-search]' : '.entry-help-dialog p');
+      const close = sr.querySelector(p ? '.entry-picker-dialog .entry-help-close' : '.entry-help-close');
       const cs = (el) => getComputedStyle(el);
       return {
         bg: cs(dlg).backgroundColor,
@@ -214,7 +251,7 @@ async function shoot(caseName, width, theme, spec, openHelp = false) {
         closeFg: cs(close).color,
         closeBg: cs(close).backgroundColor,
       };
-    });
+    }, picker);
     const bgHex = rgbToHex(m.bg);
     const titleR = contrast(rgbToHex(m.title), bgHex);
     const paraR = contrast(rgbToHex(m.para), bgHex);
@@ -246,7 +283,8 @@ for (const [caseName, spec] of Object.entries(CASES)) {
   }
 }
 for (const theme of THEMES) {
-  await shoot('help-open', 390, theme, CASES['1team-1club'], true);
+  await shoot('help-open', 390, theme, CASES['1team-1club'], 'help');
+  await shoot('picker-open', 390, theme, CASES['0teams-5clubs'], 'picker');
 }
 
 await browser.close();

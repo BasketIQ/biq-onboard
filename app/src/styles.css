@@ -1745,3 +1745,76 @@
     align-items: center;
   }
 }
+
+/* PD-CLUBS «Elegir club» picker (≥3 clubs): same bottom-sheet language
+ * as the help dialog. */
+.entry-create-count {
+  color: var(--biq-muted, #5f6b82);
+  font-size: 0.78rem;
+  font-weight: 500;
+}
+
+.entry-picker-backdrop {
+  position: fixed;
+  inset: 0;
+  background: var(--biq-color-scrim, rgb(0 0 0 / 45%));
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  z-index: 61;
+  padding: 16px 16px calc(16px + env(safe-area-inset-bottom, 0px));
+}
+
+.entry-picker-dialog {
+  background: var(--biq-card, var(--biq-surface-1, #fff));
+  color: var(--biq-text, #111);
+  border-radius: 18px;
+  padding: 18px;
+  width: 100%;
+  max-width: 380px;
+  max-height: min(80vh, 560px);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  box-shadow: 0 8px 32px rgb(0 0 0 / 28%);
+}
+
+.entry-picker-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.entry-picker-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 1.1rem;
+  font-weight: 750;
+  letter-spacing: -0.02em;
+  margin: 0;
+}
+
+.entry-picker-search input {
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 44px;
+  padding: 8px 10px;
+  border: 1px solid var(--biq-line, #e0e0e0);
+  border-radius: 10px;
+  font: inherit;
+  font-size: 0.9rem;
+  background: var(--biq-surface-2, #f4f6fa);
+  color: var(--biq-text, #111);
+}
+
+.entry-picker-list {
+  overflow-y: auto;
+  margin: 0 -4px;
+  padding: 0 4px;
+}
+
+@media (width >= 560px) {
+  .entry-picker-backdrop {
+    align-items: center;
+  }
+}

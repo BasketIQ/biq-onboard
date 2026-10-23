@@ -20,9 +20,20 @@ fija una pantalla única con entrada directa por tarjeta.
 - **Una pantalla, sin pestañas ni título visible.** `h1` oculto
   («Entrar en BasketIQ») para accesibilidad; bloques «Mi equipo»
   (etiqueta `ENTRY_TEAM_ROLE_LABEL` = «Entrenador») y «Mi club»
-  (`ENTRY_CLUB_ROLE_LABEL` = «Director deportivo») renderizados juntos,
-  con los copies del prototipo. «Salir», crear y canjear quedan como
-  acciones secundarias.
+  renderizados juntos, con los copies del prototipo. «Salir», crear y
+  canjear quedan como acciones secundarias.
+- **PD-ENTRY (Director 2026-10-23).** «Mi equipo» muestra los equipos
+  que entrenas; «Mi club» NO se muestra a un entrenador. Como el
+  bootstrap no proyecta rol ni catálogo de equipos de club, el universo
+  «entrenado» atestiguable en entrada es el feed de equipos personales:
+  un entrenador confirmado (feed cargado con ≥1 equipo activo) ve solo
+  «Mi equipo». Mientras el feed carga o tras su error acotado, el bloque
+  de club permanece — ocultarlo dejaría membresías sin acceso por un
+  fallo de feed. Los equipos archivados no hacen entrenador. El bloque
+  «Mi club» no lleva etiqueta de rol: el feed no atestigua «Director
+  deportivo» para toda membresía (PD-CLUBS: sin rol en los accesos).
+  La invitación por correo queda fuera del bloque y sigue al alcance de
+  un entrenador.
 - **Tarjeta completa = botón.** Equipo: nombre + categoría/composición
   (`teamMeta`), sin contador de jugadores. Club: solo nombre — no hay
   fuente autoritativa de localidad ni de nº de equipos, así que no se
@@ -54,12 +65,20 @@ fija una pantalla única con entrada directa por tarjeta.
     `#/onboard/spaces` o nav «Espacios», desconexión) incrementa `gen` e
     invalida el intent en vuelo.
 
-## Pendiente del Director
-
-- **PD-ENTRY**: las etiquetas de bloque que no son de director están en
-  constantes nombradas para cambiar de copy sin tocar el render.
-- **PD-CLUBS**: con ≥3 clubes se pintan todas las tarjetas (decisión
-  interina); el picker/buscador de club NO está construido.
+- **PD-CLUBS (Director 2026-10-23).** ≤2 clubes → una tarjeta por club.
+  ≥3 → UN acceso principal + picker «Elegir club» con buscador y entrada
+  directa por fila. El acceso principal es el «Club reciente» solo cuando
+  existe un dato válido ligado al usuario — el contexto activo que
+  devuelve el bootstrap o el marcador `biq.entry.lastClub.<account_id>`
+  (sessionStorage) escrito al entrar con éxito en un club — validado
+  siempre contra el feed; sin dato válido el acceso es el picker neutro,
+  nunca un club arbitrario. El marcador se limpia al salir y es solo una
+  pista de presentación: nunca decide autorización. El picker comparte el
+  contrato modal del diálogo de ayuda (`role=dialog`, `aria-modal`,
+  Escape/backdrop/cierre, foco al buscador al abrir y de vuelta al
+  disparador al cerrar, fondo `inert`); el filtro por nombre es insensible
+  a diacríticos y alterna `hidden` en las filas sin repintar, para no
+  perder el foco.
 
 ## Compatibilidad con la carcasa actual
 

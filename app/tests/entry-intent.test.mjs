@@ -243,7 +243,8 @@ test('double click → exactly 1 activate POST and 1 event', async () => {
 test('success → exactly 1 biq-context:activated and busy stays «Entrando…»', async () => {
   const browser = await chromium.launch();
   try {
-    const { page, events } = await newIntentPage(browser);
+    // No coached teams → non-coach member → «Mi club» access renders (PD-ENTRY).
+    const { page, events } = await newIntentPage(browser, { personalTeams: [] });
     await page.waitForFunction(() =>
       !!document.getElementById('app').shadowRoot.querySelector('[data-entry-club-activate]'),
       { timeout: 10000 });
@@ -309,6 +310,7 @@ test('POST network failure → uncertain transport message, POST count stays 1, 
     let failActivate = true;
     const { page, counts, events, shadowText } = await newIntentPage(browser, {
       activateSpec: () => (failActivate ? { network: true } : 'ok'),
+      personalTeams: [], // non-coach member — the club access renders
     });
     await page.waitForFunction(() =>
       !!document.getElementById('app').shadowRoot.querySelector('[data-entry-club-activate]'),
@@ -476,7 +478,7 @@ test('redeem→activate chain: busy holds across both requests, one event at the
 test('unconfirmed entry: after the bounded wait, «No se pudo confirmar la entrada» + «Reintentar» (GET only)', async () => {
   const browser = await chromium.launch();
   try {
-    const { page, counts, events } = await newIntentPage(browser);
+    const { page, counts, events } = await newIntentPage(browser, { personalTeams: [] });
     await page.evaluate(() => { document.getElementById('app')._entryConfirmMs = 150; });
     await clickShadow(page, '[data-entry-club-activate]');
     await new Promise((r) => setTimeout(r, 300));

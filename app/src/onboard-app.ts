@@ -460,11 +460,25 @@ const PERSONAL_CATEGORIES: Array<{ key: string; label: string }> = [
 ];
 
 // ─── Entry screen v1 (entry-login lot, 2026-10-23) ─────────────────────
-// Role labels are product copy pending PD-ENTRY — the wording for a
-// non-director club membership is decided there, so both live in named
-// constants instead of being scattered through the markup.
+// PD-ENTRY (Director 2026-10-23): «Mi equipo» shows the teams the user
+// coaches; «Mi club» is not shown to a coach. The coached universe the
+// entry screen can attest is the personal-teams feed (the bootstrap
+// carries no per-club role or coached-team catalog — README §PD-ENTRY);
+// a confirmed coach (feed loaded, ≥1 active coached team) sees only
+// «Mi equipo». Until the feed resolves, or if it cannot, the club block
+// stays visible — hiding it would strand memberships we cannot disprove.
+// The «Entrenador» chip describes the coach space itself; the club block
+// carries NO role chip because the feed cannot attest «Director
+// deportivo» for every membership (PD-CLUBS: no role on club access).
 const ENTRY_TEAM_ROLE_LABEL = 'Entrenador';
-const ENTRY_CLUB_ROLE_LABEL = 'Director deportivo';
+// PD-CLUBS (Director 2026-10-23): 2 clubs → two cards; ≥3 → one main
+// access (the «Club reciente» when a valid datum bound to the current
+// user exists — the server's active context, else the account-bound
+// last-club marker written on a successful club entry) + «Elegir club»
+// searchable picker; never an arbitrary club as the main access.
+const ENTRY_LAST_CLUB_KEY_PREFIX = 'biq.entry.lastClub.';
+const normEntryText = (value: string) =>
+  value.toLowerCase().normalize('NFD').replace(/\p{M}/gu, '');
 // Compact Chispa model, bundled from the module-local asset
 // (app/src/assets/chispa-head-compact-v2.svg, sha256 1b1c51a6…e9c9 —
 // pinned by tests/entry-selector.test.mjs). Module-local by design: this
@@ -511,6 +525,12 @@ class BiqOnboardApp extends HTMLElement {
   private _invitePreview: { club_id: string; club_name: string } | null = null;
   private _inviteLoading = false;
   private _helpOpen = false;
+  // PD-CLUBS ≥3-club picker: open state + live search query. The query
+  // persists across re-renders so a busy repaint never un-hides rows the
+  // user already filtered out; row visibility is also mirrored in the DOM
+  // without re-rendering so typing never loses focus.
+  private _clubPickerOpen = false;
+  private _clubPickerQuery = '';
   private _clubCreateOpen = false;
   private _teamCreateOpen = false;
   private _entryError: string | null = null;
@@ -707,10 +727,14 @@ class BiqOnboardApp extends HTMLElement {
     const styleEl = document.createElement('style');
     styleEl.textContent = styles;
     this.shadow.appendChild(styleEl);
-    // Entry help dialog: Escape closes from any focus inside it (the
-    // listener lives on the host so re-renders never have to rewire it).
+    // Entry dialogs: Escape closes from any focus inside (the listener
+    // lives on the host so re-renders never have to rewire it).
     this.addEventListener('keydown', (ev) => {
-      if (ev.key === 'Escape' && this._helpOpen) {
+      if (ev.key !== 'Escape') return;
+      if (this._clubPickerOpen) {
+        ev.preventDefault();
+        this._closeClubPicker();
+      } else if (this._helpOpen) {
         ev.preventDefault();
         this._closeEntryHelp();
       }
@@ -1355,6 +1379,9 @@ class BiqOnboardApp extends HTMLElement {
     this._entryBusy = true;
     this._entryError = null;
     this._entryRecovery = null;
+    // An entry mutation dismisses the club picker — a failure surfaces on
+    // the main screen where the error and recovery affordances live.
+    this._clubPickerOpen = false;
     this.render();
     return intent;
   }
@@ -1432,6 +1459,12 @@ class BiqOnboardApp extends HTMLElement {
 
   private _emitActivated(intent: EntryIntent): void {
     intent.emitted = true;
+    // PD-CLUBS «Club reciente»: a successful club entry is the datum that
+    // feeds the main access on the next visit — stored per account, only
+    // ever honored while the club still appears in the entry feed.
+    if (this._intentAccess() === 'club' && intent.club_id) {
+      this._writeLastClub(intent.club_id);
+    }
     // Same event contract as before; the detail is additive — the shell
     // must not depend on it.
     this.dispatchEvent(
@@ -1518,6 +1551,28 @@ class BiqOnboardApp extends HTMLElement {
       await this._postActivate('club', clubId);
       intent.mutated = true;
     });
+  }
+
+  // PD-CLUBS «Club reciente» datum — account-bound session marker. It is
+  // only a presentation hint: read back only while the id still appears
+  // among the entry feed's club candidates, so a revoked membership or a
+  // different account can never leak a club into the main access.
+  private _lastClubKey(): string {
+    return `${ENTRY_LAST_CLUB_KEY_PREFIX}${this._bootstrap?.account_id || ''}`;
+  }
+
+  private _writeLastClub(clubId: string): void {
+    try {
+      sessionStorage.setItem(this._lastClubKey(), clubId);
+    } catch { /* storage unavailable — reciente is a hint, not a gate */ }
+  }
+
+  private _readLastClubId(): string {
+    try {
+      return sessionStorage.getItem(this._lastClubKey()) || '';
+    } catch {
+      return '';
+    }
   }
 
   set route(value: string) {
@@ -3941,6 +3996,15 @@ class BiqOnboardApp extends HTMLElement {
 
     const personalTeams = (this._personalTeams || []).filter((t) => !t.archived);
     const archivedTeams = (this._personalTeams || []).filter((t) => t.archived);
+    // PD-ENTRY: «Mi club» is not shown to a coach. A coach is CONFIRMED
+    // only by a loaded feed with ≥1 active coached team — while the feed
+    // is loading or after a bounded error the club block stays up (the
+    // honest fallback: hiding it would strand memberships on a feed
+    // failure).
+    const isCoach =
+      this._personalReadAllowed() &&
+      this._personalTeamsStatus === 'ready' &&
+      personalTeams.length > 0;
     const atTeamCap = personalTeams.length >= 2;
     const teamMeta = (t: PersonalTeamRow) =>
       `${escapeHtml(t.category_label || t.category_key)}${t.gender && t.gender !== 'X' ? ` · ${escapeHtml(t.gender)}` : ''}${t.age_band ? ` · ${escapeHtml(t.age_band)}` : ''}`;
@@ -3997,32 +4061,106 @@ class BiqOnboardApp extends HTMLElement {
         `}
       </section>`;
 
-    const clubBlock = `
+    // Emailed invites are an explicit join gesture, not part of the club
+    // membership universe — they stay reachable even when the club block
+    // is hidden for a coach (PD-ENTRY).
+    const inviteBlock = this._invitePreview ? `
+      <div class="entry-invite">
+        <p>Invitación para <strong>${escapeHtml(this._invitePreview.club_name || this._invitePreview.club_id)}</strong></p>
+        <button class="onboard-btn onboard-btn-primary" type="button" data-entry-invite-redeem ${busy ? 'disabled' : ''}>Unirme al club</button>
+      </div>` : '';
+
+    const clubCard = (
+      c: ContextCandidate,
+      meta = '',
+      opts: { pickerRow?: boolean; hidden?: boolean } = {},
+    ) => {
+      const clubId = c.owner_scope.club_id || '';
+      const clubName = c.name || clubId;
+      const rowAttrs = opts.pickerRow
+        ? ` data-entry-club-picker-row="${escapeHtml(normEntryText(clubName))}"`
+        : '';
+      return `
+        <li${rowAttrs}${opts.hidden ? ' hidden' : ''}><button class="entry-card" type="button" data-entry-club-activate="${escapeHtml(clubId)}" ${busy ? 'disabled' : ''} aria-label="Entrar en ${escapeHtml(clubName)}">
+          <span class="entry-card-icon entry-card-icon-club">${ENTRY_CLUB_ICON_SVG}</span>
+          <span class="entry-card-copy">
+            <span class="entry-card-title">${escapeHtml(clubName)}</span>
+            ${meta ? `<span class="entry-card-meta">${escapeHtml(meta)}</span>` : ''}
+          </span>
+          <span class="entry-card-arrow">${ENTRY_ARROW_SVG}</span>
+        </button></li>`;
+    };
+
+    // PD-CLUBS: ≤2 clubs → one card each. ≥3 → one main access: the
+    // server-active club first, else the account-bound last-entered club,
+    // both validated against the feed; with no valid datum the access is
+    // the neutral «Elegir club» picker — never an arbitrary club. Cards
+    // carry only the name (no locality / team count / role — no
+    // authoritative pre-entry source).
+    const activeClubId =
+      active && active.owner_scope.kind === 'club'
+        ? active.owner_scope.club_id || ''
+        : '';
+    const recentClubId = activeClubId || this._readLastClubId();
+    const recentClub = recentClubId
+      ? clubs.find((c) => (c.owner_scope.club_id || '') === recentClubId)
+      : undefined;
+    const clubQuery = normEntryText(this._clubPickerQuery.trim());
+    const pickerRows = clubs.filter(
+      (c) =>
+        !clubQuery ||
+        normEntryText((c.name || c.owner_scope.club_id || '')).includes(clubQuery),
+    );
+    const clubPicker = this._clubPickerOpen ? `
+      <div class="entry-picker-backdrop" data-entry-club-picker-backdrop>
+        <div class="entry-picker-dialog" role="dialog" aria-modal="true" aria-labelledby="entry-picker-title">
+          <div class="entry-picker-head">
+            <h2 class="entry-picker-title" id="entry-picker-title">Elegir club</h2>
+            <button class="entry-help-close" type="button" data-entry-club-picker-close aria-label="Cerrar">${ENTRY_CLOSE_SVG}</button>
+          </div>
+          <div class="entry-picker-search">
+            <input type="search" data-entry-club-picker-search value="${escapeHtml(this._clubPickerQuery)}" placeholder="Buscar club" aria-label="Buscar club" ${busy ? 'disabled' : ''} />
+          </div>
+          <ul class="entry-cards entry-picker-list" data-entry-club-picker-list>
+            ${clubs.map((c) => clubCard(c, '', {
+              pickerRow: true,
+              hidden:
+                !!clubQuery &&
+                !normEntryText((c.name || c.owner_scope.club_id || '')).includes(clubQuery),
+            })).join('')}
+          </ul>
+          <p class="entry-empty" data-entry-club-picker-empty ${pickerRows.length ? 'hidden' : ''}>No hay clubes que coincidan${clubQuery ? ` con «${escapeHtml(this._clubPickerQuery)}»` : ''}.</p>
+        </div>
+      </div>` : '';
+
+    const clubAccess = clubs.length
+      ? clubs.length <= 2
+        ? `<ul class="entry-cards">${clubs.map((c) => clubCard(c)).join('')}</ul>`
+        : recentClub
+          ? `<ul class="entry-cards">${clubCard(recentClub, 'Club reciente')}</ul>
+            <button class="entry-create" type="button" data-entry-club-picker-open ${busy ? 'disabled' : ''} aria-haspopup="dialog">${ENTRY_CLUB_ICON_SVG}<span>Elegir club</span><span class="entry-create-count">${clubs.length} clubes</span></button>`
+          : // No valid «reciente» datum: the picker IS the main access —
+            // a full card, never an arbitrary club (PD-CLUBS).
+            `<ul class="entry-cards">
+              <li><button class="entry-card" type="button" data-entry-club-picker-open ${busy ? 'disabled' : ''} aria-haspopup="dialog" aria-label="Elegir entre tus ${clubs.length} clubes">
+                <span class="entry-card-icon entry-card-icon-club">${ENTRY_CLUB_ICON_SVG}</span>
+                <span class="entry-card-copy">
+                  <span class="entry-card-title">Elegir club</span>
+                  <span class="entry-card-meta">${clubs.length} clubes</span>
+                </span>
+                <span class="entry-card-arrow">${ENTRY_ARROW_SVG}</span>
+              </button></li>
+            </ul>`
+      : `<p class="entry-empty">No tienes clubes todavía.</p>`;
+
+    const clubBlock = isCoach ? '' : `
       <section class="entry-block" aria-labelledby="entry-club-heading">
         <div class="entry-block-head">
           <h2 class="entry-block-title" id="entry-club-heading">Mi club</h2>
-          <span class="entry-role">${ENTRY_CLUB_ROLE_LABEL}</span>
         </div>
         <p class="entry-block-copy">Coordina los equipos y el staff. Define la metodología y acompaña la planificación de todo el club.</p>
         ${busyNote('club')}
-        ${this._invitePreview ? `
-          <div class="entry-invite">
-            <p>Invitación para <strong>${escapeHtml(this._invitePreview.club_name || this._invitePreview.club_id)}</strong></p>
-            <button class="onboard-btn onboard-btn-primary" type="button" data-entry-invite-redeem ${busy ? 'disabled' : ''}>Unirme al club</button>
-          </div>` : ''}
-        ${clubs.length ? `
-          <ul class="entry-cards">
-            ${clubs.map((c) => {
-              const clubId = c.owner_scope.club_id || '';
-              const clubName = (c as ContextCandidate & { name?: string }).name || clubId;
-              return `
-                <li><button class="entry-card" type="button" data-entry-club-activate="${escapeHtml(clubId)}" ${busy ? 'disabled' : ''} aria-label="Entrar en ${escapeHtml(clubName)}">
-                  <span class="entry-card-icon entry-card-icon-club">${ENTRY_CLUB_ICON_SVG}</span>
-                  <span class="entry-card-copy"><span class="entry-card-title">${escapeHtml(clubName)}</span></span>
-                  <span class="entry-card-arrow">${ENTRY_ARROW_SVG}</span>
-                </button></li>`;
-            }).join('')}
-          </ul>` : `<p class="entry-empty">No tienes clubes todavía.</p>`}
+        ${clubAccess}
         ${createAllowed ? `
           <button class="entry-create" type="button" data-entry-club-create-toggle ${busy ? 'disabled' : ''}>${ENTRY_PLUS_SVG}<span>Crear club</span></button>
           ${this._clubCreateOpen ? `
@@ -4081,11 +4219,12 @@ class BiqOnboardApp extends HTMLElement {
       </div>` : '';
 
     return `
-      <div class="entry-step"${this._helpOpen ? ' inert' : ''}>
+      <div class="entry-step"${this._helpOpen || this._clubPickerOpen ? ' inert' : ''}>
         <h1 class="sr-only">Entrar en BasketIQ</h1>
         ${activeLabel ? `<p class="entry-active">Trabajando en <strong>${escapeHtml(activeLabel)}</strong></p>` : ''}
         ${this._entryError ? `<p class="entry-error" role="alert">${escapeHtml(this._entryError)}</p>` : ''}
         ${recoveryMarkup}
+        ${inviteBlock}
         ${teamBlock}
         ${clubBlock}
         <div class="entry-utility">
@@ -4096,7 +4235,8 @@ class BiqOnboardApp extends HTMLElement {
           <button class="entry-logout" type="button" data-entry-logout ${busy ? 'disabled' : ''}>Salir</button>
         </div>
       </div>
-      ${helpDialog}`;
+      ${helpDialog}
+      ${clubPicker}`;
   }
 
   private _openEntryHelp(): void {
@@ -4115,6 +4255,47 @@ class BiqOnboardApp extends HTMLElement {
     // recreated by the re-render — same logical control, same selector).
     const trigger = this.shadow.querySelector('[data-entry-help]') as HTMLElement | null;
     trigger?.focus();
+  }
+
+  // PD-CLUBS ≥3-club picker — same modal contract as the help dialog:
+  // role=dialog + aria-modal, Escape/backdrop/close, focus into the search
+  // field on open and back to the trigger on close, inert background.
+  private _openClubPicker(): void {
+    if (this._clubPickerOpen) return;
+    this._clubPickerOpen = true;
+    this._clubPickerQuery = '';
+    this.render();
+    const search = this.shadow.querySelector('[data-entry-club-picker-search]') as HTMLElement | null;
+    search?.focus();
+  }
+
+  private _closeClubPicker(): void {
+    if (!this._clubPickerOpen) return;
+    this._clubPickerOpen = false;
+    this.render();
+    const trigger = this.shadow.querySelector('[data-entry-club-picker-open]') as HTMLElement | null;
+    trigger?.focus();
+  }
+
+  // Live name filter — visibility toggled in place so typing keeps focus;
+  // the same predicate runs at render time, so a busy repaint or a
+  // re-rendered list reproduces the filtered state exactly.
+  private _filterClubPicker(query: string): void {
+    this._clubPickerQuery = query;
+    const needle = normEntryText(query.trim());
+    const list = this.shadow.querySelector('[data-entry-club-picker-list]');
+    list?.querySelectorAll('[data-entry-club-picker-row]').forEach((row) => {
+      const name = (row as HTMLElement).dataset.entryClubPickerRow || '';
+      (row as HTMLElement).hidden = !!needle && !normEntryText(name).includes(needle);
+    });
+    const rows = Array.from(
+      list?.querySelectorAll('[data-entry-club-picker-row]') ?? [],
+    ).filter((row) => !(row as HTMLElement).hidden).length;
+    const empty = this.shadow.querySelector('[data-entry-club-picker-empty]') as HTMLElement | null;
+    if (empty) {
+      empty.hidden = rows > 0;
+      empty.textContent = `No hay clubes que coincidan${needle ? ` con «${query.trim()}»` : ''}.`;
+    }
   }
 
   private async loadInvitePreview(): Promise<void> {
@@ -4171,7 +4352,10 @@ class BiqOnboardApp extends HTMLElement {
       const keys: string[] = [];
       for (let i = 0; i < sessionStorage.length; i += 1) {
         const key = sessionStorage.key(i);
-        if (key?.startsWith('biq.activeTeamId.')) keys.push(key);
+        if (
+          key?.startsWith('biq.activeTeamId.') ||
+          key?.startsWith(ENTRY_LAST_CLUB_KEY_PREFIX)
+        ) keys.push(key);
       }
       keys.forEach((key) => sessionStorage.removeItem(key));
     } catch { /* storage no disponible */ }
@@ -4279,6 +4463,22 @@ class BiqOnboardApp extends HTMLElement {
     this.shadow.querySelector('[data-entry-help-backdrop]')?.addEventListener('click', (ev) => {
       if (ev.target === ev.currentTarget) this._closeEntryHelp();
     });
+
+    // PD-CLUBS «Elegir club» picker (≥3 clubs): open/close/backdrop and
+    // the live search — rows filter in place, keeping input focus.
+    this.shadow.querySelector('[data-entry-club-picker-open]')?.addEventListener('click', () => {
+      this._openClubPicker();
+    });
+    this.shadow.querySelector('[data-entry-club-picker-close]')?.addEventListener('click', () => {
+      this._closeClubPicker();
+    });
+    this.shadow.querySelector('[data-entry-club-picker-backdrop]')?.addEventListener('click', (ev) => {
+      if (ev.target === ev.currentTarget) this._closeClubPicker();
+    });
+    this.shadow.querySelector('[data-entry-club-picker-search]')?.addEventListener('input', (ev) => {
+      this._filterClubPicker((ev.target as HTMLInputElement).value);
+    });
+
     this.shadow.querySelector('[data-entry-club-create-toggle]')?.addEventListener('click', () => {
       this._clubCreateOpen = !this._clubCreateOpen;
       this.render();

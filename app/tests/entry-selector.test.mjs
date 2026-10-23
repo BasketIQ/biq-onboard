@@ -112,7 +112,7 @@ async function stopServer() {
  * `routeQuery` optionally sets el.route (e.g. 'entry?invite=tok-1').
  * Returns { page, log } — `log` captures every /api/** request.
  */
-async function newEntryPage(browser, { bootstrap = BOOTSTRAP, routeQuery = null, personalTeams = PERSONAL_TEAMS, personalContext = false, org = undefined, personalTeamsFailure = null, personalTeamsDelayMs = 0, personalTeamsHold = null } = {}) {
+async function newEntryPage(browser, { bootstrap = BOOTSTRAP, routeQuery = null, personalTeams = PERSONAL_TEAMS, personalContext = false, org = undefined, personalTeamsFailure = null, personalTeamsDelayMs = 0, personalTeamsHold = null, waitFeed = true } = {}) {
   const page = await browser.newPage();
   const log = [];
   let feedCalls = 0;
@@ -176,6 +176,19 @@ async function newEntryPage(browser, { bootstrap = BOOTSTRAP, routeQuery = null,
     const el = document.getElementById('app');
     return !!(el.shadowRoot && el.shadowRoot.childElementCount > 0);
   }, { timeout: 10000 });
+  // Let the personal feed settle before callers count cards: once the
+  // entry step renders, account-scope sessions are already 'loading' (the
+  // fetch starts inside loadBootstrap); 'uninitialized' under the selector
+  // means member scope — the feed is never fetched there by design.
+  // waitFeed:false is for tests that hold the response on purpose.
+  if (waitFeed) {
+    await page.waitForFunction(() => {
+      const el = document.getElementById('app');
+      if (!el.shadowRoot?.querySelector('.entry-step')) return true;
+      const s = el._personalTeamsStatus;
+      return s === 'ready' || s === 'error' || s === 'uninitialized';
+    }, { timeout: 10000 });
+  }
 
   return { page, log };
 }
@@ -1295,6 +1308,9 @@ test('OB60-3: delayed stale response after account switch never assigns old data
       personalTeamsHold: (n) => (n <= 2 ? oldResponseHeld : null),
       personalTeamsFailure: (n) =>
         n <= 2 ? { status: 200, body: { teams: [staleTeam] } } : null,
+      // The mount's requests stay held on purpose — the test drives its own
+      // status waits around the account switch.
+      waitFeed: false,
     });
     page.on('pageerror', (e) => errors.push(e));
     const feedGets = () =>

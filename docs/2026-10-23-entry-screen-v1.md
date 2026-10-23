@@ -68,6 +68,25 @@ chrome propio ni de reserva. El contrato del evento se conserva
 (`bubbles`+`composed`); el detail nuevo es estrictamente aditivo, así que
 shell viejo + módulo nuevo y shell nuevo + módulo viejo siguen funcionando.
 
+## Debt
+
+- `npm run stylelint` no tiene configuración en `origin/main` (defecto
+  preexistente: el script y `stylelint-config-standard` están en
+  `package.json`, pero no hay config — falla en `ConfigurationError` en
+  el archivo intacto igual). No se añadió config en este tramo: la del
+  estándar revelaría decenas de avisos ajenos de legado. El bloque nuevo
+  de esta pantalla fue escrito siguiendo el estándar (0 avisos netos
+  frente a baseline bajo el config estándar, comparación ad-hoc).
+- El job `test` de CI corre las suites Playwright dentro de la puerta de
+  merge, contra la regla 05 §5 (los tests de navegador pertenecen a
+  `browser-tests.yml`). `entry-intent.test.mjs` sigue el patrón
+  existente del repo; la migración pertenece al rollout del Helper / un
+  tramo posterior.
+- Las capturas (`app/scripts/screenshot-entry.mjs`, manual — no va en
+  `npm test`) inyectan el CSS real del shell leyendo `origin/main` del
+  checkout `biq-app` vía git (nunca su working tree); los tokens
+  `data-theme` los fija el propio `<html>` del harness igual que el shell.
+
 ## Referencias
 
 - `app/src/onboard-app.ts` — `renderEntryStep`, `_beginEntryIntent`,

@@ -474,6 +474,12 @@ const ENTRY_ARROW_SVG =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg>';
 const ENTRY_CLOSE_SVG =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>';
+const ENTRY_TEAM_ICON_SVG =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m8 3 4 3 4-3 5 5-3 3-2-2v12H8V9l-2 2-3-3 5-5Z"/><path d="M10 12h4M12 10v6"/></svg>';
+const ENTRY_CLUB_ICON_SVG =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2 4 5v6c0 5 8 10 8 10s8-5 8-10V5l-8-3Z"/><path d="m9 11 2 2 4-4"/></svg>';
+const ENTRY_PLUS_SVG =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>';
 
 // ─── Main component ─────────────────────────────────────────────────────
 
@@ -3962,6 +3968,7 @@ class BiqOnboardApp extends HTMLElement {
             <ul class="entry-cards">
               ${personalTeams.map((t) => `
                 <li><button class="entry-card" type="button" data-entry-personal-enter-team="${escapeHtml(t.team_id)}" ${busy ? 'disabled' : ''} aria-label="Entrar en ${escapeHtml(t.name)}">
+                  <span class="entry-card-icon">${ENTRY_TEAM_ICON_SVG}</span>
                   <span class="entry-card-copy">
                     <span class="entry-card-title">${escapeHtml(t.name)}</span>
                     <span class="entry-card-meta">${teamMeta(t)}</span>
@@ -3970,10 +3977,10 @@ class BiqOnboardApp extends HTMLElement {
                 </button></li>`).join('')}
             </ul>` : ''}
           ${personalTeams.length > 1 ? `
-            <button class="onboard-btn" type="button" data-entry-personal-enter ${busy ? 'disabled' : ''}>Entrar con todos los equipos</button>` : ''}
+            <button class="entry-textlink" type="button" data-entry-personal-enter ${busy ? 'disabled' : ''}>Entrar con todos los equipos</button>` : ''}
           ${atTeamCap
             ? '<p class="entry-note">Puedes tener hasta 2 equipos personales. Elimina uno desde «Mis equipos» para crear otro.</p>'
-            : `<button class="onboard-btn entry-secondary" type="button" data-entry-team-create-toggle ${busy ? 'disabled' : ''}>+ Crear equipo</button>
+            : `<button class="entry-create" type="button" data-entry-team-create-toggle ${busy ? 'disabled' : ''}>${ENTRY_PLUS_SVG}<span>Crear equipo</span></button>
               ${this._teamCreateOpen ? `
                 <form class="entry-form" data-entry-personal-create>
                   <div class="entry-field"><label>Nombre del equipo</label>
@@ -4010,13 +4017,14 @@ class BiqOnboardApp extends HTMLElement {
               const clubName = (c as ContextCandidate & { name?: string }).name || clubId;
               return `
                 <li><button class="entry-card" type="button" data-entry-club-activate="${escapeHtml(clubId)}" ${busy ? 'disabled' : ''} aria-label="Entrar en ${escapeHtml(clubName)}">
+                  <span class="entry-card-icon entry-card-icon-club">${ENTRY_CLUB_ICON_SVG}</span>
                   <span class="entry-card-copy"><span class="entry-card-title">${escapeHtml(clubName)}</span></span>
                   <span class="entry-card-arrow">${ENTRY_ARROW_SVG}</span>
                 </button></li>`;
             }).join('')}
           </ul>` : `<p class="entry-empty">No tienes clubes todavía.</p>`}
         ${createAllowed ? `
-          <button class="onboard-btn entry-secondary" type="button" data-entry-club-create-toggle ${busy ? 'disabled' : ''}>+ Crear club</button>
+          <button class="entry-create" type="button" data-entry-club-create-toggle ${busy ? 'disabled' : ''}>${ENTRY_PLUS_SVG}<span>Crear club</span></button>
           ${this._clubCreateOpen ? `
             <form class="entry-form" data-entry-club-create>
               <div class="entry-field"><label>Nombre del club</label>
@@ -4085,7 +4093,7 @@ class BiqOnboardApp extends HTMLElement {
             <img class="entry-chispa-icon" src="${CHISPA_HEAD_COMPACT_URI}" alt="" aria-hidden="true">
             <span class="entry-chispa-copy"><strong>¿Mi equipo o mi club?</strong><small>Chispa te ayuda a elegir.</small></span>
           </button>
-          <button class="onboard-btn entry-logout" type="button" data-entry-logout ${busy ? 'disabled' : ''}>Salir</button>
+          <button class="entry-logout" type="button" data-entry-logout ${busy ? 'disabled' : ''}>Salir</button>
         </div>
       </div>
       ${helpDialog}`;

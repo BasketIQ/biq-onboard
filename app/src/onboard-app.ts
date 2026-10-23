@@ -195,6 +195,38 @@ function competitiveLevelOptionsHtml(current: string): string {
   return `<option value=""${!current ? ' selected' : ''}>Selecciona…</option>${opts.join('')}`;
 }
 
+// F-CL-3 (PD-5): Categoría/Género select options for the club team editor.
+// Categoría uses the canonical biq-core CATEGORIES vocabulary (same list
+// PERSONAL_CATEGORIES mirrors); Género is Femenino/Masculino/Mixto. A
+// stored value outside the list is preserved as an extra selected option
+// — the same rule competitiveLevelOptionsHtml applies to legacy levels.
+// "" maps to «Selecciona…» and clears the field on save.
+function categoryOptionsHtml(current: string): string {
+  const opts = PERSONAL_CATEGORIES.map(
+    (c) => `<option value="${c.key}"${current === c.key ? ' selected' : ''}>${c.label}</option>`,
+  );
+  if (current && !PERSONAL_CATEGORIES.some((c) => c.key === current)) {
+    opts.push(`<option value="${escapeHtml(current)}" selected>${escapeHtml(current)}</option>`);
+  }
+  return `<option value=""${!current ? ' selected' : ''}>Selecciona…</option>${opts.join('')}`;
+}
+
+const TEAM_GENDER_OPTIONS = [
+  { value: 'F', label: 'Femenino' },
+  { value: 'M', label: 'Masculino' },
+  { value: 'X', label: 'Mixto' },
+] as const;
+
+function genderOptionsHtml(current: string): string {
+  const opts = TEAM_GENDER_OPTIONS.map(
+    (o) => `<option value="${o.value}"${current === o.value ? ' selected' : ''}>${o.label}</option>`,
+  );
+  if (current && !TEAM_GENDER_OPTIONS.some((o) => o.value === current)) {
+    opts.push(`<option value="${escapeHtml(current)}" selected>${escapeHtml(current)}</option>`);
+  }
+  return `<option value=""${!current ? ' selected' : ''}>Selecciona…</option>${opts.join('')}`;
+}
+
 // Roles that may create clubs (ADDENDUM-07 §6.3 — mirrors the server rule;
 // here it drives presentation only, the server enforces with 403).
 const ADMIN_ROLES = ['administrator', 'sports_director', 'super_administrator'];
@@ -222,6 +254,11 @@ interface ClubTab {
 interface RosterPlayer {
   name: string;
   number: number | null;
+  // Stable club-roster identity (biq-core 0.25.0 `TeamPlayer.player_id`,
+  // `pl_<16 hex>`). Optional: rows created locally have none until the
+  // server assigns one on save. NEVER sent for personal rosters — the
+  // biq-app own-workspace API rejects unknown row keys (Phase B).
+  player_id?: string | null;
 }
 
 interface TeamRow {
@@ -374,6 +411,12 @@ interface TeamEditorModel {
   players: RosterPlayer[];
   version: number | null;
   permissions: { read: boolean; edit: boolean };
+  // F-CL-3 club-team fields — present only when the port serves the club
+  // team catalog. The personal roster API has no category/gender contract,
+  // so `undefined` also marks the editor as "personal": the Categoría /
+  // Género selects render only when defined.
+  category?: string | null;
+  gender?: string | null;
 }
 
 type TeamEditorLoad =
@@ -393,7 +436,13 @@ interface TeamEditorPort {
   load(teamId: string): Promise<TeamEditorLoad>;
   save(
     teamId: string,
-    draft: { name: string; competitive_level: string; players: RosterPlayer[] },
+    draft: {
+      name: string;
+      category?: string | null;
+      gender?: string | null;
+      competitive_level: string;
+      players: RosterPlayer[];
+    },
     version: number | null,
   ): Promise<TeamEditorSave>;
 }
@@ -493,11 +542,24 @@ class BiqOnboardApp extends HTMLElement {
   // wipe in-flight input values). Synced from the DOM before every
   // re-render/save.
   private _editNameDraft = '';
+  // F-CL-3 club-team fields — only the club editor model carries them
+  // (personal rosters have no category/gender contract). Select values:
+  // '' = unset («Selecciona…»), cleared server-side on save.
+  private _editCategoryDraft = '';
+  private _editGenderDraft = '';
   private _editLevelDraft = '';
   // `existing` marca filas que venían persistidas al abrir el editor — un
   // nombre borrado sobre una fila persistida NUNCA es una baja implícita
   // (la baja solo la produce su acción explícita de quitar).
-  private _rosterDraft: { name: string; number: string; existing: boolean }[] = [];
+  // `player_id` (F-CL-3): stable club-roster identity carried through the
+  // draft — edits keep it, a removed row drops it, a new row starts with
+  // null and adopts the id the server returns on save.
+  private _rosterDraft: {
+    name: string;
+    number: string;
+    existing: boolean;
+    player_id: string | null;
+  }[] = [];
   // SF1: the loaded editor model + async load state. `_editSeq` fences
   // load/save completions (a stale response for a closed modal or a
   // changed context never paints); `_editFence` binds the open editor to
@@ -859,6 +921,10 @@ class BiqOnboardApp extends HTMLElement {
     this._editModel = null;
     this._editLoading = false;
     this._editingTeamId = null;
+    this._editNameDraft = '';
+    this._editCategoryDraft = '';
+    this._editGenderDraft = '';
+    this._editLevelDraft = '';
     this._rosterDraft = [];
     this._editError = null;
     this._editFence = '';
@@ -920,13 +986,22 @@ class BiqOnboardApp extends HTMLElement {
             ) {
               return { kind: 'unavailable', message: 'Respuesta de plantilla inválida' };
             }
-            players.push({ name: row.name, number: n ?? null });
+            const pid = row.player_id;
+            if (
+              pid !== null && pid !== undefined &&
+              (typeof pid !== 'string' || !/^pl_[0-9a-f]{16}$/.test(pid))
+            ) {
+              return { kind: 'unavailable', message: 'Respuesta de plantilla inválida' };
+            }
+            players.push({ name: row.name, number: n ?? null, player_id: pid ?? null });
           }
           return {
             kind: 'ok',
             model: {
               id: t.id,
               name: t.name,
+              category: t.category,
+              gender: t.gender,
               competitive_level: t.competitive_level ?? '',
               players,
               version: null,
@@ -956,13 +1031,48 @@ class BiqOnboardApp extends HTMLElement {
         if (res.status === 403) return { kind: 'denied' };
         if (res.status === 404) return { kind: 'not-found' };
         if (!res.ok) return { kind: 'unavailable', message: `HTTP ${res.status}` };
+        // The PUT response echoes the canonical team — rebuild the model
+        // from it so the draft adopts server-assigned player_id values
+        // (F-CL-3). A malformed echo is 'unavailable', not a silent echo
+        // of the sent draft: reconciliation reloads the truth.
+        const data = await res.json().catch(() => null);
+        const team = (data as Record<string, unknown> | null)?.team as
+          Record<string, unknown> | null | undefined;
+        if (!team || typeof team.name !== 'string' || !Array.isArray(team.players)) {
+          return { kind: 'unavailable', message: 'Respuesta inválida tras guardar' };
+        }
+        const players: RosterPlayer[] = [];
+        for (const p of team.players as unknown[]) {
+          const row = p as Record<string, unknown> | null;
+          if (!row || typeof row.name !== 'string') {
+            return { kind: 'unavailable', message: 'Respuesta inválida tras guardar' };
+          }
+          const n = row.number;
+          if (
+            n !== null && n !== undefined &&
+            (typeof n !== 'number' || !Number.isInteger(n) || n < 0 || n > 99)
+          ) {
+            return { kind: 'unavailable', message: 'Respuesta inválida tras guardar' };
+          }
+          const pid = row.player_id;
+          if (
+            pid !== null && pid !== undefined &&
+            (typeof pid !== 'string' || !/^pl_[0-9a-f]{16}$/.test(pid))
+          ) {
+            return { kind: 'unavailable', message: 'Respuesta inválida tras guardar' };
+          }
+          players.push({ name: row.name, number: n ?? null, player_id: pid ?? null });
+        }
         return {
           kind: 'saved',
           model: {
             id: teamId,
-            name: draft.name,
-            competitive_level: draft.competitive_level,
-            players: [...draft.players],
+            name: team.name,
+            category: typeof team.category === 'string' ? team.category : null,
+            gender: typeof team.gender === 'string' ? team.gender : null,
+            competitive_level:
+              typeof team.competitive_level === 'string' ? team.competitive_level : '',
+            players,
             version: null,
             permissions: { read: true, edit: true },
           },
@@ -1069,7 +1179,12 @@ class BiqOnboardApp extends HTMLElement {
               expected_revision: version ?? 0,
               name: draft.name,
               competitive_level: draft.competitive_level,
-              players: draft.players,
+              // TODO(Phase B): biq-app's own-workspace roster endpoint
+              // rejects unknown row keys — `player_id` (the club scouting
+              // identity) must NOT be sent here until the personal roster
+              // API supports it. Rows are explicitly narrowed to
+              // {name, number}, never `draft.players` verbatim.
+              players: draft.players.map((p) => ({ name: p.name, number: p.number })),
             }),
           });
         } catch {
@@ -1740,6 +1855,8 @@ class BiqOnboardApp extends HTMLElement {
     this._editingTeamId = teamId;
     this._editModel = null;
     this._editNameDraft = '';
+    this._editCategoryDraft = '';
+    this._editGenderDraft = '';
     this._editLevelDraft = '';
     this._rosterDraft = [];
     this._rosterFocus = rosterFocus;
@@ -1792,11 +1909,14 @@ class BiqOnboardApp extends HTMLElement {
       const m = res.model;
       this._editModel = m;
       this._editNameDraft = m.name;
+      this._editCategoryDraft = m.category ?? '';
+      this._editGenderDraft = m.gender ?? '';
       this._editLevelDraft = m.competitive_level;
       this._rosterDraft = m.players.map((p) => ({
         name: p.name,
         number: p.number === null || p.number === undefined ? '' : String(p.number),
         existing: true,
+        player_id: p.player_id ?? null,
       }));
     } else {
       // Typed failure fails closed: no empty draft opens over a denied or
@@ -1834,12 +1954,19 @@ class BiqOnboardApp extends HTMLElement {
   // <select> solo ofrece opciones canónicas + el valor almacenado
   // (texto legacy preservado por contrato, competitiveLevelOptionsHtml).
   private _editDraftPayload():
-    | { ok: true; name: string; competitive_level: string; players: { name: string; number: number | null }[] }
+    | {
+        ok: true;
+        name: string;
+        category: string;
+        gender: string;
+        competitive_level: string;
+        players: { name: string; number: number | null; player_id: string | null }[];
+      }
     | { ok: false; message: string } {
     const name = this._editNameDraft.trim();
     if (!name) return { ok: false, message: 'El nombre es obligatorio.' };
     const competitive_level = this._editLevelDraft.trim();
-    const players: { name: string; number: number | null }[] = [];
+    const players: { name: string; number: number | null; player_id: string | null }[] = [];
     for (const p of this._rosterDraft) {
       const pname = p.name.trim();
       if (!pname) {
@@ -1857,9 +1984,40 @@ class BiqOnboardApp extends HTMLElement {
       if (num !== null && (!Number.isInteger(num) || num < 0 || num > 99)) {
         return { ok: false, message: 'El dorsal debe ser un número entero entre 0 y 99.' };
       }
-      players.push({ name: pname, number: num });
+      players.push({ name: pname, number: num, player_id: p.player_id ?? null });
     }
-    return { ok: true, name, competitive_level, players };
+    return {
+      ok: true,
+      name,
+      category: this._editCategoryDraft,
+      gender: this._editGenderDraft,
+      competitive_level,
+      players,
+    };
+  }
+
+  // Canonical snapshot of an editor payload/model — the exact shape used
+  // for content comparison (sent vs. now vs. server, and the three-way
+  // reconcile). `player_id` is intentionally NOT part of it: the id is
+  // server-assigned metadata that the user cannot edit, so adopting it
+  // after a save must not count as a pending change.
+  private _editSnapshotJson(fields: {
+    name: string;
+    category?: string | null;
+    gender?: string | null;
+    competitive_level: string;
+    players: { name: string; number: number | null; player_id?: string | null }[];
+  }): string {
+    return JSON.stringify({
+      name: fields.name,
+      // '' (draft "Selecciona…"), null and undefined are the same "unset"
+      // state for comparison — a model (null/undefined) and a draft ('')
+      // must produce the identical snapshot.
+      category: fields.category || null,
+      gender: fields.gender || null,
+      competitive_level: fields.competitive_level,
+      players: fields.players.map((p) => ({ name: p.name, number: p.number ?? null })),
+    });
   }
 
   // Identidad del dueño de un job/cola: equipo + generación de editor +
@@ -1943,8 +2101,14 @@ class BiqOnboardApp extends HTMLElement {
       return;
     }
     const version = this._editModel.version;
-    const sent = { name: draft.name, competitive_level: draft.competitive_level, players: draft.players };
-    const sentJson = JSON.stringify(sent);
+    const sent = {
+      name: draft.name,
+      category: draft.category,
+      gender: draft.gender,
+      competitive_level: draft.competitive_level,
+      players: draft.players,
+    };
+    const sentJson = this._editSnapshotJson(sent);
     this._editSaveStatus = 'saving';
     this._editSaveMessage = null;
     this._updateEditStatusDom();
@@ -1959,11 +2123,35 @@ class BiqOnboardApp extends HTMLElement {
       // pueden llevar texto nuevo tecleado durante el vuelo.
       this._editModel = res.model;
       this._editSavedChanges = true;
+      // F-CL-3: adopta los player_id que el servidor acaba de asignar, para
+      // que el siguiente autosave los reenvíe (estabilidad de identidad —
+      // una fila reenviada sin id recibiría uno nuevo). El roster viaja
+      // por reemplazo total en el mismo orden, así que la fila i del
+      // borrador adopta el id devuelto para la fila i — solo cuando la
+      // fila sigue coincidiendo con lo enviado (una fila eliminada o
+      // renombrada en vuelo no hereda un id ajeno).
+      if (res.model.players.length === sent.players.length) {
+        for (let i = 0; i < sent.players.length; i++) {
+          const row = this._rosterDraft[i];
+          const sentRow = sent.players[i];
+          const savedRow = res.model.players[i];
+          if (!row || !sentRow || !savedRow) continue;
+          const numStr = row.number.trim();
+          const rowNum = numStr === '' ? null
+            : /^-?\d+$/.test(numStr) ? Number.parseInt(numStr, 10) : Number.NaN;
+          if (
+            row.name.trim() === sentRow.name &&
+            rowNum === sentRow.number &&
+            savedRow.name === sentRow.name &&
+            (savedRow.number ?? null) === sentRow.number
+          ) {
+            row.player_id = savedRow.player_id ?? null;
+          }
+        }
+      }
       this._syncEditDraftFromDom();
       const now = this._editDraftPayload();
-      const nowJson = now.ok
-        ? JSON.stringify({ name: now.name, competitive_level: now.competitive_level, players: now.players })
-        : null;
+      const nowJson = now.ok ? this._editSnapshotJson(now) : null;
       if (nowJson === sentJson) {
         this._editDirty = false;
         this._editSaveStatus = 'saved';
@@ -1994,13 +2182,15 @@ class BiqOnboardApp extends HTMLElement {
     this._updateEditStatusDom();
   }
 
-  // Snapshot canónico {name, competitive_level, players} de un modelo —
-  // la forma exacta que viaja por PUT, para comparar contenido (no el CAS).
+  // Snapshot canónico de un modelo — la misma forma que _editSnapshotJson
+  // produce para un draft, para comparar contenido (no el CAS).
   private _editModelSnapshot(model: TeamEditorModel): string {
-    return JSON.stringify({
+    return this._editSnapshotJson({
       name: model.name,
+      category: model.category,
+      gender: model.gender,
       competitive_level: model.competitive_level,
-      players: model.players.map((p) => ({ name: p.name, number: p.number ?? null })),
+      players: model.players,
     });
   }
 
@@ -2011,9 +2201,7 @@ class BiqOnboardApp extends HTMLElement {
   private _finishSavedEquivalent(): void {
     this._syncEditDraftFromDom();
     const now = this._editDraftPayload();
-    const nowJson = now.ok
-      ? JSON.stringify({ name: now.name, competitive_level: now.competitive_level, players: now.players })
-      : null;
+    const nowJson = now.ok ? this._editSnapshotJson(now) : null;
     if (nowJson !== null && nowJson === this._editSentSnapshot) {
       this._editDirty = false;
       this._editSavedChanges = true; // el servidor ya lo persistió — catálogos pendientes de refresco
@@ -2093,9 +2281,21 @@ class BiqOnboardApp extends HTMLElement {
     const base = this._editModel;
     const baseSnap = base ? this._editModelSnapshot(base) : null;
     const baseObj = baseSnap
-      ? (JSON.parse(baseSnap) as { name: string; competitive_level: string; players: { name: string; number: number | null }[] })
+      ? (JSON.parse(baseSnap) as {
+          name: string;
+          category: string | null;
+          gender: string | null;
+          competitive_level: string;
+          players: { name: string; number: number | null }[];
+        })
       : null;
-    const serverObj = JSON.parse(serverSnap) as { name: string; competitive_level: string; players: { name: string; number: number | null }[] };
+    const serverObj = JSON.parse(serverSnap) as {
+      name: string;
+      category: string | null;
+      gender: string | null;
+      competitive_level: string;
+      players: { name: string; number: number | null }[];
+    };
     this._syncEditDraftFromDom();
     const draft = this._editDraftPayload();
     if (!draft.ok) {
@@ -2113,9 +2313,20 @@ class BiqOnboardApp extends HTMLElement {
       this._updateEditStatusDom();
       return 'failed';
     }
-    const draftObj = { name: draft.name, competitive_level: draft.competitive_level, players: draft.players };
-    const fields: Array<{ key: 'name' | 'competitive_level' | 'players'; label: string }> = [
+    const draftObj = JSON.parse(this._editSnapshotJson(draft)) as {
+      name: string;
+      category: string | null;
+      gender: string | null;
+      competitive_level: string;
+      players: { name: string; number: number | null }[];
+    };
+    const fields: Array<{
+      key: 'name' | 'category' | 'gender' | 'competitive_level' | 'players';
+      label: string;
+    }> = [
       { key: 'name', label: 'el nombre' },
+      { key: 'category', label: 'la categoría' },
+      { key: 'gender', label: 'el género' },
       { key: 'competitive_level', label: 'el nivel' },
       { key: 'players', label: 'la plantilla' },
     ];
@@ -2162,11 +2373,22 @@ class BiqOnboardApp extends HTMLElement {
       const sel = this.shadow.querySelector('[data-edit-team-level]') as HTMLSelectElement | null;
       if (sel) sel.value = server.competitive_level;
     }
+    if (serverWins.includes('category')) {
+      this._editCategoryDraft = server.category ?? '';
+      const sel = this.shadow.querySelector('[data-edit-team-category]') as HTMLSelectElement | null;
+      if (sel) sel.value = this._editCategoryDraft;
+    }
+    if (serverWins.includes('gender')) {
+      this._editGenderDraft = server.gender ?? '';
+      const sel = this.shadow.querySelector('[data-edit-team-gender]') as HTMLSelectElement | null;
+      if (sel) sel.value = this._editGenderDraft;
+    }
     if (serverWins.includes('players')) {
       this._rosterDraft = server.players.map((p) => ({
         name: p.name,
         number: p.number === null || p.number === undefined ? '' : String(p.number),
         existing: true,
+        player_id: p.player_id ?? null,
       }));
       this._paintRosterRows();
     }
@@ -2305,13 +2527,7 @@ class BiqOnboardApp extends HTMLElement {
     this._admittedSeq = this._editSeq;
     this._syncEditDraftFromDom();
     const admittedDraft = this._editDraftPayload();
-    this._admittedDraftJson = admittedDraft.ok
-      ? JSON.stringify({
-          name: admittedDraft.name,
-          competitive_level: admittedDraft.competitive_level,
-          players: admittedDraft.players,
-        })
-      : null;
+    this._admittedDraftJson = admittedDraft.ok ? this._editSnapshotJson(admittedDraft) : null;
     return true;
   }
 
@@ -2342,9 +2558,7 @@ class BiqOnboardApp extends HTMLElement {
     this._admittedDraftJson = null;
     this._syncEditDraftFromDom();
     const draft = this._editDraftPayload();
-    const nowJson = draft.ok
-      ? JSON.stringify({ name: draft.name, competitive_level: draft.competitive_level, players: draft.players })
-      : null;
+    const nowJson = draft.ok ? this._editSnapshotJson(draft) : null;
     if (nowJson === admittedJson) {
       this._retireEditor();
       this.render();
@@ -2487,6 +2701,10 @@ class BiqOnboardApp extends HTMLElement {
     this._editModel = null;
     this._editLoading = false;
     this._editSeq += 1; // an in-flight load landing after close is stale
+    this._editNameDraft = '';
+    this._editCategoryDraft = '';
+    this._editGenderDraft = '';
+    this._editLevelDraft = '';
     this._rosterDraft = [];
     this._rosterFocus = false;
     this._editError = null;
@@ -2531,12 +2749,18 @@ class BiqOnboardApp extends HTMLElement {
     if (!modal) return;
     const nameInput = modal.querySelector('[data-edit-team-name]') as HTMLInputElement | null;
     const levelSel = modal.querySelector('[data-edit-team-level]') as HTMLSelectElement | null;
+    const catSel = modal.querySelector('[data-edit-team-category]') as HTMLSelectElement | null;
+    const genderSel = modal.querySelector('[data-edit-team-gender]') as HTMLSelectElement | null;
     if (nameInput) this._editNameDraft = nameInput.value;
     if (levelSel) this._editLevelDraft = levelSel.value;
+    if (catSel) this._editCategoryDraft = catSel.value;
+    if (genderSel) this._editGenderDraft = genderSel.value;
     modal.querySelectorAll('[data-roster-row]').forEach((row, i) => {
       const pname = row.querySelector('[data-player-name]') as HTMLInputElement | null;
       const pnum = row.querySelector('[data-player-number]') as HTMLInputElement | null;
-      if (!this._rosterDraft[i]) this._rosterDraft[i] = { name: '', number: '', existing: false };
+      if (!this._rosterDraft[i]) {
+        this._rosterDraft[i] = { name: '', number: '', existing: false, player_id: null };
+      }
       this._rosterDraft[i].name = pname?.value ?? '';
       this._rosterDraft[i].number = pnum?.value ?? '';
     });
@@ -4707,8 +4931,14 @@ class BiqOnboardApp extends HTMLElement {
       <div class="onboard-subscreen-card">
         <h3 class="onboard-card-title" id="edit-team-title">${readOnly ? 'Equipo (solo lectura)' : 'Editar equipo'}</h3>
         ${readOnly ? '<p class="onboard-card-desc" data-edit-readonly-note>Este equipo está fuera de tu selección activa — solo lectura.</p>' : ''}
+        ${model.category !== undefined ? `
+        <label class="onboard-field-label" for="edit-team-category">Categoría</label>
+        <select id="edit-team-category" class="onboard-input" data-edit-team-category${off}>${categoryOptionsHtml(this._editCategoryDraft)}</select>` : ''}
         <label class="onboard-field-label" for="edit-team-name">Nombre del equipo</label>
         <input id="edit-team-name" type="text" class="onboard-input" data-edit-team-name value="${escapeHtml(this._editNameDraft)}"${off} />
+        ${model.gender !== undefined ? `
+        <label class="onboard-field-label" for="edit-team-gender">Género</label>
+        <select id="edit-team-gender" class="onboard-input" data-edit-team-gender${off}>${genderOptionsHtml(this._editGenderDraft)}</select>` : ''}
         <label class="onboard-field-label" for="edit-team-level">Nivel de competición</label>
         <select id="edit-team-level" class="onboard-input" data-edit-team-level${off}>${competitiveLevelOptionsHtml(this._editLevelDraft)}</select>
         <div class="onboard-roster">
@@ -5217,11 +5447,14 @@ class BiqOnboardApp extends HTMLElement {
       this._editConflictServer = null;
       this._editNeedsReconcile = false;
       this._editNameDraft = server.name;
+      this._editCategoryDraft = server.category ?? '';
+      this._editGenderDraft = server.gender ?? '';
       this._editLevelDraft = server.competitive_level;
       this._rosterDraft = server.players.map((p) => ({
         name: p.name,
         number: p.number === null || p.number === undefined ? '' : String(p.number),
         existing: true,
+        player_id: p.player_id ?? null,
       }));
       this._editDirty = false;
       this._editSaveStatus = 'saved';
@@ -5237,7 +5470,7 @@ class BiqOnboardApp extends HTMLElement {
     if (addPlayerBtn) {
       addPlayerBtn.addEventListener('click', () => {
         this._syncEditDraftFromDom();
-        this._rosterDraft.push({ name: '', number: '', existing: false });
+        this._rosterDraft.push({ name: '', number: '', existing: false, player_id: null });
         this._rosterFocus = true;
         this.render();
         // La fila nueva vacía es un borrador incompleto — se marca
@@ -5261,7 +5494,7 @@ class BiqOnboardApp extends HTMLElement {
     if (modal && this._editModel?.permissions.edit) {
       const isField = (el: EventTarget | null) =>
         (el as HTMLElement | null)?.closest?.(
-          '[data-edit-team-name],[data-edit-team-level],[data-player-name],[data-player-number]',
+          '[data-edit-team-name],[data-edit-team-level],[data-edit-team-category],[data-edit-team-gender],[data-player-name],[data-player-number]',
         ) !== null;
       modal.addEventListener('input', (e) => {
         if (isField(e.target)) this._scheduleEditorSave(false);

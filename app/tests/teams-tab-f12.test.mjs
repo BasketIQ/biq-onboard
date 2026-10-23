@@ -84,10 +84,26 @@ async function newPage(browser) {
       await json({ teams: SEED_TEAMS, total: SEED_TEAMS.length });
       return;
     }
-    // PUT /api/clubs/{clubId}/teams/{teamId} → update team (proxied path)
+    // PUT /api/clubs/{clubId}/teams/{teamId} → update team (proxied path).
+    // The echo carries the canonical team — the editor adopts it as the
+    // saved model (player_id included, F-CL-3).
     if (u.match(/\/teams\/[^/]+$/) && method === 'PUT' && !u.includes('archive') && !u.includes('unarchive')) {
       const body = JSON.parse(req.postData() || '{}');
-      await json({ ok: true, team: { id: 'updated', name: body.name || 'Updated' } });
+      await json({
+        ok: true,
+        team: {
+          id: 'updated',
+          name: body.name || 'Updated',
+          category: body.category ?? null,
+          gender: body.gender ?? null,
+          competitive_level: body.competitive_level ?? '',
+          players: (body.players || []).map((p) => ({
+            name: p.name,
+            number: p.number ?? null,
+            player_id: p.player_id ?? 'pl_a1b2c3d4e5f60718',
+          })),
+        },
+      });
       return;
     }
     // PUT .../archive
@@ -558,8 +574,8 @@ test('Plantilla: roster modal prefills players, add-row survives re-render, PUT 
   assert.equal(body.name, 'Senior Femenino');
   assert.equal(body.competitive_level, 'Liga EBA');
   assert.deepEqual(body.players, [
-    { name: 'Ana García', number: 7 },
-    { name: 'Luis Pérez', number: 12 },
+    { name: 'Ana García', number: 7, player_id: null },
+    { name: 'Luis Pérez', number: 12, player_id: null },
   ], 'PUT sends the complete roster');
 
   await browser.close();
@@ -632,7 +648,7 @@ test('Plantilla: a blank new row blocks autosave until explicitly removed (R1)',
   puts = log.filter((e) => e.method === 'PUT' && e.url.match(/\/teams\/[^/]+$/) && !e.url.includes('archive'));
   assert.ok(puts.length >= 1, 'autosave PUT fired after the explicit removal');
   const body = JSON.parse(puts[puts.length - 1].postData);
-  assert.deepEqual(body.players, [{ name: 'Marta Ruiz', number: null }],
+  assert.deepEqual(body.players, [{ name: 'Marta Ruiz', number: null, player_id: null }],
     'only the named row reaches the payload');
 
   await browser.close();

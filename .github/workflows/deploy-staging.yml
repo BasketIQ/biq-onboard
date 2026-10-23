@@ -60,7 +60,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'pull_request' && github.head_ref || github.ref_name }}
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - name: Setup self-hosted env
         uses: ./.github/actions/setup-self-hosted-env
@@ -98,5 +98,5 @@ jobs:
     uses: ./.github/workflows/deploy.yml
     with:
       env: staging
-      ref: ${{ github.event_name == 'pull_request' && github.head_ref || github.ref_name }}
+      ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
     secrets: inherit

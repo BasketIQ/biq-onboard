@@ -1305,6 +1305,18 @@
 }
 
 /* ─── Working-context entry selector (BIQ-PERSONAL-CLUB-CONTEXT) ─────── */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 .entry-step { display: flex; flex-direction: column; gap: 12px; }
 .entry-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .entry-title { font-size: 1.25rem; font-weight: 700; margin: 0; }
@@ -1313,14 +1325,13 @@
 .entry-empty { color: var(--biq-muted); font-size: 0.9rem; margin: 12px 0; text-align: center; }
 .entry-p, .entry-note { color: var(--biq-muted, #666); font-size: 0.9rem; margin: 4px 0; }
 .entry-active { font-size: 0.9rem; }
-.entry-error { color: #b3261e; font-size: 0.9rem; margin: 4px 0; }
+.entry-error { color: var(--biq-red, #b3261e); font-size: 0.9rem; margin: 4px 0; }
 .entry-loading { color: var(--biq-muted, #666); font-size: 0.9rem; }
-.entry-tabs { margin-bottom: 8px; }
+.entry-status { color: var(--biq-muted, #666); font-size: 0.9rem; margin: 0; }
 .entry-panel { display: flex; flex-direction: column; gap: 8px; }
 .entry-teams { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
 .entry-team { display: flex; align-items: baseline; gap: 8px; padding: 8px 10px; border: 1px solid var(--biq-line, #e0e0e0); border-radius: 8px; }
 .entry-team span { color: var(--biq-muted, #666); font-size: 0.85rem; }
-.entry-team-action { padding: 4px 6px; }
 .entry-form { display: flex; flex-direction: column; gap: 10px; max-width: 320px; }
 .entry-field { display: flex; flex-direction: column; gap: 4px; }
 .entry-field label { font-size: 0.85rem; font-weight: 600; }
@@ -1328,19 +1339,482 @@
 .entry-invite { padding: 10px; border: 1px solid var(--biq-line, #e0e0e0); border-radius: 8px; display: flex; flex-direction: column; gap: 8px; max-width: 320px; }
 .entry-head { display: flex; align-items: center; justify-content: space-between; }
 .entry-head .entry-h { margin: 0; }
-.entry-tab { flex: 1; position: relative; display: flex; align-items: center; justify-content: center; border-radius: 8px; transition: background 0.15s, color 0.15s; }
-.entry-tab.active { background: var(--biq-surface-1); box-shadow: var(--biq-shadow-sm); }
-.entry-tab-btn { flex: 1; padding: 10px 36px; border: 0; background: transparent; color: var(--biq-muted); font: inherit; font-size: 14px; font-weight: 600; text-align: center; cursor: pointer; border-radius: 8px; }
-.entry-tab.active .entry-tab-btn { color: var(--biq-text); }
-.entry-help { position: absolute; top: 50%; transform: translateY(-50%); border: 0; background: transparent; padding: 4px; cursor: pointer; display: inline-flex; align-items: center; border-radius: 50%; }
-.entry-tab:first-child .entry-help { left: 8px; }
-.entry-tab:last-child .entry-help { right: 8px; }
-.entry-help:hover { background: var(--biq-hover, rgba(0,0,0,0.06)); }
-.entry-help .nav-chispa { display: block; width: 24px; height: 24px; }
-.entry-help .entry-chispa-dark { display: none; }
-:host-context([data-theme="dark"]) .entry-help .entry-chispa-light { display: none; }
-:host-context([data-theme="dark"]) .entry-help .entry-chispa-dark { display: block; }
-.entry-modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.45); display: flex; align-items: center; justify-content: center; z-index: 60; padding: 24px; }
-.entry-modal { background: var(--biq-surface-1, #fff); color: var(--biq-text, #111); border-radius: 12px; padding: 20px; max-width: 340px; display: flex; flex-direction: column; gap: 14px; box-shadow: 0 8px 32px rgba(0,0,0,0.28); }
-.entry-modal p { margin: 0; font-size: 0.95rem; line-height: 1.5; }
-:host-context([data-theme="dark"]) .entry-modal { --biq-surface: #1e1e1e; --biq-text: #eee; }
+
+/* Entry screen v1 (entry-login 2026-10-23): one screen, two blocks.
+   Visual contract mirrors the approved reference (entry-prototype-v1):
+   sentence-case muted role labels, large bold block headings, cards with a
+   leading icon tile + circular accent arrow, text-link create actions and a
+   divided utility row. Colors come from the same semantic token pairs so
+   light/dark contrast holds without per-theme overrides. */
+.entry-block {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 0 4px;
+}
+
+.entry-block + .entry-block {
+  margin-top: 20px;
+  padding-top: 22px;
+  border-top: 1px solid var(--biq-line, #e0e0e0);
+}
+
+.entry-block-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 4px;
+}
+
+.entry-block-title {
+  font-size: 1.375rem;
+  line-height: 1.25;
+  font-weight: 750;
+  letter-spacing: -0.02em;
+  margin: 0;
+  color: var(--biq-text, #111);
+}
+
+.entry-role {
+  flex-shrink: 0;
+  font-size: 0.78rem;
+  font-weight: 400;
+  line-height: 1.4;
+  color: var(--biq-muted, #5f6b82);
+  white-space: nowrap;
+}
+
+.entry-block-copy {
+  margin: 0;
+  font-size: 0.85rem;
+  line-height: 1.55;
+  color: var(--biq-muted, #5f6b82);
+  max-width: 40em;
+}
+
+.entry-cards {
+  list-style: none;
+  margin: 2px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.entry-card {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  width: 100%;
+  min-height: 76px;
+  padding: 13px 14px;
+  border: 1px solid var(--biq-line, #e0e0e0);
+  border-radius: 18px;
+  background: var(--biq-card, var(--biq-surface-1, #fff));
+  color: var(--biq-text, #111);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  box-shadow: var(--biq-shadow-sm);
+  transition: border-color 0.15s, transform 0.15s;
+}
+
+.entry-card:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.entry-card:hover:not(:disabled) {
+  border-color: var(--biq-line-strong, #7a8ab0);
+  transform: translateY(-1px);
+}
+
+.entry-card:focus-visible,
+.entry-create:focus-visible,
+.entry-textlink:focus-visible,
+.entry-logout:focus-visible,
+.entry-chispa:focus-visible {
+  outline: 3px solid var(--biq-line-strong, #7a8ab0);
+  outline-offset: 2px;
+}
+
+.entry-card-icon {
+  flex: 0 0 46px;
+  width: 46px;
+  height: 50px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 14px;
+  background: var(--biq-surface-2, #f4f6fa);
+  color: var(--biq-text, #111);
+}
+
+.entry-card-icon svg {
+  width: 26px;
+  height: 26px;
+  display: block;
+}
+
+.entry-card-icon-club {
+  background: var(--biq-orange-soft, #ffe5dc);
+  color: var(--biq-orange, #a43700);
+}
+
+.entry-card-arrow {
+  flex: 0 0 30px;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--biq-orange, #c94500);
+  color: var(--biq-card, #fff);
+}
+
+.entry-card-arrow svg {
+  width: 17px;
+  height: 17px;
+  display: block;
+}
+
+.entry-card-copy {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.entry-card-title {
+  font-size: 1rem;
+  font-weight: 750;
+  line-height: 1.3;
+  letter-spacing: -0.01em;
+  overflow-wrap: anywhere;
+}
+
+.entry-card-meta {
+  font-size: 0.78rem;
+  line-height: 1.4;
+  color: var(--biq-muted, #5f6b82);
+  overflow-wrap: anywhere;
+}
+
+.entry-create {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 44px;
+  padding: 8px 0;
+  border: 0;
+  background: transparent;
+  color: var(--biq-orange-light, #a43700);
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 650;
+  text-align: left;
+  cursor: pointer;
+  align-self: flex-start;
+}
+
+.entry-create svg {
+  width: 16px;
+  height: 16px;
+  display: block;
+  flex-shrink: 0;
+}
+
+.entry-textlink {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 8px 0;
+  border: 0;
+  background: transparent;
+  color: var(--biq-muted, #5f6b82);
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  align-self: flex-start;
+}
+
+.entry-create:disabled,
+.entry-textlink:disabled,
+.entry-logout:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.entry-recovery {
+  border: 1px solid var(--biq-line, #e0e0e0);
+  border-radius: 14px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--biq-card, var(--biq-surface-1, #fff));
+}
+
+.entry-recovery-msg {
+  margin: 0;
+  font-size: 0.9rem;
+  color: var(--biq-red, #b3261e);
+}
+
+.entry-recovery-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.entry-utility {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--biq-line, #e0e0e0);
+}
+
+.entry-chispa {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 48px;
+  min-width: 44px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--biq-text, #111);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.entry-chispa-icon {
+  width: 37px;
+  height: 37px;
+  display: block;
+  flex-shrink: 0;
+}
+
+.entry-chispa-copy {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  line-height: 1.4;
+  text-align: left;
+}
+
+.entry-chispa-copy strong {
+  font-size: 0.8rem;
+  font-weight: 650;
+}
+
+.entry-chispa-copy small {
+  font-size: 0.72rem;
+  font-weight: 400;
+  color: var(--biq-muted, #5f6b82);
+  margin-top: 2px;
+}
+
+.entry-logout {
+  min-width: 44px;
+  min-height: 44px;
+  padding: 8px 0;
+  border: 0;
+  background: transparent;
+  color: var(--biq-muted, #5f6b82);
+  font: inherit;
+  font-size: 0.82rem;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.entry-help-backdrop {
+  position: fixed;
+  inset: 0;
+  background: var(--biq-color-scrim, rgb(0 0 0 / 45%));
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  z-index: 60;
+  padding: 16px 16px calc(16px + env(safe-area-inset-bottom, 0px));
+}
+
+.entry-help-dialog {
+  background: var(--biq-card, var(--biq-surface-1, #fff));
+  color: var(--biq-text, #111);
+  border-radius: 18px;
+  padding: 18px;
+  width: 100%;
+  max-width: 380px;
+  max-height: min(80vh, 560px);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  box-shadow: 0 8px 32px rgb(0 0 0 / 28%);
+}
+
+.entry-help-dialog p {
+  margin: 0;
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.entry-help-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.entry-help-chispa {
+  width: 44px;
+  height: 44px;
+  flex-shrink: 0;
+}
+
+.entry-help-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 1.1rem;
+  font-weight: 750;
+  letter-spacing: -0.02em;
+  margin: 0;
+}
+
+.entry-help-close {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  margin: -8px -8px -8px 0;
+  border: 1px solid var(--biq-line, #e0e0e0);
+  background: var(--biq-surface-2, #f4f6fa);
+  color: var(--biq-text, #111);
+  cursor: pointer;
+  border-radius: 50%;
+}
+
+.entry-help-close svg {
+  width: 20px;
+  height: 20px;
+}
+
+.entry-help-section {
+  border-top: 1px solid var(--biq-line, #e0e0e0);
+  padding-top: 10px;
+}
+
+.entry-help-section h3 {
+  margin: 0 0 4px;
+  font-size: 0.95rem;
+  font-weight: 700;
+}
+
+.entry-help-section p,
+.entry-help-section li {
+  font-size: 0.85rem;
+  color: var(--biq-muted, #5f6b82);
+}
+
+.entry-help-section ul {
+  margin: 6px 0 0;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.entry-help-note {
+  font-size: 0.78rem;
+  color: var(--biq-muted, #5f6b82);
+}
+
+@media (width >= 560px) {
+  .entry-help-backdrop {
+    align-items: center;
+  }
+}
+
+/* PD-CLUBS «Elegir club» picker (≥3 clubs): same bottom-sheet language
+ * as the help dialog. */
+.entry-create-count {
+  color: var(--biq-muted, #5f6b82);
+  font-size: 0.78rem;
+  font-weight: 500;
+}
+
+.entry-picker-backdrop {
+  position: fixed;
+  inset: 0;
+  background: var(--biq-color-scrim, rgb(0 0 0 / 45%));
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  z-index: 61;
+  padding: 16px 16px calc(16px + env(safe-area-inset-bottom, 0px));
+}
+
+.entry-picker-dialog {
+  background: var(--biq-card, var(--biq-surface-1, #fff));
+  color: var(--biq-text, #111);
+  border-radius: 18px;
+  padding: 18px;
+  width: 100%;
+  max-width: 380px;
+  max-height: min(80vh, 560px);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  box-shadow: 0 8px 32px rgb(0 0 0 / 28%);
+}
+
+.entry-picker-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.entry-picker-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 1.1rem;
+  font-weight: 750;
+  letter-spacing: -0.02em;
+  margin: 0;
+}
+
+.entry-picker-search input {
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 44px;
+  padding: 8px 10px;
+  border: 1px solid var(--biq-line, #e0e0e0);
+  border-radius: 10px;
+  font: inherit;
+  font-size: 0.9rem;
+  background: var(--biq-surface-2, #f4f6fa);
+  color: var(--biq-text, #111);
+}
+
+.entry-picker-list {
+  overflow-y: auto;
+  margin: 0 -4px;
+  padding: 0 4px;
+}
+
+@media (width >= 560px) {
+  .entry-picker-backdrop {
+    align-items: center;
+  }
+}

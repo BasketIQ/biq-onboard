@@ -27,7 +27,49 @@ def _s2s_secret() -> str | None:
 
 def _players_json(team) -> list[dict]:
     """Serialize ``Team.players`` (biq-core TeamPlayer rows) for the API."""
-    return [{"name": p.name, "number": p.number} for p in team.players]
+    return [
+        {"name": p.name, "number": p.number, "player_id": p.player_id}
+        for p in team.players
+    ]
+
+
+def _resolve_roster_players(payload_players, registry, club_id: str) -> list:
+    """Build ``TeamPlayer`` rows with stable ``player_id`` identity.
+
+    Scouting roster identity (biq-core 0.25.0, PD-2):
+    - a ``player_id`` already present in a roster of THIS club is accepted —
+      same team = preserve, another team of the club = link;
+    - any other incoming id is rejected (foreign club or invented) with
+      422 ``unknown_player_id``;
+    - duplicated ids within the roster are rejected with 422
+      ``duplicate_player_id``;
+    - rows without an id get a fresh ``pl_<16 hex>`` — that includes legacy
+      rows, which are identified lazily on their next write.
+    """
+    from biq_core.org import TeamPlayer, ensure_player_ids
+
+    known = {
+        p.player_id
+        for t in registry.list_teams(club_id)
+        for p in t.players
+        if p.player_id
+    }
+    players = []
+    for p in payload_players:
+        if p.player_id is not None and p.player_id not in known:
+            raise HTTPException(status_code=422, detail="unknown_player_id")
+        players.append(
+            TeamPlayer(name=p.name, number=p.number, player_id=p.player_id)
+        )
+    try:
+        return ensure_player_ids(players)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="duplicate_player_id")
+
+
+def _nullable(value: str | None) -> str | None:
+    """Map ``""`` to ``None`` — an explicit empty value clears the field."""
+    return value if value != "" else None
 
 
 def _require_teams_manage(request: Request, club_id: str) -> str:
@@ -88,17 +130,15 @@ def create_team(club_id: str, payload: TeamCreate, request: Request) -> dict:
     if payload.competitive_level is not None:
         extra["competitive_level"] = payload.competitive_level
     if payload.players is not None:
-        from biq_core.org import TeamPlayer
-
-        extra["players"] = [TeamPlayer(name=p.name, number=p.number) for p in payload.players]
+        extra["players"] = _resolve_roster_players(payload.players, registry, club_id)
     if payload.staff_user_ids is not None:
         extra["staff_user_ids"] = payload.staff_user_ids
     team = Team(
         id=payload.id,
         club_id=club_id,
         name=payload.name,
-        category=payload.category,
-        gender=payload.gender,
+        category=_nullable(payload.category),
+        gender=_nullable(payload.gender),
         label=payload.label,
         **extra,
     )
@@ -216,7 +256,7 @@ def reseed_teams(club_id: str, request: Request) -> dict:
 @router.put("/{team_id}")
 def update_team(club_id: str, team_id: str, payload: TeamUpdate, request: Request) -> dict:
     _require_teams_manage(request, club_id)
-    from biq_core.org import Team, TeamPlayer
+    from biq_core.org import Team
 
     registry = org.get_registry()
     existing = registry.get_team(club_id, team_id)
@@ -228,18 +268,19 @@ def update_team(club_id: str, team_id: str, payload: TeamUpdate, request: Reques
     # rather than silently falling through to the existing value.
     # The `payload.x or existing.x` idiom is a trap for list/str fields
     # where falsy values (empty list, empty string) are legitimate.
+    # `None` means "not sent → preserve"; `""` means "clear the field".
     team = Team(
         id=team_id,
         club_id=club_id,
         name=payload.name if payload.name is not None else existing.name,
-        category=payload.category if payload.category is not None else existing.category,
-        gender=payload.gender if payload.gender is not None else existing.gender,
+        category=existing.category if payload.category is None else _nullable(payload.category),
+        gender=existing.gender if payload.gender is None else _nullable(payload.gender),
         label=payload.label if payload.label is not None else existing.label,
         timezone=payload.timezone if payload.timezone is not None else existing.timezone,
         staff_user_ids=payload.staff_user_ids if payload.staff_user_ids is not None else existing.staff_user_ids,
         competitive_level=payload.competitive_level if payload.competitive_level is not None else existing.competitive_level,
         players=(
-            [TeamPlayer(name=p.name, number=p.number) for p in payload.players]
+            _resolve_roster_players(payload.players, registry, club_id)
             if payload.players is not None
             else existing.players
         ),
@@ -250,6 +291,9 @@ def update_team(club_id: str, team_id: str, payload: TeamUpdate, request: Reques
         "team": {
             "id": team.id,
             "name": team.name,
+            "category": team.category,
+            "gender": team.gender,
+            "label": team.label,
             "timezone": team.timezone,
             "staff_user_ids": team.staff_user_ids,
             "competitive_level": team.competitive_level,
@@ -340,3 +384,52 @@ def migrate_staff(club_id: str, request: Request) -> dict:
     from ..migrate_staff import migrate_club
 
     return {"ok": True, "summary": migrate_club(club_id)}
+
+
+@router.post("/migrate-player-ids")
+def migrate_player_ids(club_id: str, request: Request, dry_run: bool = True) -> dict:
+    """Backfill stable roster ids (biq-core 0.25.0 ``TeamPlayer.player_id``).
+
+    Assigns ``pl_<16 hex>`` ids to roster rows that lack one, team by team.
+    ``dry_run`` defaults to True — run it first to see the counts; a second
+    real run reports zero changes (idempotent). Each write touches only
+    ``players``: the partial ``Team`` (``exclude_unset`` merge) preserves
+    every other field. Logs counts only — never player names.
+    """
+    require_admin(request, club_id)
+    from biq_core.org import Team, ensure_player_ids
+
+    registry = org.get_registry()
+    teams_scanned = teams_changed = rows_assigned = rows_already_identified = 0
+    for team in registry.list_teams(club_id):
+        teams_scanned += 1
+        missing = sum(1 for p in team.players if not p.player_id)
+        rows_already_identified += len(team.players) - missing
+        if not missing:
+            continue
+        teams_changed += 1
+        rows_assigned += missing
+        if dry_run:
+            continue
+        registry.upsert_team(
+            # Partial write: only `players` is set besides identity fields,
+            # so staff_user_ids/competitive_level/timezone/… are preserved.
+            Team(
+                id=team.id,
+                club_id=club_id,
+                name=team.name,
+                players=ensure_player_ids(list(team.players)),
+            )
+        )
+    summary = {
+        "teams_scanned": teams_scanned,
+        "teams_changed": teams_changed,
+        "rows_assigned": rows_assigned,
+        "rows_already_identified": rows_already_identified,
+    }
+    print(
+        f"migrate-player-ids club={club_id} dry_run={dry_run} "
+        f"teams_scanned={teams_scanned} teams_changed={teams_changed} "
+        f"rows_assigned={rows_assigned} rows_known={rows_already_identified}"
+    )
+    return {"ok": True, "dry_run": dry_run, **summary}

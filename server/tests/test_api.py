@@ -1,5 +1,7 @@
 """Tests for biq-onboard admin API."""
 
+import re
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -572,10 +574,14 @@ def test_update_team_players_roundtrips(admin_client):
         },
     )
     assert r.status_code == 200
-    assert r.json()["team"]["players"] == [
-        {"name": "Ana García", "number": 7},
-        {"name": "Luis Pérez", "number": None},
+    players = r.json()["team"]["players"]
+    assert [(p["name"], p["number"]) for p in players] == [
+        ("Ana García", 7),
+        ("Luis Pérez", None),
     ]
+    # Scouting roster identity (biq-core 0.25.0): every row gets a stable id.
+    for p in players:
+        assert re.fullmatch(r"pl_[0-9a-f]{16}", p["player_id"]), p
     listed = admin_client.get("/api/admin/clubs/club_rt/teams").json()["teams"][0]
     assert listed["players"] == r.json()["team"]["players"]
 
@@ -592,7 +598,10 @@ def test_update_team_omitting_players_preserves_roster(admin_client):
         json={"name": "Equipo Renombrado"},
     )
     assert r.status_code == 200
-    assert r.json()["team"]["players"] == [{"name": "Ana García", "number": 7}]
+    players = r.json()["team"]["players"]
+    assert [(p["name"], p["number"]) for p in players] == [("Ana García", 7)]
+    # Omitted-players writes keep the stored ids untouched.
+    assert all(re.fullmatch(r"pl_[0-9a-f]{16}", p["player_id"]) for p in players)
 
 
 def test_update_team_players_empty_list_clears(admin_client):
@@ -616,7 +625,8 @@ def test_archive_team_preserves_roster(admin_client):
     )
     admin_client.put("/api/admin/clubs/club_ra/teams/team_ra_1/archive")
     listed = admin_client.get("/api/admin/clubs/club_ra/teams").json()["teams"][0]
-    assert listed["players"] == [{"name": "Ana García", "number": 7}]
+    assert [(p["name"], p["number"]) for p in listed["players"]] == [("Ana García", 7)]
+    assert all(p["player_id"] for p in listed["players"])
 
 
 def test_roster_player_validation(admin_client):

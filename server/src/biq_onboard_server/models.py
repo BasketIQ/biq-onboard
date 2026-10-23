@@ -2,7 +2,28 @@
 
 from __future__ import annotations
 
+from biq_core.org import get_category
 from pydantic import BaseModel, Field, field_validator
+
+# Team gender values accepted by the API ("" clears the field on update).
+TEAM_GENDERS = frozenset({"F", "M", "X"})
+
+
+def _valid_category(value: str | None) -> str | None:
+    """Category must be a canonical ``CATEGORIES`` slug or empty."""
+    if value in (None, ""):
+        return value
+    if get_category(value) is None:
+        raise ValueError("unknown category")
+    return value
+
+
+def _valid_gender(value: str | None) -> str | None:
+    if value in (None, ""):
+        return value
+    if value not in TEAM_GENDERS:
+        raise ValueError("invalid gender")
+    return value
 
 
 # ─── Club ───────────────────────────────────────────────────────────────────
@@ -43,10 +64,17 @@ class RosterPlayer(BaseModel):
     Validation lives here, not in the canonical model: ``name`` is stripped
     and must be non-empty, ``number`` is the shirt number (0–99, optional —
     amateur rosters do not always assign one).
+
+    ``player_id`` is the stable roster identity introduced by biq-core
+    0.25.0 (``pl_<16 lowercase hex>``). Rows arriving without one get a
+    fresh id on write (``ensure_player_ids``); rows arriving with one are
+    accepted only when the id already exists in a roster of the same club
+    (preserve same-team, link PD-2) — enforced in the teams router.
     """
 
     name: str = Field(min_length=1, max_length=120)
     number: int | None = Field(default=None, ge=0, le=99)
+    player_id: str | None = Field(default=None, pattern=r"^pl_[0-9a-f]{16}$")
 
     @field_validator("name")
     @classmethod
@@ -68,6 +96,16 @@ class TeamCreate(BaseModel):
     players: list[RosterPlayer] | None = None
     staff_user_ids: list[str] | None = None
 
+    @field_validator("category")
+    @classmethod
+    def _category_slug(cls, value: str | None) -> str | None:
+        return _valid_category(value)
+
+    @field_validator("gender")
+    @classmethod
+    def _gender_value(cls, value: str | None) -> str | None:
+        return _valid_gender(value)
+
 
 class TeamUpdate(BaseModel):
     name: str | None = None
@@ -78,6 +116,16 @@ class TeamUpdate(BaseModel):
     staff_user_ids: list[str] | None = None
     competitive_level: str | None = None
     players: list[RosterPlayer] | None = None
+
+    @field_validator("category")
+    @classmethod
+    def _category_slug(cls, value: str | None) -> str | None:
+        return _valid_category(value)
+
+    @field_validator("gender")
+    @classmethod
+    def _gender_value(cls, value: str | None) -> str | None:
+        return _valid_gender(value)
 
 
 # ─── User ───────────────────────────────────────────────────────────────────

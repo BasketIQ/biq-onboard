@@ -15,6 +15,7 @@
  */
 
 import styles from './styles.css?inline';
+import chispaHeadCompactSvg from './assets/chispa-head-compact-v2.svg?raw';
 
 // ─── Types ──────────────────────────────────────────────────────────────
 
@@ -396,6 +397,53 @@ interface PersonalTeamRow {
   team_revision: number;
 }
 
+// ─── Entry intent (entry-login §4.2) ────────────────────────────────────
+// Frozen at click: the bootstrap account, the entry generation, the access
+// kind and the chosen club/team. Exactly one intent may be in flight; a
+// stale completion paints nothing, emits nothing and releases nothing —
+// only the owning intent releases the busy state.
+interface EntryIntent {
+  id: number;
+  gen: number;
+  account_id: string;
+  kind: 'personal' | 'personal-team' | 'club' | 'create-team' | 'create-club' | 'redeem';
+  club_id?: string;
+  team_id?: string;
+  emitted: boolean;
+  mutated: boolean;
+}
+
+// Recovery surfaces after an applied-or-uncertain mutation:
+//   narrowing — activate POST applied but the working-teams PUT failed
+//     (Reintentar equipo retries the PUT only; Entrar con todos emits the
+//     plain activation path). No rollback is claimed.
+//   uncertain — transport failed after the mutation may have been sent
+//     (Comprobar resynchronizes with a bootstrap GET; never an auto-POST).
+//   confirm   — the activated event was emitted but the shell never
+//     confirmed within the bounded window (Reintentar = bootstrap GET).
+type EntryRecovery =
+  | { kind: 'narrowing'; team_id: string; message: string }
+  | { kind: 'uncertain'; message: string }
+  | { kind: 'confirm'; message: string };
+
+// The request may have reached the server — never auto-retried.
+class EntryUncertainTransport extends Error {
+  constructor() {
+    super('No sabemos si la entrada se completó');
+    this.name = 'EntryUncertainTransport';
+  }
+}
+
+// The activate POST applied but the working-teams narrowing failed.
+class EntryNarrowingFailure extends Error {
+  team_id: string;
+  constructor(teamId: string, message: string) {
+    super(message);
+    this.name = 'EntryNarrowingFailure';
+    this.team_id = teamId;
+  }
+}
+
 // ─── SF1 §5: shared roster editor — normalized model + context port ─────
 // ONE editor renderer/controller for club and personal teams; the data
 // adapter is chosen from the authoritative working context
@@ -460,6 +508,42 @@ const PERSONAL_CATEGORIES: Array<{ key: string; label: string }> = [
   { key: 'veteranos', label: 'Veteranos' },
 ];
 
+// ─── Entry screen v1 (entry-login lot, 2026-10-23) ─────────────────────
+// PD-ENTRY (Director 2026-10-23): «Mi equipo» shows the teams the user
+// coaches; «Mi club» is not shown to a coach. The coached universe the
+// entry screen can attest is the personal-teams feed (the bootstrap
+// carries no per-club role or coached-team catalog — README §PD-ENTRY);
+// a confirmed coach (feed loaded, ≥1 active coached team) sees only
+// «Mi equipo». Until the feed resolves, or if it cannot, the club block
+// stays visible — hiding it would strand memberships we cannot disprove.
+// The «Entrenador» chip describes the coach space itself; the club block
+// carries NO role chip because the feed cannot attest «Director
+// deportivo» for every membership (PD-CLUBS: no role on club access).
+const ENTRY_TEAM_ROLE_LABEL = 'Entrenador';
+// PD-CLUBS (Director 2026-10-23): 2 clubs → two cards; ≥3 → one main
+// access (the «Club reciente» when a valid datum bound to the current
+// user exists — the server's active context, else the account-bound
+// last-club marker written on a successful club entry) + «Elegir club»
+// searchable picker; never an arbitrary club as the main access.
+const ENTRY_LAST_CLUB_KEY_PREFIX = 'biq.entry.lastClub.';
+const normEntryText = (value: string) =>
+  value.toLowerCase().normalize('NFD').replace(/\p{M}/gu, '');
+// Compact Chispa model, bundled from the module-local asset
+// (app/src/assets/chispa-head-compact-v2.svg, sha256 1b1c51a6…e9c9 —
+// pinned by tests/entry-selector.test.mjs). Module-local by design: this
+// help action does not depend on shell-hosted asset resolution.
+const CHISPA_HEAD_COMPACT_URI = `data:image/svg+xml,${encodeURIComponent(chispaHeadCompactSvg)}`;
+const ENTRY_ARROW_SVG =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg>';
+const ENTRY_CLOSE_SVG =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>';
+const ENTRY_TEAM_ICON_SVG =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m8 3 4 3 4-3 5 5-3 3-2-2v12H8V9l-2 2-3-3 5-5Z"/><path d="M10 12h4M12 10v6"/></svg>';
+const ENTRY_CLUB_ICON_SVG =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2 4 5v6c0 5 8 10 8 10s8-5 8-10V5l-8-3Z"/><path d="m9 11 2 2 4-4"/></svg>';
+const ENTRY_PLUS_SVG =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>';
+
 // ─── Main component ─────────────────────────────────────────────────────
 
 class BiqOnboardApp extends HTMLElement {
@@ -477,7 +561,6 @@ class BiqOnboardApp extends HTMLElement {
   private _bootstrap: BootstrapPayload | null = null;
   private _bootstrapLoading = false;
   private _bootstrapFailed = false;
-  private _entryTab: 'personal' | 'club' = 'personal';
   private _personalTeams: PersonalTeamRow[] | null = null;
   // OB60-3: the feed is a real state machine — 'uninitialized' means never
   // attempted (first load may trigger), 'loading' in flight, 'error' failed
@@ -490,11 +573,29 @@ class BiqOnboardApp extends HTMLElement {
   private _inviteToken = '';
   private _invitePreview: { club_id: string; club_name: string } | null = null;
   private _inviteLoading = false;
-  private _helpOpen: '' | 'personal' | 'club' = '';
+  private _helpOpen = false;
+  // PD-CLUBS ≥3-club picker: open state + live search query. The query
+  // persists across re-renders so a busy repaint never un-hides rows the
+  // user already filtered out; row visibility is also mirrored in the DOM
+  // without re-rendering so typing never loses focus.
+  private _clubPickerOpen = false;
+  private _clubPickerQuery = '';
   private _clubCreateOpen = false;
   private _teamCreateOpen = false;
   private _entryError: string | null = null;
   private _entryBusy = false;
+  // Entry-login §4.2 — intent fencing. `gen` marks the entry scope: every
+  // fresh bootstrap (first load, account change, re-entry through
+  // #/onboard/spaces, explicit resync) bumps it, retiring the in-flight
+  // intent and its continuations. `_entryIntent` is the single-flight
+  // owner of `_entryBusy`; `_entryConfirmMs` bounds the post-emission
+  // «Entrando…» wait (15 s default, field for test override).
+  private _entryGen = 0;
+  private _entryIntent: EntryIntent | null = null;
+  private _entryIntentSeq = 0;
+  private _entryRecovery: EntryRecovery | null = null;
+  private _entryConfirmTimer: ReturnType<typeof setTimeout> | null = null;
+  private _entryConfirmMs = 15000;
   private _subRoute = '';
   private _theme: ClubTheme | null = null;
   private _themeJob: ThemeJob | null = null;
@@ -688,6 +789,18 @@ class BiqOnboardApp extends HTMLElement {
     const styleEl = document.createElement('style');
     styleEl.textContent = styles;
     this.shadow.appendChild(styleEl);
+    // Entry dialogs: Escape closes from any focus inside (the listener
+    // lives on the host so re-renders never have to rewire it).
+    this.addEventListener('keydown', (ev) => {
+      if (ev.key !== 'Escape') return;
+      if (this._clubPickerOpen) {
+        ev.preventDefault();
+        this._closeClubPicker();
+      } else if (this._helpOpen) {
+        ev.preventDefault();
+        this._closeEntryHelp();
+      }
+    });
   }
 
   // Member-management gate — the server enforces F9 authorization; this is
@@ -788,6 +901,11 @@ class BiqOnboardApp extends HTMLElement {
       this._resetPersonalFeed();
       this._editingPersonalTeamId = null;
       this._retireEditor();
+      // Entry scope belongs to the principal too: a different account
+      // retires the in-flight intent, its busy hold and the bootstrap
+      // projection — the new scope refetches on the next render. The
+      // null→user first bind has no prior scope to retire.
+      if (this._user !== null) this._invalidateEntryScope();
     }
     this._user = value;
     this.render();
@@ -834,15 +952,20 @@ class BiqOnboardApp extends HTMLElement {
   private async loadBootstrap(): Promise<void> {
     if (this._bootstrapLoading || this._bootstrap || this._bootstrapFailed) return;
     this._bootstrapLoading = true;
+    // Every fresh bootstrap opens a new entry scope: the generation bump
+    // retires in-flight intents and fences this fetch's own continuations
+    // (a response that lands after an account switch or a resync paints
+    // nothing and releases nothing).
+    const gen = (this._entryGen += 1);
+    const current = () => gen === this._entryGen && this.isConnected;
     try {
       const res = await fetch('/api/context/v1/bootstrap', { credentials: 'include', cache: 'no-store' });
+      if (!current()) return;
       if (!res.ok) { this._bootstrapFailed = true; return; }
       const data = await res.json().catch(() => null);
+      if (!current()) return;
       if (!data || typeof data.state !== 'string') { this._bootstrapFailed = true; return; }
       this._bootstrap = data as BootstrapPayload;
-      // Default the tab: club candidates land on the club tab.
-      const hasClub = (data.contexts || []).some((c: ContextCandidate) => c.kind === 'club');
-      this._entryTab = hasClub ? 'club' : 'personal';
       // Mi equipo lists the account's private teams — prefetch only when
       // this session actually holds personal authority. A member-scope
       // credential is denied the endpoint outright (403 by design), so a
@@ -850,10 +973,12 @@ class BiqOnboardApp extends HTMLElement {
       // a retry control that can never succeed.
       if (this._personalReadAllowed()) this.loadPersonalTeams();
     } catch (err) {
-      this._bootstrapFailed = true;
+      if (current()) this._bootstrapFailed = true;
     } finally {
-      this._bootstrapLoading = false;
-      this.render();
+      if (current()) {
+        this._bootstrapLoading = false;
+        this.render();
+      }
     }
   }
 
@@ -1319,65 +1444,249 @@ class BiqOnboardApp extends HTMLElement {
     if (!row || row.archived) this._pendingEditTeamId = null;
   }
 
-  private async activateContext(kind: 'personal' | 'club', clubId?: string): Promise<void> {
+  // ─── Entry intent engine (entry-login §4.2) ───────────────────────────
+  // A click freezes an EntryIntent (generation, account, kind, club/team).
+  // One intent in flight: further clicks are ignored. Every async
+  // continuation re-checks `isConnected`, the generation and the intent
+  // identity — a stale completion paints nothing, emits nothing and
+  // releases nothing. Only the owning intent releases the busy state, and
+  // create→enter / redeem→activate chains run inside ONE intent scope.
+
+  private _invalidateEntryScope(): void {
+    this._entryGen += 1;
+    this._entryIntent = null;
+    this._entryBusy = false;
+    this._entryRecovery = null;
+    this._entryError = null;
+    if (this._entryConfirmTimer) {
+      clearTimeout(this._entryConfirmTimer);
+      this._entryConfirmTimer = null;
+    }
+    this._bootstrap = null;
+    this._bootstrapFailed = false;
+    this._bootstrapLoading = false;
+  }
+
+  // Bounded resync: drop the cached projection and refetch bootstrap.
+  // Recovery state is preserved — the resync reflects server truth while
+  // the recovery actions remain available (entry-login §4.2).
+  private _resyncBootstrap(): void {
+    this._invalidateEntryScope();
+    this._resetPersonalFeed();
+    if (this.isConnected) this.render();
+  }
+
+  private _beginEntryIntent(
+    kind: EntryIntent['kind'],
+    extra: { club_id?: string; team_id?: string } = {},
+  ): EntryIntent | null {
+    if (this._entryIntent) return null; // single flight — double clicks deduped
+    const intent: EntryIntent = {
+      id: (this._entryIntentSeq += 1),
+      gen: this._entryGen,
+      account_id: this._bootstrap?.account_id || '',
+      kind,
+      emitted: false,
+      mutated: false,
+      ...extra,
+    };
+    this._entryIntent = intent;
     this._entryBusy = true;
     this._entryError = null;
+    this._entryRecovery = null;
+    // An entry mutation dismisses the club picker — a failure surfaces on
+    // the main screen where the error and recovery affordances live.
+    this._clubPickerOpen = false;
     this.render();
+    return intent;
+  }
+
+  private _intentCurrent(intent: EntryIntent): boolean {
+    return (
+      this.isConnected &&
+      this._entryIntent === intent &&
+      intent.gen === this._entryGen &&
+      (this._bootstrap?.account_id || '') === intent.account_id
+    );
+  }
+
+  // Only the owner releases — a stale intent's finally is a no-op here.
+  private _finishEntryIntent(intent: EntryIntent): void {
+    if (this._entryIntent !== intent) return;
+    this._entryIntent = null;
+    this._entryBusy = false;
+  }
+
+  private _intentAccess(): 'personal' | 'club' | null {
+    const kind = this._entryIntent?.kind;
+    if (!kind) return null;
+    return kind === 'club' || kind === 'create-club' || kind === 'redeem' ? 'club' : 'personal';
+  }
+
+  private async _entryMutation(
+    url: string,
+    payload: unknown,
+    method: 'POST' | 'PUT' = 'POST',
+    idempotencyKey?: string,
+  ): Promise<Response> {
     try {
-      const res = await fetch('/api/context/v1/activate', {
-        method: 'POST',
+      return await fetch(url, {
+        method,
         credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(clubId ? { kind, club_id: clubId } : { kind }),
+        headers: {
+          'Content-Type': 'application/json',
+          ...(idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : {}),
+        },
+        body: JSON.stringify(payload),
       });
-      if (!res.ok) {
-        const body = await res.json().catch(() => null);
-        throw new Error(body?.detail || `No se pudo activar el contexto (${res.status})`);
-      }
-      this.dispatchEvent(new CustomEvent('biq-context:activated', { bubbles: true, composed: true }));
-    } catch (err) {
-      this._entryError = (err as Error).message;
-    } finally {
-      this._entryBusy = false;
-      this.render();
+    } catch {
+      // The mutation may have been sent — never auto-retried; the caller
+      // surfaces the uncertain-transport recovery instead.
+      throw new EntryUncertainTransport();
     }
   }
 
-  // Entrar en el espacio personal con un equipo concreto: activa el
-  // contexto personal y estrecha el working set a ese equipo.
-  private async enterPersonalTeam(teamId: string): Promise<void> {
-    this._entryBusy = true;
-    this._entryError = null;
-    this.render();
-    try {
-      const res = await fetch('/api/context/v1/activate', {
-        method: 'POST',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ kind: 'personal' }),
-      });
-      if (!res.ok) {
-        const body = await res.json().catch(() => null);
-        throw new Error(body?.detail || `No se pudo activar el contexto (${res.status})`);
-      }
-      if (teamId) {
-        const put = await fetch('/api/context/v1/active/working-teams', {
-          method: 'PUT',
-          credentials: 'include',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ working_team_ids: [teamId] }),
-        });
-        if (!put.ok) {
-          const body = await put.json().catch(() => null);
-          throw new Error(body?.detail || `No se pudo seleccionar el equipo (${put.status})`);
-        }
-      }
-      this.dispatchEvent(new CustomEvent('biq-context:activated', { bubbles: true, composed: true }));
-    } catch (err) {
-      this._entryError = (err as Error).message;
-    } finally {
-      this._entryBusy = false;
+  private async _postActivate(kind: 'personal' | 'club', clubId?: string): Promise<void> {
+    const res = await this._entryMutation(
+      '/api/context/v1/activate',
+      clubId ? { kind, club_id: clubId } : { kind },
+    );
+    if (!res.ok) {
+      const body = await res.json().catch(() => null);
+      throw new Error(body?.detail || `No se pudo activar el contexto (${res.status})`);
+    }
+  }
+
+  private async _putWorkingTeams(teamId: string): Promise<void> {
+    const res = await this._entryMutation(
+      '/api/context/v1/active/working-teams',
+      { working_team_ids: [teamId] },
+      'PUT',
+    );
+    if (!res.ok) {
+      const body = await res.json().catch(() => null);
+      throw new EntryNarrowingFailure(
+        teamId,
+        body?.detail || `No se pudo seleccionar el equipo (${res.status})`,
+      );
+    }
+  }
+
+  private _emitActivated(intent: EntryIntent): void {
+    intent.emitted = true;
+    // PD-CLUBS «Club reciente»: a successful club entry is the datum that
+    // feeds the main access on the next visit — stored per account, only
+    // ever honored while the club still appears in the entry feed.
+    if (this._intentAccess() === 'club' && intent.club_id) {
+      this._writeLastClub(intent.club_id);
+    }
+    // Same event contract as before; the detail is additive — the shell
+    // must not depend on it.
+    this.dispatchEvent(
+      new CustomEvent('biq-context:activated', {
+        bubbles: true,
+        composed: true,
+        detail: {
+          kind: this._intentAccess(),
+          club_id: intent.club_id ?? null,
+          team_id: intent.team_id ?? null,
+        },
+      }),
+    );
+    this.render(); // busy stays «Entrando…» until unmount, fresh bootstrap or the bounded wait
+    this._entryConfirmTimer = setTimeout(() => {
+      this._entryConfirmTimer = null;
+      if (!this._intentCurrent(intent)) return;
+      this._finishEntryIntent(intent);
+      this._entryRecovery = { kind: 'confirm', message: 'No se pudo confirmar la entrada' };
       this.render();
+    }, this._entryConfirmMs);
+  }
+
+  private _runEntryIntent(intent: EntryIntent, work: () => Promise<void>): void {
+    void (async () => {
+      try {
+        await work();
+        if (!this._intentCurrent(intent)) return; // stale: paint/emit nothing
+        this._emitActivated(intent);
+      } catch (err) {
+        if (!this._intentCurrent(intent)) return; // stale: release/recover nothing
+        this._finishEntryIntent(intent);
+        // The resync clears entry state — recovery/error are set AFTER it
+        // so they survive the refresh.
+        if (err instanceof EntryNarrowingFailure) {
+          // POST applied, narrowing failed — recovery without claiming
+          // rollback, plus a bounded resync of the projection.
+          this._resyncBootstrap();
+          this._entryRecovery = { kind: 'narrowing', team_id: err.team_id, message: err.message };
+          this.render();
+          return;
+        }
+        if (err instanceof EntryUncertainTransport) {
+          this._entryRecovery = { kind: 'uncertain', message: err.message };
+          this.render();
+          return;
+        }
+        // A chain that already mutated (create→activate, redeem→activate)
+        // resynchronizes so the projection reflects what was applied.
+        if (intent.mutated) this._resyncBootstrap();
+        this._entryError = (err as Error).message || 'No se pudo completar la entrada';
+        this.render();
+      }
+    })();
+  }
+
+  // Recovery actions — each is an explicit user gesture, never an
+  // automatic retry of an uncertain mutation.
+  private _retryNarrowing(teamId: string): void {
+    const intent = this._beginEntryIntent('personal-team', { team_id: teamId });
+    if (!intent) return;
+    this._runEntryIntent(intent, async () => {
+      await this._putWorkingTeams(teamId); // PUT only — the POST applied already
+    });
+  }
+
+  private _enterPersonal(teamId?: string): void {
+    const intent = this._beginEntryIntent(teamId ? 'personal-team' : 'personal', { team_id: teamId });
+    if (!intent) return;
+    this._runEntryIntent(intent, async () => {
+      await this._postActivate('personal');
+      intent.mutated = true;
+      if (teamId) {
+        if (!this._intentCurrent(intent)) return;
+        await this._putWorkingTeams(teamId);
+      }
+    });
+  }
+
+  private _enterClub(clubId: string): void {
+    const intent = this._beginEntryIntent('club', { club_id: clubId });
+    if (!intent) return;
+    this._runEntryIntent(intent, async () => {
+      await this._postActivate('club', clubId);
+      intent.mutated = true;
+    });
+  }
+
+  // PD-CLUBS «Club reciente» datum — account-bound session marker. It is
+  // only a presentation hint: read back only while the id still appears
+  // among the entry feed's club candidates, so a revoked membership or a
+  // different account can never leak a club into the main access.
+  private _lastClubKey(): string {
+    return `${ENTRY_LAST_CLUB_KEY_PREFIX}${this._bootstrap?.account_id || ''}`;
+  }
+
+  private _writeLastClub(clubId: string): void {
+    try {
+      sessionStorage.setItem(this._lastClubKey(), clubId);
+    } catch { /* storage unavailable — reciente is a hint, not a gate */ }
+  }
+
+  private _readLastClubId(): string {
+    try {
+      return sessionStorage.getItem(this._lastClubKey()) || '';
+    } catch {
+      return '';
     }
   }
 
@@ -1452,6 +1761,7 @@ class BiqOnboardApp extends HTMLElement {
     // until a successful selection save lets the user navigate there.
     const raw = value || '';
     const qIdx = raw.indexOf('?');
+    const prevSub = this._subRoute;
     this._subRoute = qIdx >= 0 ? raw.slice(0, qIdx) : raw;
     const params = qIdx >= 0 ? new URLSearchParams(raw.slice(qIdx + 1)) : null;
     this._returnRoute = params?.get('return') || '';
@@ -1459,12 +1769,17 @@ class BiqOnboardApp extends HTMLElement {
     // route without it drops a stale pending request.
     this._pendingEditTeamId = params?.get('edit') || null;
     // `invite=<token>` — invitation links arrive by email; the token rides
-    // the deep link and the Mi club tab shows the confirm card.
+    // the deep link and the Mi club block shows the confirm card.
     const invite = params?.get('invite') || '';
     if (invite) {
       this._inviteToken = invite;
       this._invitePreview = null;
-      this._entryTab = 'club';
+    }
+    // Re-entry through #/onboard/spaces opens a fresh bootstrap scope:
+    // the generation bump retires any in-flight intent and the resync
+    // reflects whatever context the server currently reports.
+    if (this._subRoute === 'spaces' && prevSub !== 'spaces') {
+      this._resyncBootstrap();
     }
     this.render();
     // F12: Deep-linking to #/onboard/teams bypasses the nav click that loads
@@ -1568,7 +1883,14 @@ class BiqOnboardApp extends HTMLElement {
   // route setter and org-context arrival) funnels through here so no tab
   // can render without its data load being triggered.
   private _selectTab(nav: string, clubId: string): void {
+    const prevSub = this._subRoute;
     this._subRoute = nav;
+    if (nav === 'spaces' && prevSub !== 'spaces') {
+      // Re-entry into the selector opens a fresh bootstrap scope — same
+      // rule as the #/onboard/spaces route.
+      this._resyncBootstrap();
+      return;
+    }
     if (nav === 'teams') {
       this._ensureTeamsData(clubId);
     } else if (nav === 'profile' && !this._clubSummary && !this._clubSummaryLoading) {
@@ -3044,6 +3366,9 @@ class BiqOnboardApp extends HTMLElement {
     // OB60-3: a detached component must not keep retrying the personal
     // feed — fence + abort it like the club submit path.
     this._resetPersonalFeed();
+    // Unmount retires the entry intent scope as well: continuations check
+    // isConnected + generation, and the confirm timer must not outlive it.
+    this._invalidateEntryScope();
     // Remove visibility handler
     if (this._visibilityHandler) {
       document.removeEventListener('visibilitychange', this._visibilityHandler);
@@ -3867,10 +4192,12 @@ class BiqOnboardApp extends HTMLElement {
     this._recoverSubmission(scope, message, seq);
   }
 
-  // ─── Working-context entry selector ─────────────────────────────────
-  // Two tabs per the contract: "Solo entrenador" (personal workspace) and
-  // "Club actual" (memberships / invitation / gated club create). All
-  // authority lives server-side; this view only reflects entry_actions.
+  // ─── Working-context entry selector (entry-login v1) ──────────────────
+  // One screen, no tabs and no visible title: the «Mi equipo» and
+  // «Mi club» blocks render stacked with the approved copies, full-card
+  // access and secondary create/invite/exit actions. All authority lives
+  // server-side; this view only reflects entry_actions. Onboard draws no
+  // header/footer of its own — chrome belongs to the shell.
 
   private renderEntryStep(): string {
     const boot = this._bootstrap!;
@@ -3878,6 +4205,12 @@ class BiqOnboardApp extends HTMLElement {
     const actions = boot.entry_actions || {};
     const clubs = (boot.contexts || []).filter((c) => c.kind === 'club');
     const createAllowed = actions['club.create']?.allowed === true;
+    const busy = this._entryBusy;
+    const busyAccess = this._intentAccess();
+    const busyNote = (scope: 'personal' | 'club') =>
+      busy && busyAccess === scope
+        ? '<p class="entry-status" role="status">Entrando…</p>'
+        : '';
 
     const activeLabel = active
       ? active.owner_scope.kind === 'personal'
@@ -3885,123 +4218,308 @@ class BiqOnboardApp extends HTMLElement {
         : `Club ${(clubs.find((c) => c.owner_scope.club_id === active.owner_scope.club_id) as ContextCandidate | undefined)?.name || active.owner_scope.club_id}`
       : '';
 
-    const helpIcon = (tab: string) => `
-      <button class="entry-help" type="button" data-entry-help="${tab}" aria-label="Ayuda" aria-haspopup="dialog">
-        <img class="nav-chispa entry-chispa-light" src="/assets/basketiq-mobile-assets-v2/svg/light/heads/chispa-speaking.svg" alt="" aria-hidden="true">
-        <img class="nav-chispa entry-chispa-dark" src="/assets/basketiq-mobile-assets-v2/svg/dark/heads/chispa-speaking.svg" alt="" aria-hidden="true">
-      </button>`;
-
     const personalTeams = (this._personalTeams || []).filter((t) => !t.archived);
     const archivedTeams = (this._personalTeams || []).filter((t) => t.archived);
+    // PD-ENTRY: «Mi club» is not shown to a coach. A coach is CONFIRMED
+    // only by a loaded feed with ≥1 active coached team — while the feed
+    // is loading or after a bounded error the club block stays up (the
+    // honest fallback: hiding it would strand memberships on a feed
+    // failure).
+    const isCoach =
+      this._personalReadAllowed() &&
+      this._personalTeamsStatus === 'ready' &&
+      personalTeams.length > 0;
     const atTeamCap = personalTeams.length >= 2;
     const teamMeta = (t: PersonalTeamRow) =>
       `${escapeHtml(t.category_label || t.category_key)}${t.gender && t.gender !== 'X' ? ` · ${escapeHtml(t.gender)}` : ''}${t.age_band ? ` · ${escapeHtml(t.age_band)}` : ''}`;
 
     // Member-scope sessions are denied personal authority by design (R1):
     // the feed is never fetched, so instead of a spinner/retry that could
-    // never resolve, the tab states the elevation requirement honestly.
-    const personalTab = !this._personalReadAllowed() ? `
-      <section class="entry-panel">
-        <p class="entry-note">El espacio personal requiere una sesión verificada. Cierra sesión y entra con tu cuenta para usarlo.</p>
-      </section>` : `
-      <section class="entry-panel">
-        ${this._personalTeamsStatus === 'loading' || this._personalTeamsStatus === 'uninitialized'
-          ? '<p class="entry-loading">Cargando equipos…</p>'
-          : this._personalTeamsStatus === 'error'
-            ? `<p class="entry-error" role="alert">${escapeHtml(this._personalTeamsError || 'No se pudieron cargar los equipos')}
-                <button class="onboard-btn" type="button" data-personal-teams-retry ${this._entryBusy ? 'disabled' : ''}>Reintentar</button></p>`
-            : ''}
-        ${personalTeams.length ? `
-          <ul class="entry-teams">
-            ${personalTeams.map((t) => `
-              <li class="entry-team entry-team-action">
-                <button class="onboard-btn onboard-btn-primary" data-entry-personal-enter-team="${escapeHtml(t.team_id)}" ${this._entryBusy ? 'disabled' : ''}>
-                  Entrar — ${escapeHtml(t.name)}
-                </button>
-                <span>${teamMeta(t)}</span>
-              </li>`).join('')}
-          </ul>` : ''}
-        ${atTeamCap
-          ? '<p class="entry-note">Puedes tener hasta 2 equipos personales. Elimina uno desde «Mis equipos» para crear otro.</p>'
-          : `<button class="onboard-btn" data-entry-team-create-toggle ${this._entryBusy ? 'disabled' : ''}>+ Crear equipo</button>
-            ${this._teamCreateOpen ? `
-              <form class="entry-form" data-entry-personal-create>
-                <div class="entry-field"><label>Nombre del equipo</label>
-                  <input type="text" name="name" maxlength="120" required /></div>
-                <div class="entry-field"><label>Categoría</label>
-                  <select name="category_key">${PERSONAL_CATEGORIES.map((c) => `<option value="${c.key}">${c.label}</option>`).join('')}</select></div>
-                <div class="entry-field"><label>Género</label>
-                  <select name="gender"><option value="X">Mixto</option><option value="F">Femenino</option><option value="M">Masculino</option></select></div>
-                <button class="onboard-btn onboard-btn-primary" type="submit" ${this._entryBusy ? 'disabled' : ''}>Crear y entrar</button>
-              </form>` : ''}`}
-        ${personalTeams.length ? `
-          <button class="onboard-btn" data-entry-personal-enter ${this._entryBusy ? 'disabled' : ''}>Entrar con todos los equipos</button>
-        ` : archivedTeams.length ? `
-          <p class="entry-note">Tus equipos están archivados — entra para restaurarlos desde «Mis equipos», o crea uno nuevo.</p>
-          <button class="onboard-btn" data-entry-personal-enter ${this._entryBusy ? 'disabled' : ''}>Entrar</button>
-        ` : ''}
+    // never resolve, the block states the elevation requirement honestly.
+    const teamBlock = `
+      <section class="entry-block" aria-labelledby="entry-team-heading">
+        <div class="entry-block-head">
+          <h2 class="entry-block-title" id="entry-team-heading">Mi equipo</h2>
+          <span class="entry-role">${ENTRY_TEAM_ROLE_LABEL}</span>
+        </div>
+        <p class="entry-block-copy">Prepara entrenamientos, organiza la temporada y sigue tus partidos. Todo para entrenar a tu equipo.</p>
+        ${busyNote('personal')}
+        ${!this._personalReadAllowed() ? `
+          <p class="entry-note">El espacio personal requiere una sesión verificada. Cierra sesión y entra con tu cuenta para usarlo.</p>` : `
+          ${this._personalTeamsStatus === 'loading' || this._personalTeamsStatus === 'uninitialized'
+            ? '<p class="entry-loading">Cargando equipos…</p>'
+            : this._personalTeamsStatus === 'error'
+              ? `<p class="entry-error" role="alert">${escapeHtml(this._personalTeamsError || 'No se pudieron cargar los equipos')}
+                  <button class="onboard-btn" type="button" data-personal-teams-retry ${busy ? 'disabled' : ''}>Reintentar</button></p>`
+              : ''}
+          ${personalTeams.length ? `
+            <ul class="entry-cards">
+              ${personalTeams.map((t) => `
+                <li><button class="entry-card" type="button" data-entry-personal-enter-team="${escapeHtml(t.team_id)}" ${busy ? 'disabled' : ''} aria-label="Entrar en ${escapeHtml(t.name)}">
+                  <span class="entry-card-icon">${ENTRY_TEAM_ICON_SVG}</span>
+                  <span class="entry-card-copy">
+                    <span class="entry-card-title">${escapeHtml(t.name)}</span>
+                    <span class="entry-card-meta">${teamMeta(t)}</span>
+                  </span>
+                  <span class="entry-card-arrow">${ENTRY_ARROW_SVG}</span>
+                </button></li>`).join('')}
+            </ul>` : ''}
+          ${personalTeams.length > 1 ? `
+            <button class="entry-textlink" type="button" data-entry-personal-enter ${busy ? 'disabled' : ''}>Entrar con todos los equipos</button>` : ''}
+          ${atTeamCap
+            ? '<p class="entry-note">Puedes tener hasta 2 equipos personales. Elimina uno desde «Mis equipos» para crear otro.</p>'
+            : `<button class="entry-create" type="button" data-entry-team-create-toggle ${busy ? 'disabled' : ''}>${ENTRY_PLUS_SVG}<span>Crear equipo</span></button>
+              ${this._teamCreateOpen ? `
+                <form class="entry-form" data-entry-personal-create>
+                  <div class="entry-field"><label>Nombre del equipo</label>
+                    <input type="text" name="name" maxlength="120" required /></div>
+                  <div class="entry-field"><label>Categoría</label>
+                    <select name="category_key">${PERSONAL_CATEGORIES.map((c) => `<option value="${c.key}">${c.label}</option>`).join('')}</select></div>
+                  <div class="entry-field"><label>Género</label>
+                    <select name="gender"><option value="X">Mixto</option><option value="F">Femenino</option><option value="M">Masculino</option></select></div>
+                  <button class="onboard-btn onboard-btn-primary" type="submit" ${busy ? 'disabled' : ''}>Crear y entrar</button>
+                </form>` : ''}`}
+          ${!personalTeams.length && archivedTeams.length ? `
+            <p class="entry-note">Tus equipos están archivados — entra para restaurarlos desde «Mis equipos», o crea uno nuevo.</p>
+            <button class="onboard-btn" type="button" data-entry-personal-enter ${busy ? 'disabled' : ''}>Entrar</button>` : ''}
+        `}
       </section>`;
 
-    const clubTab = `
-      <section class="entry-panel">
+    // Emailed invites are an explicit join gesture, not part of the club
+    // membership universe — they stay reachable even when the club block
+    // is hidden for a coach (PD-ENTRY).
+    const inviteBlock = this._invitePreview ? `
+      <div class="entry-invite">
+        <p>Invitación para <strong>${escapeHtml(this._invitePreview.club_name || this._invitePreview.club_id)}</strong></p>
+        <button class="onboard-btn onboard-btn-primary" type="button" data-entry-invite-redeem ${busy ? 'disabled' : ''}>Unirme al club</button>
+      </div>` : '';
+
+    const clubCard = (
+      c: ContextCandidate,
+      meta = '',
+      opts: { pickerRow?: boolean; hidden?: boolean } = {},
+    ) => {
+      const clubId = c.owner_scope.club_id || '';
+      const clubName = c.name || clubId;
+      const rowAttrs = opts.pickerRow
+        ? ` data-entry-club-picker-row="${escapeHtml(normEntryText(clubName))}"`
+        : '';
+      return `
+        <li${rowAttrs}${opts.hidden ? ' hidden' : ''}><button class="entry-card" type="button" data-entry-club-activate="${escapeHtml(clubId)}" ${busy ? 'disabled' : ''} aria-label="Entrar en ${escapeHtml(clubName)}">
+          <span class="entry-card-icon entry-card-icon-club">${ENTRY_CLUB_ICON_SVG}</span>
+          <span class="entry-card-copy">
+            <span class="entry-card-title">${escapeHtml(clubName)}</span>
+            ${meta ? `<span class="entry-card-meta">${escapeHtml(meta)}</span>` : ''}
+          </span>
+          <span class="entry-card-arrow">${ENTRY_ARROW_SVG}</span>
+        </button></li>`;
+    };
+
+    // PD-CLUBS: ≤2 clubs → one card each. ≥3 → one main access: the
+    // server-active club first, else the account-bound last-entered club,
+    // both validated against the feed; with no valid datum the access is
+    // the neutral «Elegir club» picker — never an arbitrary club. Cards
+    // carry only the name (no locality / team count / role — no
+    // authoritative pre-entry source).
+    const activeClubId =
+      active && active.owner_scope.kind === 'club'
+        ? active.owner_scope.club_id || ''
+        : '';
+    const recentClubId = activeClubId || this._readLastClubId();
+    const recentClub = recentClubId
+      ? clubs.find((c) => (c.owner_scope.club_id || '') === recentClubId)
+      : undefined;
+    const clubQuery = normEntryText(this._clubPickerQuery.trim());
+    const pickerRows = clubs.filter(
+      (c) =>
+        !clubQuery ||
+        normEntryText((c.name || c.owner_scope.club_id || '')).includes(clubQuery),
+    );
+    const clubPicker = this._clubPickerOpen ? `
+      <div class="entry-picker-backdrop" data-entry-club-picker-backdrop>
+        <div class="entry-picker-dialog" role="dialog" aria-modal="true" aria-labelledby="entry-picker-title">
+          <div class="entry-picker-head">
+            <h2 class="entry-picker-title" id="entry-picker-title">Elegir club</h2>
+            <button class="entry-help-close" type="button" data-entry-club-picker-close aria-label="Cerrar">${ENTRY_CLOSE_SVG}</button>
+          </div>
+          <div class="entry-picker-search">
+            <input type="search" data-entry-club-picker-search value="${escapeHtml(this._clubPickerQuery)}" placeholder="Buscar club" aria-label="Buscar club" ${busy ? 'disabled' : ''} />
+          </div>
+          <ul class="entry-cards entry-picker-list" data-entry-club-picker-list>
+            ${clubs.map((c) => clubCard(c, '', {
+              pickerRow: true,
+              hidden:
+                !!clubQuery &&
+                !normEntryText((c.name || c.owner_scope.club_id || '')).includes(clubQuery),
+            })).join('')}
+          </ul>
+          <p class="entry-empty" data-entry-club-picker-empty ${pickerRows.length ? 'hidden' : ''}>No hay clubes que coincidan${clubQuery ? ` con «${escapeHtml(this._clubPickerQuery)}»` : ''}.</p>
+        </div>
+      </div>` : '';
+
+    const clubAccess = clubs.length
+      ? clubs.length <= 2
+        ? `<ul class="entry-cards">${clubs.map((c) => clubCard(c)).join('')}</ul>`
+        : recentClub
+          ? `<ul class="entry-cards">${clubCard(recentClub, 'Club reciente')}</ul>
+            <button class="entry-create" type="button" data-entry-club-picker-open ${busy ? 'disabled' : ''} aria-haspopup="dialog">${ENTRY_CLUB_ICON_SVG}<span>Elegir club</span><span class="entry-create-count">${clubs.length} clubes</span></button>`
+          : // No valid «reciente» datum: the picker IS the main access —
+            // a full card, never an arbitrary club (PD-CLUBS).
+            `<ul class="entry-cards">
+              <li><button class="entry-card" type="button" data-entry-club-picker-open ${busy ? 'disabled' : ''} aria-haspopup="dialog" aria-label="Elegir entre tus ${clubs.length} clubes">
+                <span class="entry-card-icon entry-card-icon-club">${ENTRY_CLUB_ICON_SVG}</span>
+                <span class="entry-card-copy">
+                  <span class="entry-card-title">Elegir club</span>
+                  <span class="entry-card-meta">${clubs.length} clubes</span>
+                </span>
+                <span class="entry-card-arrow">${ENTRY_ARROW_SVG}</span>
+              </button></li>
+            </ul>`
+      : `<p class="entry-empty">No tienes clubes todavía.</p>`;
+
+    const clubBlock = isCoach ? '' : `
+      <section class="entry-block" aria-labelledby="entry-club-heading">
+        <div class="entry-block-head">
+          <h2 class="entry-block-title" id="entry-club-heading">Mi club</h2>
+        </div>
+        <p class="entry-block-copy">Coordina los equipos y el staff. Define la metodología y acompaña la planificación de todo el club.</p>
+        ${busyNote('club')}
+        ${clubAccess}
         ${createAllowed ? `
-          <button class="onboard-btn" data-entry-club-create-toggle ${this._entryBusy ? 'disabled' : ''}>+ Crear club</button>
+          <button class="entry-create" type="button" data-entry-club-create-toggle ${busy ? 'disabled' : ''}>${ENTRY_PLUS_SVG}<span>Crear club</span></button>
           ${this._clubCreateOpen ? `
             <form class="entry-form" data-entry-club-create>
               <div class="entry-field"><label>Nombre del club</label>
                 <input type="text" name="name" maxlength="200" required /></div>
-              <button class="onboard-btn onboard-btn-primary" type="submit" ${this._entryBusy ? 'disabled' : ''}>Crear</button>
+              <button class="onboard-btn onboard-btn-primary" type="submit" ${busy ? 'disabled' : ''}>Crear</button>
             </form>` : ''}
         ` : ''}
-        ${this._invitePreview ? `
-          <div class="entry-invite">
-            <p>Invitación para <strong>${escapeHtml(this._invitePreview.club_name || this._invitePreview.club_id)}</strong></p>
-            <button class="onboard-btn onboard-btn-primary" data-entry-invite-redeem ${this._entryBusy ? 'disabled' : ''}>Unirme al club</button>
-          </div>` : ''}
-        ${clubs.length ? `
-          <h3 class="entry-h">Tus clubes</h3>
-          <ul class="entry-teams">
-            ${clubs.map((c) => `
-              <li class="entry-team entry-team-action">
-                <button class="onboard-btn" data-entry-club-activate="${escapeHtml(c.owner_scope.club_id || '')}" ${this._entryBusy ? 'disabled' : ''}>
-                  Entrar como ${escapeHtml((c as ContextCandidate & { name?: string }).name || c.owner_scope.club_id || '')}
-                </button>
-              </li>`).join('')}
-          </ul>` : `<p class="entry-empty">No tienes clubes todavía.</p>`}
       </section>`;
 
-    const helpModal = this._helpOpen
-      ? `<div class="entry-modal-backdrop" data-entry-help-close>
-          <div class="entry-modal" role="dialog" aria-modal="true" aria-label="Ayuda">
-            <p>${this._helpOpen === 'personal'
-              ? 'Espacio personal para preparar entrenamientos semanales y partidos.'
-              : 'Espacio de gestión del club que engloba todas las capacidades de planificación e interacción entre miembros del staff deportivo.'}</p>
-            <button class="onboard-btn" data-entry-help-close>Cerrar</button>
+    const recovery = this._entryRecovery;
+    const recoveryMarkup = recovery ? `
+      <div class="entry-recovery" role="alert">
+        <p class="entry-recovery-msg">${escapeHtml(recovery.message)}</p>
+        <div class="entry-recovery-actions">
+          ${recovery.kind === 'narrowing' ? `
+            <button class="onboard-btn onboard-btn-primary" type="button" data-entry-retry-team="${escapeHtml(recovery.team_id)}">Reintentar equipo</button>
+            <button class="onboard-btn" type="button" data-entry-enter-all>Entrar con todos los equipos</button>` : ''}
+          ${recovery.kind === 'uncertain' ? `
+            <button class="onboard-btn" type="button" data-entry-check>Comprobar</button>` : ''}
+          ${recovery.kind === 'confirm' ? `
+            <button class="onboard-btn" type="button" data-entry-check>Reintentar</button>` : ''}
+        </div>
+      </div>` : '';
+
+    const helpDialog = this._helpOpen ? `
+      <div class="entry-help-backdrop" data-entry-help-backdrop>
+        <div class="entry-help-dialog" role="dialog" aria-modal="true" aria-labelledby="entry-help-title">
+          <div class="entry-help-head">
+            <img class="entry-help-chispa" src="${CHISPA_HEAD_COMPACT_URI}" alt="" aria-hidden="true">
+            <h2 class="entry-help-title" id="entry-help-title">Cada forma de entrenar, su lugar</h2>
+            <button class="entry-help-close" type="button" data-entry-help-close aria-label="Cerrar">${ENTRY_CLOSE_SVG}</button>
           </div>
-        </div>`
-      : '';
+          <p>No necesitas cambiar de cuenta. Puedes tener tu equipo y formar parte de un club.</p>
+          <section class="entry-help-section">
+            <h3>Mi equipo</h3>
+            <p>Para el entrenador que lleva uno o dos equipos y quiere organizar su día a día.</p>
+            <ul>
+              <li>Planifica la temporada y prepara las sesiones.</li>
+              <li>Organiza la plantilla y el calendario de partidos.</li>
+              <li>Trabaja con tus equipos desde un mismo acceso.</li>
+            </ul>
+          </section>
+          <section class="entry-help-section">
+            <h3>Mi club</h3>
+            <p>Para coordinar la actividad deportiva de un club, según los permisos de tu cuenta.</p>
+            <ul>
+              <li>Gestiona los equipos y las personas del staff.</li>
+              <li>Define la metodología común del club.</li>
+              <li>Acompaña la planificación de los entrenadores.</li>
+            </ul>
+          </section>
+          <p class="entry-help-note">Puedes volver a esta pantalla para entrar en otro equipo o club.</p>
+        </div>
+      </div>` : '';
 
     return `
-      <div class="entry-step">
-        <div class="entry-head">
-          <h2 class="entry-title">Elige tu perfil</h2>
-          <button class="onboard-btn entry-logout" type="button" data-entry-logout ${this._entryBusy ? 'disabled' : ''}>Salir</button>
-        </div>
+      <div class="entry-step"${this._helpOpen || this._clubPickerOpen ? ' inert' : ''}>
+        <h1 class="sr-only">Entrar en BasketIQ</h1>
         ${activeLabel ? `<p class="entry-active">Trabajando en <strong>${escapeHtml(activeLabel)}</strong></p>` : ''}
         ${this._entryError ? `<p class="entry-error" role="alert">${escapeHtml(this._entryError)}</p>` : ''}
-        <nav class="onboard-nav entry-tabs">
-          <span class="entry-tab ${this._entryTab === 'personal' ? 'active' : ''}">
-            <button class="entry-tab-btn" data-entry-tab="personal">Mi equipo</button>
-            ${helpIcon('personal')}
-          </span>
-          <span class="entry-tab ${this._entryTab === 'club' ? 'active' : ''}">
-            <button class="entry-tab-btn" data-entry-tab="club">Mi club</button>
-            ${helpIcon('club')}
-          </span>
-        </nav>
-        ${this._entryTab === 'personal' ? personalTab : clubTab}
-        ${helpModal}
-      </div>`;
+        ${recoveryMarkup}
+        ${inviteBlock}
+        ${teamBlock}
+        ${clubBlock}
+        <div class="entry-utility">
+          <button class="entry-chispa" type="button" data-entry-help aria-haspopup="dialog" aria-label="Chispa: ayuda sobre Mi equipo y Mi club">
+            <img class="entry-chispa-icon" src="${CHISPA_HEAD_COMPACT_URI}" alt="" aria-hidden="true">
+            <span class="entry-chispa-copy"><strong>¿Mi equipo o mi club?</strong><small>Chispa te ayuda a elegir.</small></span>
+          </button>
+          <button class="entry-logout" type="button" data-entry-logout ${busy ? 'disabled' : ''}>Salir</button>
+        </div>
+      </div>
+      ${helpDialog}
+      ${clubPicker}`;
+  }
+
+  private _openEntryHelp(): void {
+    if (this._helpOpen) return;
+    this._helpOpen = true;
+    this.render();
+    const close = this.shadow.querySelector('[data-entry-help-close]') as HTMLElement | null;
+    close?.focus();
+  }
+
+  private _closeEntryHelp(): void {
+    if (!this._helpOpen) return;
+    this._helpOpen = false;
+    this.render();
+    // Focus returns to the control that opened the dialog (the element is
+    // recreated by the re-render — same logical control, same selector).
+    const trigger = this.shadow.querySelector('[data-entry-help]') as HTMLElement | null;
+    trigger?.focus();
+  }
+
+  // PD-CLUBS ≥3-club picker — same modal contract as the help dialog:
+  // role=dialog + aria-modal, Escape/backdrop/close, focus into the search
+  // field on open and back to the trigger on close, inert background.
+  private _openClubPicker(): void {
+    if (this._clubPickerOpen) return;
+    this._clubPickerOpen = true;
+    this._clubPickerQuery = '';
+    this.render();
+    const search = this.shadow.querySelector('[data-entry-club-picker-search]') as HTMLElement | null;
+    search?.focus();
+  }
+
+  private _closeClubPicker(): void {
+    if (!this._clubPickerOpen) return;
+    this._clubPickerOpen = false;
+    this.render();
+    const trigger = this.shadow.querySelector('[data-entry-club-picker-open]') as HTMLElement | null;
+    trigger?.focus();
+  }
+
+  // Live name filter — visibility toggled in place so typing keeps focus;
+  // the same predicate runs at render time, so a busy repaint or a
+  // re-rendered list reproduces the filtered state exactly.
+  private _filterClubPicker(query: string): void {
+    this._clubPickerQuery = query;
+    const needle = normEntryText(query.trim());
+    const list = this.shadow.querySelector('[data-entry-club-picker-list]');
+    list?.querySelectorAll('[data-entry-club-picker-row]').forEach((row) => {
+      const name = (row as HTMLElement).dataset.entryClubPickerRow || '';
+      (row as HTMLElement).hidden = !!needle && !normEntryText(name).includes(needle);
+    });
+    const rows = Array.from(
+      list?.querySelectorAll('[data-entry-club-picker-row]') ?? [],
+    ).filter((row) => !(row as HTMLElement).hidden).length;
+    const empty = this.shadow.querySelector('[data-entry-club-picker-empty]') as HTMLElement | null;
+    if (empty) {
+      empty.hidden = rows > 0;
+      empty.textContent = `No hay clubes que coincidan${needle ? ` con «${query.trim()}»` : ''}.`;
+    }
   }
 
   private async loadInvitePreview(): Promise<void> {
@@ -4058,7 +4576,10 @@ class BiqOnboardApp extends HTMLElement {
       const keys: string[] = [];
       for (let i = 0; i < sessionStorage.length; i += 1) {
         const key = sessionStorage.key(i);
-        if (key?.startsWith('biq.activeTeamId.')) keys.push(key);
+        if (
+          key?.startsWith('biq.activeTeamId.') ||
+          key?.startsWith(ENTRY_LAST_CLUB_KEY_PREFIX)
+        ) keys.push(key);
       }
       keys.forEach((key) => sessionStorage.removeItem(key));
     } catch { /* storage no disponible */ }
@@ -4067,7 +4588,8 @@ class BiqOnboardApp extends HTMLElement {
 
   private _entryLogoutFailed(): void {
     if (!this.isConnected) return; // la carcasa ya desmontó el módulo
-    this._entryBusy = false;
+    // A failed logout must not release an in-flight intent's busy hold.
+    if (!this._entryIntent) this._entryBusy = false;
     this._entryError = 'No se pudo cerrar la sesión. Reintenta o recarga la página.';
     this.render();
   }
@@ -4075,12 +4597,6 @@ class BiqOnboardApp extends HTMLElement {
   private wireEntryEvents(): void {
     const inviteAllowed =
       this._bootstrap?.entry_actions?.['club.invitation.redeem']?.allowed !== false;
-    this.shadow.querySelectorAll('[data-entry-tab]').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        this._entryTab = (btn as HTMLElement).dataset.entryTab as 'personal' | 'club';
-        this.render();
-      });
-    });
 
     this.shadow.querySelectorAll('[data-entry-logout]').forEach((btn) => {
       btn.addEventListener('click', () => {
@@ -4106,11 +4622,11 @@ class BiqOnboardApp extends HTMLElement {
       this.loadPersonalTeams();
     });
     this.shadow.querySelector('[data-entry-personal-enter]')?.addEventListener('click', () => {
-      this.activateContext('personal');
+      this._enterPersonal();
     });
     this.shadow.querySelectorAll('[data-entry-personal-enter-team]').forEach((btn) => {
       btn.addEventListener('click', () => {
-        this.enterPersonalTeam((btn as HTMLElement).dataset.entryPersonalEnterTeam || '');
+        this._enterPersonal((btn as HTMLElement).dataset.entryPersonalEnterTeam || '');
       });
     });
     this.shadow.querySelector('[data-entry-team-create-toggle]')?.addEventListener('click', () => {
@@ -4123,51 +4639,70 @@ class BiqOnboardApp extends HTMLElement {
     });
     // Crear equipo desde el selector de entrada: crea el equipo privado y
     // entra en el espacio personal con ese equipo como equipo de trabajo.
-    this.shadow.querySelector('[data-entry-personal-create]')?.addEventListener('submit', async (ev) => {
+    // The create→enter chain runs inside ONE intent — no nested finally
+    // may release the parent's busy hold.
+    this.shadow.querySelector('[data-entry-personal-create]')?.addEventListener('submit', (ev) => {
       ev.preventDefault();
       const fd = new FormData(ev.target as HTMLFormElement);
-      this._entryBusy = true;
-      this._entryError = null;
-      this.render();
-      try {
-        const res = await fetch('/api/context/v1/personal-teams', {
-          method: 'POST',
-          credentials: 'include',
-          headers: { 'Content-Type': 'application/json', 'Idempotency-Key': `entry-${Date.now()}` },
-          body: JSON.stringify({
+      const intent = this._beginEntryIntent('create-team');
+      if (!intent) return;
+      this._runEntryIntent(intent, async () => {
+        const res = await this._entryMutation(
+          '/api/context/v1/personal-teams',
+          {
             name: String(fd.get('name') || '').trim(),
             category_key: String(fd.get('category_key') || ''),
             gender: String(fd.get('gender') || 'X'),
-          }),
-        });
+          },
+          'POST',
+          `entry-${Date.now()}`,
+        );
         if (!res.ok) {
           const body = await res.json().catch(() => null);
           throw new Error(body?.detail || `No se pudo crear el equipo (${res.status})`);
         }
-        const data = await res.json();
-        await this.enterPersonalTeam(data?.team?.team_id || '');
-      } catch (err) {
-        this._entryError = (err as Error).message;
-        this._entryBusy = false;
-        this.render();
-      }
+        const data = await res.json().catch(() => null);
+        intent.mutated = true;
+        intent.team_id = data?.team?.team_id || '';
+        if (!this._intentCurrent(intent)) return;
+        await this._postActivate('personal');
+        intent.mutated = true;
+        if (!this._intentCurrent(intent) || !intent.team_id) return;
+        await this._putWorkingTeams(intent.team_id);
+      });
     });
 
     this.shadow.querySelectorAll('[data-entry-help]').forEach((btn) => {
       btn.addEventListener('click', () => {
-        this._helpOpen = (btn as HTMLElement).dataset.entryHelp as 'personal' | 'club';
-        this.render();
+        this._openEntryHelp();
       });
     });
     this.shadow.querySelectorAll('[data-entry-help-close]').forEach((el) => {
-      el.addEventListener('click', (ev) => {
-        // Backdrop closes only on a direct backdrop hit — clicks inside the
-        // dialog must not bubble-close it.
-        if ((el as HTMLElement).classList.contains('entry-modal-backdrop') && ev.target !== el) return;
-        this._helpOpen = '';
-        this.render();
+      el.addEventListener('click', () => {
+        this._closeEntryHelp();
       });
     });
+    // Backdrop closes only on a direct backdrop hit — clicks inside the
+    // dialog must not bubble-close it.
+    this.shadow.querySelector('[data-entry-help-backdrop]')?.addEventListener('click', (ev) => {
+      if (ev.target === ev.currentTarget) this._closeEntryHelp();
+    });
+
+    // PD-CLUBS «Elegir club» picker (≥3 clubs): open/close/backdrop and
+    // the live search — rows filter in place, keeping input focus.
+    this.shadow.querySelector('[data-entry-club-picker-open]')?.addEventListener('click', () => {
+      this._openClubPicker();
+    });
+    this.shadow.querySelector('[data-entry-club-picker-close]')?.addEventListener('click', () => {
+      this._closeClubPicker();
+    });
+    this.shadow.querySelector('[data-entry-club-picker-backdrop]')?.addEventListener('click', (ev) => {
+      if (ev.target === ev.currentTarget) this._closeClubPicker();
+    });
+    this.shadow.querySelector('[data-entry-club-picker-search]')?.addEventListener('input', (ev) => {
+      this._filterClubPicker((ev.target as HTMLInputElement).value);
+    });
+
     this.shadow.querySelector('[data-entry-club-create-toggle]')?.addEventListener('click', () => {
       this._clubCreateOpen = !this._clubCreateOpen;
       this.render();
@@ -4179,66 +4714,70 @@ class BiqOnboardApp extends HTMLElement {
 
     this.shadow.querySelectorAll('[data-entry-club-activate]').forEach((btn) => {
       btn.addEventListener('click', () => {
-        this.activateContext('club', (btn as HTMLElement).dataset.entryClubActivate || '');
+        this._enterClub((btn as HTMLElement).dataset.entryClubActivate || '');
       });
     });
 
-    this.shadow.querySelector('[data-entry-invite-redeem]')?.addEventListener('click', async () => {
+    // Redeem→activate runs inside ONE intent — the redeem POST applying
+    // without activation never releases the busy hold nor emits early.
+    this.shadow.querySelector('[data-entry-invite-redeem]')?.addEventListener('click', () => {
       if (!this._inviteToken) return;
-      this._entryBusy = true;
-      this._entryError = null;
-      this.render();
-      try {
-        const res = await fetch('/api/context/v1/invitations/redeem', {
-          method: 'POST',
-          credentials: 'include',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ token: this._inviteToken }),
-        });
+      const token = this._inviteToken;
+      const intent = this._beginEntryIntent('redeem');
+      if (!intent) return;
+      this._runEntryIntent(intent, async () => {
+        const res = await this._entryMutation('/api/context/v1/invitations/redeem', { token });
         if (!res.ok) {
           const body = await res.json().catch(() => null);
           throw new Error(body?.detail || `No se pudo canjear la invitación (${res.status})`);
         }
-        const data = await res.json();
+        const data = await res.json().catch(() => null);
+        intent.mutated = true;
+        intent.club_id = data?.club_id || '';
+        if (!this._intentCurrent(intent)) return;
         this._invitePreview = null;
         this._inviteToken = '';
-        await this.activateContext('club', data.club_id);
-      } catch (err) {
-        this._entryError = (err as Error).message;
-      } finally {
-        this._entryBusy = false;
-        this.render();
-      }
+        await this._postActivate('club', intent.club_id);
+        intent.mutated = true;
+      });
     });
 
-    this.shadow.querySelector('[data-entry-club-create]')?.addEventListener('submit', async (ev) => {
+    this.shadow.querySelector('[data-entry-club-create]')?.addEventListener('submit', (ev) => {
       ev.preventDefault();
       const fd = new FormData(ev.target as HTMLFormElement);
-      this._entryBusy = true;
-      this._entryError = null;
-      this.render();
-      try {
-        const res = await fetch('/api/context/v1/clubs', {
-          method: 'POST',
-          credentials: 'include',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            name: String(fd.get('name') || '').trim(),
-            idempotency_key: `entry-club-${Date.now()}`,
-          }),
+      const intent = this._beginEntryIntent('create-club');
+      if (!intent) return;
+      this._runEntryIntent(intent, async () => {
+        const res = await this._entryMutation('/api/context/v1/clubs', {
+          name: String(fd.get('name') || '').trim(),
+          idempotency_key: `entry-club-${Date.now()}`,
         });
         if (!res.ok) {
           const body = await res.json().catch(() => null);
           throw new Error(body?.detail || `No se pudo crear el club (${res.status})`);
         }
-        const data = await res.json();
-        await this.activateContext('club', data?.club?.id || '');
-      } catch (err) {
-        this._entryError = (err as Error).message;
-      } finally {
-        this._entryBusy = false;
-        this.render();
-      }
+        const data = await res.json().catch(() => null);
+        intent.mutated = true;
+        intent.club_id = data?.club?.id || '';
+        if (!this._intentCurrent(intent)) return;
+        await this._postActivate('club', intent.club_id);
+        intent.mutated = true;
+      });
+    });
+
+    // Recovery actions (entry-login §4.2): explicit gestures only — the
+    // PUT-only narrowing retry, the plain activation path, and the
+    // bootstrap-GET resync. Nothing here re-POSTs an uncertain mutation.
+    this.shadow.querySelector('[data-entry-retry-team]')?.addEventListener('click', (ev) => {
+      this._retryNarrowing((ev.currentTarget as HTMLElement).dataset.entryRetryTeam || '');
+    });
+    this.shadow.querySelector('[data-entry-enter-all]')?.addEventListener('click', () => {
+      this._enterPersonal();
+    });
+    this.shadow.querySelectorAll('[data-entry-check]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        this._resyncBootstrap();
+      });
     });
   }
 

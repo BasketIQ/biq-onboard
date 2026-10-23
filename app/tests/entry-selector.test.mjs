@@ -1,24 +1,28 @@
 /**
- * Working-context entry selector — executable contract for the Director's
- * 2026-10-05 flow ruling (BIQ-PERSONAL-CLUB-CONTEXT):
+ * Working-context entry selector — entry screen v1 contract (entry-login
+ * lot, 2026-10-23):
  *
- *   - tabs are «Mi equipo» and «Mi club»;
- *   - Mi equipo = explanation + Entrar (no email, no verification form —
- *     the session is already authenticated);
- *   - Mi club = help + «+ Crear club» on TOP of the tab + club list;
- *   - both tabs carry a help button using the footer chispa icon that
- *     opens an accessible modal (role=dialog, aria-modal) with the
- *     context explanation;
- *   - club creation asks ONLY for the club name — the website/URL field
- *     lives inside the club session, never at entry;
- *   - no manual invitation-code form — invites arrive by emailed deep
- *     link (#/onboard?invite=…) which auto-previews a confirm card.
+ *   - ONE screen: no tabs, no visible title; a visually hidden <h1>
+ *     keeps the accessible heading;
+ *   - «Mi equipo» / «Entrenador» and «Mi club» / «Director deportivo»
+ *     block headers with the approved copies;
+ *   - team/club cards are full-card buttons: name + category/composition
+ *     (team) or name only (club), plus an arrow — no player count, no
+ *     role line, no locality/team count;
+ *   - «Entrar con todos los equipos» stays when ≥2 teams; the 2-personal-
+ *     team cap and its note are unchanged; archived-only keeps note+Entrar;
+ *   - one Chispa help action (module-local chispa-head-compact-v2.svg)
+ *     opens an accessible dialog (role/aria-modal, Escape, focus return,
+ *     inert background);
+ *   - club creation asks ONLY for the club name; invitation deep links
+ *     (#/onboard?invite=…) auto-preview a confirm card; «Salir» stays.
  *
  * Run: `npm run build:lib && node --test tests/entry-selector.test.mjs`
  * Requires: chromium (npx playwright install chromium).
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'crypto';
 import { chromium } from 'playwright';
 import { createServer } from 'http';
 import { readFileSync, existsSync } from 'fs';
@@ -29,6 +33,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const APP_ROOT = resolve(__dirname, '..');
 const REPO_ROOT = resolve(APP_ROOT, '..');
 const DIST_EMBED = join(REPO_ROOT, 'dist', 'embed', 'biq-onboard.js');
+const CHISPA_SVG = join(APP_ROOT, 'src', 'assets', 'chispa-head-compact-v2.svg');
 const PORT = 9151;
 
 if (!existsSync(DIST_EMBED)) {
@@ -47,19 +52,19 @@ const HARNESS = `<!doctype html>
 </body>
 </html>`;
 
+const CLUB = (id, name) => ({
+  kind: 'club',
+  owner_scope: { kind: 'club', club_id: id },
+  name,
+  requires_verification: false,
+});
+
 const BOOTSTRAP = {
   schema_version: '1',
   state: 'context_selection_required',
   account_id: 'acc-e2e',
   identity_verified: true,
-  contexts: [
-    {
-      kind: 'club',
-      owner_scope: { kind: 'club', club_id: 'club-1' },
-      name: 'Club Prueba',
-      requires_verification: false,
-    },
-  ],
+  contexts: [CLUB('club-1', 'Club Prueba')],
   active: null,
   entry_actions: {
     'club.create': { allowed: true, requires_verification: false },
@@ -67,6 +72,23 @@ const BOOTSTRAP = {
     'personal.enter': { allowed: true, requires_verification: false },
   },
 };
+
+const TEAM = (id, name, extra = {}) => ({
+  team_id: id,
+  name,
+  category_key: 'infantil',
+  category_label: 'Infantil',
+  gender: 'M',
+  age_band: '',
+  section_applicability: 'all',
+  timezone: 'Europe/Madrid',
+  season: '2026-27',
+  team_revision: 1,
+  archived: false,
+  ...extra,
+});
+
+const PERSONAL_TEAMS = [TEAM('pt-1', 'Paquetillos 1')];
 
 async function startServer() {
   server = createServer((req, res) => {
@@ -90,23 +112,7 @@ async function stopServer() {
  * `routeQuery` optionally sets el.route (e.g. 'entry?invite=tok-1').
  * Returns { page, log } — `log` captures every /api/** request.
  */
-const PERSONAL_TEAMS = [
-  {
-    team_id: 'pt-1',
-    name: 'Paquetillos 1',
-    category_key: 'infantil',
-    category_label: 'Infantil',
-    gender: 'M',
-    age_band: '',
-    section_applicability: 'all',
-    timezone: 'Europe/Madrid',
-    season: '2026-27',
-    team_revision: 1,
-    archived: false,
-  },
-];
-
-async function newEntryPage(browser, { bootstrap = BOOTSTRAP, routeQuery = null, personalTeams = PERSONAL_TEAMS, personalContext = false, org = undefined, personalTeamsFailure = null, personalTeamsDelayMs = 0, personalTeamsHold = null } = {}) {
+async function newEntryPage(browser, { bootstrap = BOOTSTRAP, routeQuery = null, personalTeams = PERSONAL_TEAMS, personalContext = false, org = undefined, personalTeamsFailure = null, personalTeamsDelayMs = 0, personalTeamsHold = null, waitFeed = true } = {}) {
   const page = await browser.newPage();
   const log = [];
   let feedCalls = 0;
@@ -170,6 +176,19 @@ async function newEntryPage(browser, { bootstrap = BOOTSTRAP, routeQuery = null,
     const el = document.getElementById('app');
     return !!(el.shadowRoot && el.shadowRoot.childElementCount > 0);
   }, { timeout: 10000 });
+  // Let the personal feed settle before callers count cards: once the
+  // entry step renders, account-scope sessions are already 'loading' (the
+  // fetch starts inside loadBootstrap); 'uninitialized' under the selector
+  // means member scope — the feed is never fetched there by design.
+  // waitFeed:false is for tests that hold the response on purpose.
+  if (waitFeed) {
+    await page.waitForFunction(() => {
+      const el = document.getElementById('app');
+      if (!el.shadowRoot?.querySelector('.entry-step')) return true;
+      const s = el._personalTeamsStatus;
+      return s === 'ready' || s === 'error' || s === 'uninitialized';
+    }, { timeout: 10000 });
+  }
 
   return { page, log };
 }
@@ -178,141 +197,718 @@ const sel = (page, selector) =>
   page.evaluate((s) => {
     const el = document.getElementById('app');
     return !!el.shadowRoot.querySelector(s);
-  }, selFix(selector));
-
-// Playwright evaluate arg must be serializable — plain string is fine.
-function selFix(s) { return s; }
+  }, selector);
 
 test.before(async () => { await startServer(); });
 test.after(async () => { await stopServer(); });
 
-test('tabs render as Mi equipo / Mi club', async () => {
-  const browser = await chromium.launch();
-  try {
-    const { page } = await newEntryPage(browser);
-    const tabs = await page.evaluate(() => {
-      const el = document.getElementById('app');
-      return [...el.shadowRoot.querySelectorAll('[data-entry-tab]')].map((b) => b.textContent.trim());
-    });
-    assert.deepEqual(tabs, ['Mi equipo', 'Mi club']);
-  } finally {
-    await browser.close();
-  }
-});
+// ─── UX-01: one screen, no tabs, no visible title ───────────────────────
 
-test('Mi club has a help button with the footer chispa icon and + Crear club on top', async () => {
+test('single screen (non-coach member): no tabs, no visible title, hidden h1, both blocks with exact copies and labels', async () => {
   const browser = await chromium.launch();
   try {
-    const { page } = await newEntryPage(browser);
-    // Default tab is club (a club candidate exists).
-    const order = await page.evaluate(() => {
+    const { page } = await newEntryPage(browser, { personalTeams: [] });
+    const state = await page.evaluate(() => {
       const el = document.getElementById('app');
-      const panel = el.shadowRoot.querySelector('.entry-panel');
-      const children = [...panel.children].map((n) =>
-        n.hasAttribute('data-entry-club-create-toggle') ? 'create-toggle'
-          : n.classList.contains('entry-h') ? n.textContent.trim()
-          : n.querySelector('h3')?.textContent || n.className || n.tagName);
-      // Help lives INSIDE the tab title — not in the panel.
-      const tab = el.shadowRoot.querySelector('[data-entry-tab="club"]').closest('.entry-tab');
-      const helpBtn = tab.querySelector('[data-entry-help="club"]');
-      const imgs = helpBtn ? [...helpBtn.querySelectorAll('img')].map((i) => i.getAttribute('src')) : [];
-      const dupTitle = !!panel.querySelector('.entry-head');
-      return { children, imgs, helpInTab: !!helpBtn, helpAria: helpBtn?.getAttribute('aria-label'), dupTitle };
-    });
-    assert.ok(order.helpInTab, 'help button must sit inside the Mi club tab title');
-    assert.equal(order.helpAria, 'Ayuda');
-    assert.ok(order.imgs.some((s) => s.includes('chispa-speaking')), 'help button must use the footer chispa icon');
-    assert.equal(order.dupTitle, false, 'the duplicate "Mi club" panel title must be gone');
-    assert.equal(
-      order.children[0],
-      'create-toggle',
-      '+ Crear club must be the first element of the Mi club tab container',
-    );
-    assert.ok(
-      order.children.indexOf('create-toggle') < order.children.findIndex((c) => String(c).includes('Tus clubes')),
-      '+ Crear club must sit above the club list',
-    );
-  } finally {
-    await browser.close();
-  }
-});
-
-test('help opens an accessible modal with the club explanation and closes', async () => {
-  const browser = await chromium.launch();
-  try {
-    const { page } = await newEntryPage(browser);
-    await page.evaluate(() => {
-      const el = document.getElementById('app');
-      el.shadowRoot.querySelector('[data-entry-help="club"]').click();
-    });
-    const modal = await page.evaluate(() => {
-      const el = document.getElementById('app');
-      const dlg = el.shadowRoot.querySelector('[role="dialog"]');
-      if (!dlg) return null;
+      const step = el.shadowRoot.querySelector('.entry-step');
+      const h1 = step.querySelector('h1');
+      const heads = [...step.querySelectorAll('.entry-block')].map((b) => ({
+        title: b.querySelector('.entry-block-title')?.textContent.trim(),
+        role: b.querySelector('.entry-role')?.textContent.trim(),
+        copy: b.querySelector('.entry-block-copy')?.textContent.trim(),
+      }));
+      const h1Style = h1 ? getComputedStyle(h1) : null;
       return {
-        ariaModal: dlg.getAttribute('aria-modal'),
-        text: dlg.textContent,
+        tabs: step.querySelectorAll('[data-entry-tab]').length,
+        tabNav: !!step.querySelector('.entry-tabs, .entry-tab'),
+        oldTitle: step.textContent.includes('Elige tu perfil'),
+        visibleTitle: !!step.querySelector('.entry-title'),
+        h1: h1?.textContent.trim(),
+        h1Class: h1?.className || '',
+        h1Size: h1Style ? { w: h1Style.width, h: h1Style.height, clip: h1Style.clip } : null,
+        heads,
       };
     });
-    assert.ok(modal, 'dialog should be open');
-    assert.equal(modal.ariaModal, 'true');
-    assert.ok(modal.text.includes('Espacio de gestión del club'), 'club explanation must be shown');
-    assert.ok(modal.text.includes('staff deportivo'));
-    await page.evaluate(() => {
-      const el = document.getElementById('app');
-      el.shadowRoot.querySelector('[data-entry-help-close].onboard-btn').click();
-    });
-    const closed = await sel(page, '[role="dialog"]');
-    assert.equal(closed, false, 'dialog must close');
+    assert.equal(state.tabs, 0, 'no tab controls');
+    assert.equal(state.tabNav, false, 'no tab navigation remains');
+    assert.equal(state.oldTitle, false, '«Elige tu perfil» is gone');
+    assert.equal(state.visibleTitle, false, 'no visible title element');
+    assert.ok(state.h1, 'a heading exists for the accessible hierarchy');
+    assert.equal(state.h1Class, 'sr-only', 'the h1 is visually hidden');
+    assert.equal(state.h1Size.w, '1px', 'visually hidden geometry');
+    assert.equal(state.h1Size.h, '1px');
+    assert.deepEqual(state.heads, [
+      {
+        title: 'Mi equipo',
+        role: 'Entrenador',
+        copy: 'Prepara entrenamientos, organiza la temporada y sigue tus partidos. Todo para entrenar a tu equipo.',
+      },
+      {
+        title: 'Mi club',
+        role: undefined,
+        copy: 'Coordina los equipos y el staff. Define la metodología y acompaña la planificación de todo el club.',
+      },
+    ]);
   } finally {
     await browser.close();
   }
 });
 
-test('Mi equipo lists personal teams each with Entrar — no email field', async () => {
+test('Mi club carries no role label — the feed cannot attest «Director deportivo» (PD-ENTRY/PD-CLUBS)', async () => {
   const browser = await chromium.launch();
   try {
-    const { page } = await newEntryPage(browser);
-    await page.evaluate(() => {
-      const el = document.getElementById('app');
-      el.shadowRoot.querySelector('[data-entry-tab="personal"]').click();
+    const { page } = await newEntryPage(browser, {
+      bootstrap: { ...BOOTSTRAP, contexts: [CLUB('c1', 'Club Uno'), CLUB('c2', 'Club Dos')] },
+      personalTeams: [],
     });
     const state = await page.evaluate(() => {
       const el = document.getElementById('app');
-      const panel = el.shadowRoot.querySelector('.entry-panel');
-      const row = panel.querySelector('[data-entry-personal-enter-team]');
-      const tab = el.shadowRoot.querySelector('[data-entry-tab="personal"]').closest('.entry-tab');
+      const clubBlock = [...el.shadowRoot.querySelectorAll('.entry-block')]
+        .find((b) => b.querySelector('.entry-block-title')?.textContent.trim() === 'Mi club');
+      const text = el.shadowRoot.querySelector('.entry-step').textContent;
       return {
-        help: !!tab.querySelector('[data-entry-help="personal"]'),
-        enter: !!panel.querySelector('[data-entry-personal-enter]'),
-        teamRow: !!row,
-        teamLabel: row?.textContent.trim() || '',
-        emailInput: !!panel.querySelector('input[type="email"], input[name="email"]'),
+        roleChip: !!clubBlock?.querySelector('.entry-role'),
+        dirDeportivo: (text.match(/Director deportivo/g) || []).length,
+        direccion: /Direcci[oó]n deportiva/i.test(text),
       };
     });
-    assert.ok(state.help, 'personal tab must carry a help button');
-    assert.ok(state.enter, 'personal tab must carry Entrar');
-    assert.ok(state.teamRow, 'each created team must offer Entrar');
-    assert.ok(state.teamLabel.includes('Paquetillos 1'));
-    assert.equal(state.emailInput, false, 'no email field on the authenticated session');
-    // Help modal carries the personal explanation.
-    await page.evaluate(() => {
-      const el = document.getElementById('app');
-      el.shadowRoot.querySelector('[data-entry-help="personal"]').click();
-    });
-    const modalText = await page.evaluate(() => {
-      const el = document.getElementById('app');
-      return el.shadowRoot.querySelector('[role="dialog"]')?.textContent || '';
-    });
-    assert.ok(modalText.includes('Espacio personal para preparar entrenamientos semanales y partidos'));
+    assert.equal(state.roleChip, false, 'no role chip on the club block');
+    assert.equal(state.dirDeportivo, 0, 'never claims Director deportivo');
+    assert.equal(state.direccion, false, 'never «Dirección deportiva»');
   } finally {
     await browser.close();
   }
 });
 
+// ─── UX-03: full-card buttons, no counts, no role line ──────────────────
+
+test('team card is a full-card button: name + category/composition + arrow, no player count', async () => {
+  const browser = await chromium.launch();
+  try {
+    const { page } = await newEntryPage(browser);
+    const card = await page.evaluate(() => {
+      const el = document.getElementById('app');
+      const btn = el.shadowRoot.querySelector('[data-entry-personal-enter-team]');
+      return {
+        tag: btn?.tagName,
+        cls: btn?.className,
+        aria: btn?.getAttribute('aria-label'),
+        text: btn?.textContent || '',
+        title: btn?.querySelector('.entry-card-title')?.textContent.trim(),
+        meta: btn?.querySelector('.entry-card-meta')?.textContent.trim(),
+        arrow: !!btn?.querySelector('.entry-card-arrow svg'),
+      };
+    });
+    assert.equal(card.tag, 'BUTTON', 'the whole card is the button');
+    assert.ok(card.cls.includes('entry-card'));
+    assert.equal(card.aria, 'Entrar en Paquetillos 1');
+    assert.equal(card.title, 'Paquetillos 1');
+    assert.equal(card.meta, 'Infantil · M');
+    assert.ok(card.arrow, 'arrow affordance present');
+    assert.ok(!/jugador/i.test(card.text), 'no player count on the team card');
+  } finally {
+    await browser.close();
+  }
+});
+
+test('club card is a full-card button: name + arrow — no role line, locality or team count', async () => {
+  const browser = await chromium.launch();
+  try {
+    const { page } = await newEntryPage(browser, { personalTeams: [] });
+    const card = await page.evaluate(() => {
+      const el = document.getElementById('app');
+      const btn = el.shadowRoot.querySelector('[data-entry-club-activate]');
+      return {
+        tag: btn?.tagName,
+        aria: btn?.getAttribute('aria-label'),
+        text: btn?.textContent || '',
+        title: btn?.querySelector('.entry-card-title')?.textContent.trim(),
+        arrow: !!btn?.querySelector('.entry-card-arrow svg'),
+        meta: !!btn?.querySelector('.entry-card-meta'),
+      };
+    });
+    assert.equal(card.tag, 'BUTTON');
+    assert.equal(card.aria, 'Entrar en Club Prueba');
+    assert.equal(card.title, 'Club Prueba');
+    assert.ok(card.arrow);
+    assert.equal(card.meta, false, 'no meta line on the club card');
+    assert.ok(!card.text.includes('Director'), 'no role line inside the card');
+    assert.ok(!/equipos?\b/i.test(card.text), 'no team count');
+  } finally {
+    await browser.close();
+  }
+});
+
+// ─── Team cardinalities ─────────────────────────────────────────────────
+
+test('0 teams: create affordance only — no cards, no Entrar', async () => {
+  const browser = await chromium.launch();
+  try {
+    const { page } = await newEntryPage(browser, { personalTeams: [] });
+    const state = await page.evaluate(() => {
+      const el = document.getElementById('app');
+      const block = el.shadowRoot.querySelectorAll('.entry-block')[0];
+      return {
+        cards: block.querySelectorAll('[data-entry-personal-enter-team]').length,
+        enter: !!block.querySelector('[data-entry-personal-enter]'),
+        create: !!block.querySelector('[data-entry-team-create-toggle]'),
+      };
+    });
+    assert.equal(state.cards, 0);
+    assert.equal(state.enter, false, 'no bare Entrar without teams (PO gate)');
+    assert.ok(state.create, 'create stays the only entry path');
+  } finally {
+    await browser.close();
+  }
+});
+
+test('1 team: one card, no joint entry', async () => {
+  const browser = await chromium.launch();
+  try {
+    const { page } = await newEntryPage(browser);
+    const state = await page.evaluate(() => {
+      const el = document.getElementById('app');
+      const block = el.shadowRoot.querySelectorAll('.entry-block')[0];
+      return {
+        cards: block.querySelectorAll('[data-entry-personal-enter-team]').length,
+        enterAll: !!block.querySelector('[data-entry-personal-enter]'),
+      };
+    });
+    assert.equal(state.cards, 1);
+    assert.equal(state.enterAll, false, 'joint entry needs ≥2 teams');
+  } finally {
+    await browser.close();
+  }
+});
+
+test('2 teams: both cards + «Entrar con todos los equipos» + the unchanged cap note', async () => {
+  const browser = await chromium.launch();
+  try {
+    const { page } = await newEntryPage(browser, {
+      personalTeams: [TEAM('pt-1', 'Paquetillos 1'), TEAM('pt-2', 'Paquetillos 2')],
+    });
+    const state = await page.evaluate(() => {
+      const el = document.getElementById('app');
+      const block = el.shadowRoot.querySelectorAll('.entry-block')[0];
+      return {
+        cards: block.querySelectorAll('[data-entry-personal-enter-team]').length,
+        enterAll: block.querySelector('[data-entry-personal-enter]')?.textContent.trim(),
+        createToggle: !!block.querySelector('[data-entry-team-create-toggle]'),
+        capNote: /hasta 2 equipos|Elimina uno/i.test(block.textContent),
+      };
+    });
+    assert.equal(state.cards, 2);
+    assert.equal(state.enterAll, 'Entrar con todos los equipos');
+    assert.equal(state.createToggle, false, 'no create affordance at the cap');
+    assert.ok(state.capNote, 'cap note must explain delete-to-create');
+  } finally {
+    await browser.close();
+  }
+});
+
+test('3 teams: all active teams render as cards with joint entry and the cap note', async () => {
+  const browser = await chromium.launch();
+  try {
+    const { page } = await newEntryPage(browser, {
+      personalTeams: [TEAM('pt-1', 'Uno'), TEAM('pt-2', 'Dos'), TEAM('pt-3', 'Tres')],
+    });
+    const state = await page.evaluate(() => {
+      const el = document.getElementById('app');
+      const block = el.shadowRoot.querySelectorAll('.entry-block')[0];
+      return {
+        cards: block.querySelectorAll('[data-entry-personal-enter-team]').length,
+        enterAll: !!block.querySelector('[data-entry-personal-enter]'),
+        capNote: /hasta 2 equipos/i.test(block.textContent),
+      };
+    });
+    assert.equal(state.cards, 3, 'every active team renders as a card');
+    assert.ok(state.enterAll);
+    assert.ok(state.capNote);
+  } finally {
+    await browser.close();
+  }
+});
+
+// ─── Club cardinalities ─────────────────────────────────────────────────
+
+test('0 clubs: «No tienes clubes todavía.» + create when allowed', async () => {
+  const browser = await chromium.launch();
+  try {
+    const { page } = await newEntryPage(browser, {
+      bootstrap: { ...BOOTSTRAP, contexts: [] },
+      personalTeams: [],
+    });
+    const state = await page.evaluate(() => {
+      const el = document.getElementById('app');
+      const block = el.shadowRoot.querySelectorAll('.entry-block')[1];
+      return {
+        cards: block.querySelectorAll('[data-entry-club-activate]').length,
+        empty: block.querySelector('.entry-empty')?.textContent.trim(),
+        create: !!block.querySelector('[data-entry-club-create-toggle]'),
+      };
+    });
+    assert.equal(state.cards, 0);
+    assert.equal(state.empty, 'No tienes clubes todavía.');
+    assert.ok(state.create);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('1 club: direct card entry — no chooser for a single option', async () => {
+  const browser = await chromium.launch();
+  try {
+    const { page, log } = await newEntryPage(browser, { personalTeams: [] });
+    const state = await page.evaluate(() => {
+      const el = document.getElementById('app');
+      const block = el.shadowRoot.querySelectorAll('.entry-block')[1];
+      return { cards: block.querySelectorAll('[data-entry-club-activate]').length };
+    });
+    assert.equal(state.cards, 1);
+    await page.evaluate(() => {
+      document.getElementById('app').shadowRoot.querySelector('[data-entry-club-activate]').click();
+    });
+    await new Promise((r) => setTimeout(r, 300));
+    const req = log.find((r) => r.url.includes('/api/context/v1/activate'));
+    assert.ok(req);
+    assert.deepEqual(JSON.parse(req.postData), { kind: 'club', club_id: 'club-1' });
+  } finally {
+    await browser.close();
+  }
+});
+
+test('2 clubs: both render as cards', async () => {
+  const browser = await chromium.launch();
+  try {
+    const { page } = await newEntryPage(browser, {
+      bootstrap: { ...BOOTSTRAP, contexts: [CLUB('c1', 'Club Uno'), CLUB('c2', 'Club Dos')] },
+      personalTeams: [],
+    });
+    const names = await page.evaluate(() => {
+      const el = document.getElementById('app');
+      return [...el.shadowRoot.querySelectorAll('[data-entry-club-activate] .entry-card-title')]
+        .map((n) => n.textContent.trim());
+    });
+    assert.deepEqual(names, ['Club Uno', 'Club Dos']);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('≥3 clubs with no reciente datum: the neutral «Elegir club» access opens the searchable picker (PD-CLUBS)', async () => {
+  const browser = await chromium.launch();
+  try {
+    const clubs = [1, 2, 3, 4, 5].map((n) => CLUB(`c${n}`, `Club ${n}`));
+    const { page } = await newEntryPage(browser, {
+      bootstrap: { ...BOOTSTRAP, contexts: clubs },
+      personalTeams: [],
+    });
+    const state = await page.evaluate(() => {
+      const el = document.getElementById('app');
+      const openBtn = el.shadowRoot.querySelector('[data-entry-club-picker-open]');
+      return {
+        directCards: el.shadowRoot.querySelectorAll('.entry-step [data-entry-club-activate]').length,
+        openBtn: openBtn?.textContent.trim().replace(/\s+/g, ' '),
+        haspopup: openBtn?.getAttribute('aria-haspopup'),
+        reciente: /Club reciente/.test(el.shadowRoot.querySelector('.entry-step').textContent),
+      };
+    });
+    assert.equal(state.directCards, 0, 'no club cards outside the picker');
+    assert.equal(state.reciente, false, 'no arbitrary reciente — the access is neutral');
+    assert.ok(state.openBtn.includes('Elegir club'), 'main access is the picker');
+    assert.equal(state.haspopup, 'dialog');
+
+    // Open: dialog semantics, all five clubs as direct-entry rows, inert bg.
+    await page.evaluate(() => {
+      document.getElementById('app').shadowRoot.querySelector('[data-entry-club-picker-open]').click();
+    });
+    const open = await page.evaluate(() => {
+      const el = document.getElementById('app');
+      const dlg = el.shadowRoot.querySelector('.entry-picker-dialog');
+      const rows = [...el.shadowRoot.querySelectorAll('[data-entry-club-picker-row]')];
+      return {
+        role: dlg?.getAttribute('role'),
+        modal: dlg?.getAttribute('aria-modal'),
+        labelledby: dlg?.getAttribute('aria-labelledby'),
+        rows: rows.length,
+        visible: rows.filter((r) => !r.hidden).length,
+        inert: el.shadowRoot.querySelector('.entry-step').hasAttribute('inert'),
+        searchFocus: el.shadowRoot.activeElement?.matches('[data-entry-club-picker-search]'),
+      };
+    });
+    assert.equal(open.role, 'dialog');
+    assert.equal(open.modal, 'true');
+    assert.equal(open.rows, 5, 'every club is a direct-entry row');
+    assert.equal(open.visible, 5);
+    assert.ok(open.inert, 'background inert while the picker is open');
+    assert.ok(open.searchFocus, 'focus lands in the search field');
+
+    // Search filters by name (diacritic-insensitive normalization).
+    await page.evaluate(() => {
+      const el = document.getElementById('app');
+      const input = el.shadowRoot.querySelector('[data-entry-club-picker-search]');
+      input.value = 'club 3';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    const filtered = await page.evaluate(() => {
+      const rows = [...document.getElementById('app').shadowRoot.querySelectorAll('[data-entry-club-picker-row]')];
+      return {
+        visible: rows.filter((r) => !r.hidden).length,
+        emptyShown: !document.getElementById('app').shadowRoot.querySelector('[data-entry-club-picker-empty]').hidden,
+      };
+    });
+    assert.equal(filtered.visible, 1, 'only the matching club stays visible');
+    assert.equal(filtered.emptyShown, false);
+    await page.evaluate(() => {
+      const el = document.getElementById('app');
+      const input = el.shadowRoot.querySelector('[data-entry-club-picker-search]');
+      input.value = 'zzz';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    const noMatch = await page.evaluate(() => {
+      const el = document.getElementById('app');
+      const rows = [...el.shadowRoot.querySelectorAll('[data-entry-club-picker-row]')];
+      return {
+        visible: rows.filter((r) => !r.hidden).length,
+        emptyText: el.shadowRoot.querySelector('[data-entry-club-picker-empty]')?.textContent.trim(),
+        emptyHidden: el.shadowRoot.querySelector('[data-entry-club-picker-empty]').hidden,
+      };
+    });
+    assert.equal(noMatch.visible, 0);
+    assert.equal(noMatch.emptyHidden, false, 'empty state shows on no match');
+    assert.ok(noMatch.emptyText.includes('zzz'));
+
+    // Escape closes and restores focus to the trigger.
+    await page.evaluate(() => {
+      document.getElementById('app').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    });
+    const closed = await page.evaluate(() => {
+      const el = document.getElementById('app');
+      return {
+        dialog: !!el.shadowRoot.querySelector('.entry-picker-dialog'),
+        focus: el.shadowRoot.activeElement?.matches('[data-entry-club-picker-open]'),
+      };
+    });
+    assert.equal(closed.dialog, false);
+    assert.ok(closed.focus, 'focus returns to the picker trigger');
+  } finally {
+    await browser.close();
+  }
+});
+
+test('≥3 clubs with an active club context: the reciente card is the main access (PD-CLUBS)', async () => {
+  const browser = await chromium.launch();
+  try {
+    const clubs = [1, 2, 3].map((n) => CLUB(`c${n}`, `Club ${n}`));
+    const { page } = await newEntryPage(browser, {
+      bootstrap: {
+        ...BOOTSTRAP,
+        contexts: clubs,
+        active: {
+          context_id: 'ctx-1',
+          context_epoch: 1,
+          owner_scope: { kind: 'club', club_id: 'c2' },
+          team_ids: [],
+          working_team_ids: [],
+        },
+      },
+      personalTeams: [],
+    });
+    const state = await page.evaluate(() => {
+      const el = document.getElementById('app');
+      const card = el.shadowRoot.querySelector('.entry-step [data-entry-club-activate]');
+      return {
+        clubId: card?.dataset.entryClubActivate,
+        meta: card?.querySelector('.entry-card-meta')?.textContent.trim(),
+        pickerOpen: !!el.shadowRoot.querySelector('[data-entry-club-picker-open]'),
+      };
+    });
+    assert.equal(state.clubId, 'c2', 'the active club is the reciente main access');
+    assert.equal(state.meta, 'Club reciente');
+    assert.ok(state.pickerOpen, 'the picker stays available for the other clubs');
+  } finally {
+    await browser.close();
+  }
+});
+
+test('≥3 clubs: a successful club entry stores the account-bound reciente marker (PD-CLUBS)', async () => {
+  const browser = await chromium.launch();
+  try {
+    const clubs = [1, 2, 3].map((n) => CLUB(`c${n}`, `Club ${n}`));
+    const { page, log } = await newEntryPage(browser, {
+      bootstrap: { ...BOOTSTRAP, contexts: clubs },
+      personalTeams: [],
+    });
+    // No datum → neutral access; enter club c3 through the picker row.
+    await page.evaluate(() => {
+      document.getElementById('app').shadowRoot.querySelector('[data-entry-club-picker-open]').click();
+    });
+    await page.evaluate(() => {
+      document.getElementById('app').shadowRoot.querySelector('[data-entry-club-activate="c3"]').click();
+    });
+    await new Promise((r) => setTimeout(r, 400));
+    const activate = log.find((r) => r.url.includes('/api/context/v1/activate'));
+    assert.deepEqual(JSON.parse(activate.postData), { kind: 'club', club_id: 'c3' }, 'picker row enters the club directly');
+    const marker = await page.evaluate(() => sessionStorage.getItem('biq.entry.lastClub.acc-e2e'));
+    assert.equal(marker, 'c3', 'the entry stores the reciente marker for the next visit');
+
+    // A stale marker for a club not in the feed is ignored — the access
+    // falls back to the neutral picker, never to an arbitrary club.
+    const ghost = await page.evaluate(() => {
+      const el = document.getElementById('app');
+      sessionStorage.setItem('biq.entry.lastClub.acc-e2e', 'c-ghost');
+      el._entryBusy = false; // hold from the completed entry — force repaint
+      el.render();
+      return {
+        recienteCard: !!el.shadowRoot.querySelector('.entry-step [data-entry-club-activate]'),
+        neutralAccess: !!el.shadowRoot.querySelector('[data-entry-club-picker-open]'),
+      };
+    });
+    assert.equal(ghost.recienteCard, false, 'a ghost marker never paints a club card');
+    assert.ok(ghost.neutralAccess, 'falls back to the neutral picker access');
+  } finally {
+    await browser.close();
+  }
+});
+
+// ─── PD-ENTRY: «Mi club» is not shown to a coach ────────────────────────
+
+test('PD-ENTRY: a confirmed coach sees «Mi equipo» only — «Mi club» is hidden', async () => {
+  const browser = await chromium.launch();
+  try {
+    const { page } = await newEntryPage(browser, {
+      bootstrap: { ...BOOTSTRAP, contexts: [CLUB('c1', 'Club Uno'), CLUB('c2', 'Club Dos')] },
+      personalTeams: [TEAM('pt-1', 'Paquetillos 1')],
+    });
+    const state = await page.evaluate(() => {
+      const el = document.getElementById('app');
+      return {
+        blocks: [...el.shadowRoot.querySelectorAll('.entry-block-title')].map((b) => b.textContent.trim()),
+        clubCards: el.shadowRoot.querySelectorAll('[data-entry-club-activate]').length,
+        crearClub: !!el.shadowRoot.querySelector('[data-entry-club-create-toggle]'),
+        teamCards: el.shadowRoot.querySelectorAll('[data-entry-personal-enter-team]').length,
+      };
+    });
+    assert.deepEqual(state.blocks, ['Mi equipo'], 'only the coached space renders');
+    assert.equal(state.clubCards, 0, 'no club access at all');
+    assert.equal(state.crearClub, false, 'club creation hides with the block');
+    assert.equal(state.teamCards, 1);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('PD-ENTRY: archived-only owner is not a coach — «Mi club» stays visible', async () => {
+  const browser = await chromium.launch();
+  try {
+    const { page } = await newEntryPage(browser, {
+      bootstrap: { ...BOOTSTRAP, contexts: [CLUB('c1', 'Club Uno')] },
+      personalTeams: [{ ...PERSONAL_TEAMS[0], archived: true }],
+    });
+    const blocks = await page.evaluate(() =>
+      [...document.getElementById('app').shadowRoot.querySelectorAll('.entry-block-title')]
+        .map((b) => b.textContent.trim()));
+    assert.deepEqual(blocks, ['Mi equipo', 'Mi club'], 'archived teams do not make a coach');
+  } finally {
+    await browser.close();
+  }
+});
+
+test('PD-ENTRY: a failed team feed cannot confirm the coach — «Mi club» stays reachable (honest fallback)', async () => {
+  const browser = await chromium.launch();
+  try {
+    const { page } = await newEntryPage(browser, {
+      bootstrap: { ...BOOTSTRAP, contexts: [CLUB('c1', 'Club Uno')] },
+      personalTeamsFailure: { status: 503 },
+    });
+    await page.waitForFunction(() =>
+      document.getElementById('app')._personalTeamsStatus === 'error',
+      { timeout: 10000 });
+    const state = await page.evaluate(() => {
+      const el = document.getElementById('app');
+      return {
+        blocks: [...el.shadowRoot.querySelectorAll('.entry-block-title')].map((b) => b.textContent.trim()),
+        clubCards: el.shadowRoot.querySelectorAll('[data-entry-club-activate]').length,
+      };
+    });
+    assert.deepEqual(state.blocks, ['Mi equipo', 'Mi club'], 'feed failure never strands memberships');
+    assert.equal(state.clubCards, 1);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('PD-ENTRY: a coach still sees an emailed invite — redemption is not part of the club block', async () => {
+  const browser = await chromium.launch();
+  try {
+    const { page } = await newEntryPage(browser, {
+      routeQuery: 'entry?invite=tok-abc',
+      personalTeams: [TEAM('pt-1', 'Paquetillos 1')],
+    });
+    await page.waitForFunction(() => {
+      const el = document.getElementById('app');
+      return !!(el.shadowRoot && el.shadowRoot.querySelector('[data-entry-invite-redeem]'));
+    }, { timeout: 10000 });
+    const state = await page.evaluate(() => {
+      const el = document.getElementById('app');
+      return {
+        invite: el.shadowRoot.querySelector('.entry-invite')?.textContent || '',
+        blocks: [...el.shadowRoot.querySelectorAll('.entry-block-title')].map((b) => b.textContent.trim()),
+      };
+    });
+    assert.ok(state.invite.includes('Club Invitado'), 'the invite preview renders for a coach');
+    assert.deepEqual(state.blocks, ['Mi equipo']);
+  } finally {
+    await browser.close();
+  }
+});
+
+// ─── Chispa help: accessible dialog ─────────────────────────────────────
+
+test('Chispa help uses the module-local compact SVG and opens an accessible dialog', async () => {
+  const browser = await chromium.launch();
+  try {
+    const { page } = await newEntryPage(browser);
+    const trigger = await page.evaluate(() => {
+      const el = document.getElementById('app');
+      const btn = el.shadowRoot.querySelector('[data-entry-help]');
+      const rect = btn.getBoundingClientRect();
+      return {
+        aria: btn.getAttribute('aria-label'),
+        haspopup: btn.getAttribute('aria-haspopup'),
+        src: btn.querySelector('img')?.getAttribute('src') || '',
+        copy: btn.textContent,
+        size: { w: rect.width, h: rect.height },
+        shellHosted: btn.querySelector('img')?.getAttribute('src')?.includes('/assets/') || false,
+      };
+    });
+    assert.equal(trigger.aria, 'Chispa: ayuda sobre Mi equipo y Mi club');
+    assert.equal(trigger.haspopup, 'dialog');
+    assert.ok(trigger.src.startsWith('data:image/svg'), 'icon is bundled — module-local asset, not shell-hosted');
+    assert.equal(trigger.shellHosted, false);
+    assert.ok(trigger.copy.includes('¿Mi equipo o mi club?'));
+    assert.ok(trigger.copy.includes('Chispa te ayuda a elegir'));
+    assert.ok(trigger.size.w >= 44 && trigger.size.h >= 44, 'hit target ≥44px');
+  } finally {
+    await browser.close();
+  }
+});
+
+test('help dialog: role/aria-modal/labelledby, content structure, inert background, focus in/out, Escape', async () => {
+  const browser = await chromium.launch();
+  try {
+    const { page } = await newEntryPage(browser);
+    await page.evaluate(() => {
+      document.getElementById('app').shadowRoot.querySelector('[data-entry-help]').click();
+    });
+    const open = await page.evaluate(() => {
+      const el = document.getElementById('app');
+      const dlg = el.shadowRoot.querySelector('[role="dialog"]');
+      const step = el.shadowRoot.querySelector('.entry-step');
+      const focused = el.shadowRoot.activeElement;
+      return {
+        role: dlg?.getAttribute('role'),
+        ariaModal: dlg?.getAttribute('aria-modal'),
+        labelledby: dlg?.getAttribute('aria-labelledby'),
+        title: dlg?.querySelector('#entry-help-title')?.textContent.trim(),
+        sections: [...dlg.querySelectorAll('.entry-help-section h3')].map((h) => h.textContent.trim()),
+        lists: dlg.querySelectorAll('.entry-help-section ul li').length,
+        inert: step?.hasAttribute('inert'),
+        focusTag: focused?.getAttribute('data-entry-help-close') !== null ? 'close' : focused?.tagName,
+        imgSrc: dlg?.querySelector('.entry-help-chispa')?.getAttribute('src') || '',
+      };
+    });
+    assert.equal(open.role, 'dialog');
+    assert.equal(open.ariaModal, 'true');
+    assert.equal(open.labelledby, 'entry-help-title');
+    assert.equal(open.title, 'Cada forma de entrenar, su lugar');
+    assert.deepEqual(open.sections, ['Mi equipo', 'Mi club']);
+    assert.equal(open.lists, 6, 'a three-item list per block');
+    assert.equal(open.inert, true, 'background is inert while the dialog is open');
+    assert.equal(open.focusTag, 'close', 'focus moved into the dialog (close button)');
+    assert.ok(open.imgSrc.startsWith('data:image/svg'), 'dialog icon is the bundled SVG');
+
+    // Escape closes and focus returns to the help trigger.
+    await page.evaluate(() => {
+      const el = document.getElementById('app');
+      el.shadowRoot.querySelector('[data-entry-help-close]').dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, composed: true }),
+      );
+    });
+    const closed = await page.evaluate(() => {
+      const el = document.getElementById('app');
+      return {
+        dialog: !!el.shadowRoot.querySelector('[role="dialog"]'),
+        inert: el.shadowRoot.querySelector('.entry-step')?.hasAttribute('inert'),
+        active: el.shadowRoot.activeElement?.hasAttribute('data-entry-help'),
+      };
+    });
+    assert.equal(closed.dialog, false, 'dialog closed');
+    assert.equal(closed.inert, false, 'background no longer inert');
+    assert.equal(closed.active, true, 'focus returned to the help trigger');
+  } finally {
+    await browser.close();
+  }
+});
+
+test('the compact Chispa asset is byte-identical to the approved model (sha256 pinned)', () => {
+  const hash = createHash('sha256').update(readFileSync(CHISPA_SVG)).digest('hex');
+  assert.equal(hash, '1b1c51a69eed455657f75e91250d5db7f1101b2408657b3387d949d78dabe9c9');
+});
+
+// ─── Activation paths ───────────────────────────────────────────────────
+
+test('team card click activates personal context and narrows the working set', async () => {
+  const browser = await chromium.launch();
+  try {
+    const { page, log } = await newEntryPage(browser);
+    await page.waitForFunction(() =>
+      !!document.getElementById('app').shadowRoot.querySelector('[data-entry-personal-enter-team]'),
+      { timeout: 10000 });
+    log.length = 0;
+    await page.evaluate(() => {
+      document.getElementById('app').shadowRoot.querySelector('[data-entry-personal-enter-team]').click();
+    });
+    await new Promise((r) => setTimeout(r, 300));
+    const activate = log.find((r) => r.url.includes('/api/context/v1/activate'));
+    const working = log.find((r) => r.url.includes('/api/context/v1/active/working-teams'));
+    assert.ok(activate, 'activation must fire');
+    assert.deepEqual(JSON.parse(activate.postData), { kind: 'personal' });
+    assert.ok(working, 'working-set narrowing must fire');
+    assert.deepEqual(JSON.parse(working.postData), { working_team_ids: ['pt-1'] });
+  } finally {
+    await browser.close();
+  }
+});
+
+test('«Entrar con todos los equipos» posts personal activation without narrowing', async () => {
+  const browser = await chromium.launch();
+  try {
+    const { page, log } = await newEntryPage(browser, {
+      personalTeams: [TEAM('pt-1', 'Paquetillos 1'), TEAM('pt-2', 'Paquetillos 2')],
+    });
+    await page.waitForFunction(() =>
+      !!document.getElementById('app').shadowRoot.querySelector('[data-entry-personal-enter]'),
+      { timeout: 10000 });
+    log.length = 0;
+    await page.evaluate(() => {
+      document.getElementById('app').shadowRoot.querySelector('[data-entry-personal-enter]').click();
+    });
+    await new Promise((r) => setTimeout(r, 300));
+    const activate = log.find((r) => r.url.includes('/api/context/v1/activate'));
+    assert.ok(activate);
+    assert.deepEqual(JSON.parse(activate.postData), { kind: 'personal' });
+    assert.ok(!log.some((r) => r.url.includes('/active/working-teams')), 'joint entry narrows nothing');
+  } finally {
+    await browser.close();
+  }
+});
+
+// ─── Preserved states ───────────────────────────────────────────────────
+
 // D2 regression: a member-scope session is denied personal authority by
 // design (R1) — the selector must never prefetch personal-teams (the 403
-// console error on every club-context login) and the Mi equipo tab must
+// console error on every club-context login) and the Mi equipo block must
 // state the verified-session requirement instead of a dead retry.
 const BOOTSTRAP_MEMBER = {
   ...BOOTSTRAP,
@@ -340,20 +936,16 @@ test('member-scope session never fetches personal-teams and shows the verified-s
     // Bootstrap prefetch is gated — the feed is never touched.
     await page.waitForTimeout(500);
     assert.equal(feedGets(), 0, 'member-scope prefetch must not issue GET /personal-teams');
-    // Mi equipo tab renders the honest elevation note, no spinner/retry/CTAs.
-    await page.evaluate(() => {
-      const el = document.getElementById('app');
-      el.shadowRoot.querySelector('[data-entry-tab="personal"]').click();
-    });
+    // Mi equipo block renders the honest elevation note, no spinner/retry/CTAs.
     const state = await page.evaluate(() => {
       const el = document.getElementById('app');
-      const panel = el.shadowRoot.querySelector('.entry-panel');
+      const block = el.shadowRoot.querySelectorAll('.entry-block')[0];
       return {
-        text: panel?.textContent || '',
-        loading: !!panel?.querySelector('.entry-loading'),
-        retry: !!panel?.querySelector('[data-personal-teams-retry]'),
-        create: !!panel?.querySelector('[data-entry-team-create-toggle]'),
-        enter: !!panel?.querySelector('[data-entry-personal-enter], [data-entry-personal-enter-team]'),
+        text: block?.textContent || '',
+        loading: !!block?.querySelector('.entry-loading'),
+        retry: !!block?.querySelector('[data-personal-teams-retry]'),
+        create: !!block?.querySelector('[data-entry-team-create-toggle]'),
+        enter: !!block?.querySelector('[data-entry-personal-enter], [data-entry-personal-enter-team]'),
       };
     });
     assert.match(state.text, /sesión verificada/i, 'denied state must explain the verified-session requirement');
@@ -362,88 +954,7 @@ test('member-scope session never fetches personal-teams and shows the verified-s
     assert.equal(state.create, false, 'denied state must not offer team creation');
     assert.equal(state.enter, false, 'denied state must not offer Entrar');
     await page.waitForTimeout(500);
-    assert.equal(feedGets(), 0, 'tab render must not trigger the feed either');
-  } finally {
-    await browser.close();
-  }
-});
-
-test('Entrar on a team activates personal context and narrows the working set', async () => {
-  const browser = await chromium.launch();
-  try {
-    const { page, log } = await newEntryPage(browser);
-    await page.evaluate(() => {
-      const el = document.getElementById('app');
-      el.shadowRoot.querySelector('[data-entry-tab="personal"]').click();
-    });
-    await new Promise((r) => setTimeout(r, 150));
-    log.length = 0;
-    await page.evaluate(() => {
-      const el = document.getElementById('app');
-      el.shadowRoot.querySelector('[data-entry-personal-enter-team]').click();
-    });
-    await new Promise((r) => setTimeout(r, 300));
-    const activate = log.find((r) => r.url.includes('/api/context/v1/activate'));
-    const working = log.find((r) => r.url.includes('/api/context/v1/active/working-teams'));
-    assert.ok(activate, 'activation must fire');
-    assert.deepEqual(JSON.parse(activate.postData), { kind: 'personal' });
-    assert.ok(working, 'working-set narrowing must fire');
-    assert.deepEqual(JSON.parse(working.postData), { working_team_ids: ['pt-1'] });
-  } finally {
-    await browser.close();
-  }
-});
-
-test('at the 2-team cap the create affordance is replaced by the cap note', async () => {
-  const browser = await chromium.launch();
-  try {
-    const { page } = await newEntryPage(browser, {
-      personalTeams: [
-        { ...PERSONAL_TEAMS[0] },
-        { ...PERSONAL_TEAMS[0], team_id: 'pt-2', name: 'Paquetillos 2' },
-      ],
-    });
-    await page.evaluate(() => {
-      const el = document.getElementById('app');
-      el.shadowRoot.querySelector('[data-entry-tab="personal"]').click();
-    });
-    const state = await page.evaluate(() => {
-      const el = document.getElementById('app');
-      const panel = el.shadowRoot.querySelector('.entry-panel');
-      return {
-        teamRows: panel.querySelectorAll('[data-entry-personal-enter-team]').length,
-        createToggle: !!panel.querySelector('[data-entry-team-create-toggle]'),
-        createForm: !!panel.querySelector('[data-entry-personal-create]'),
-        capNote: /hasta 2 equipos|Elimina uno/i.test(panel.textContent),
-      };
-    });
-    assert.equal(state.teamRows, 2);
-    assert.equal(state.createToggle, false, 'no create affordance at the cap');
-    assert.equal(state.createForm, false);
-    assert.ok(state.capNote, 'cap note must explain delete-to-create');
-  } finally {
-    await browser.close();
-  }
-});
-
-test('Mi equipo with zero teams offers no Entrar — first entry requires creating one (PO gate)', async () => {
-  const browser = await chromium.launch();
-  try {
-    const { page } = await newEntryPage(browser, { personalTeams: [] });
-    await page.evaluate(() => {
-      const el = document.getElementById('app');
-      el.shadowRoot.querySelector('[data-entry-tab="personal"]').click();
-    });
-    const state = await page.evaluate(() => {
-      const el = document.getElementById('app');
-      const panel = el.shadowRoot.querySelector('.entry-panel');
-      return {
-        enter: !!panel.querySelector('[data-entry-personal-enter]'),
-        createToggle: !!panel.querySelector('[data-entry-team-create-toggle]'),
-      };
-    });
-    assert.equal(state.enter, false, 'no bare Entrar without teams — a first team is required');
-    assert.ok(state.createToggle, 'create affordance remains the only entry path');
+    assert.equal(feedGets(), 0, 'render must not trigger the feed either');
   } finally {
     await browser.close();
   }
@@ -458,32 +969,30 @@ test('archived-only owner still gets Entrar — restore path is not a forced cre
     const { page, log } = await newEntryPage(browser, {
       personalTeams: [{ ...PERSONAL_TEAMS[0], archived: true }],
     });
-    await page.evaluate(() => {
-      const el = document.getElementById('app');
-      el.shadowRoot.querySelector('[data-entry-tab="personal"]').click();
-    });
+    await page.waitForFunction(() =>
+      !!document.getElementById('app').shadowRoot.querySelector('[data-entry-personal-enter]'),
+      { timeout: 10000 });
     const state = await page.evaluate(() => {
       const el = document.getElementById('app');
-      const panel = el.shadowRoot.querySelector('.entry-panel');
+      const block = el.shadowRoot.querySelectorAll('.entry-block')[0];
       return {
-        enter: !!panel.querySelector('[data-entry-personal-enter]'),
-        enterLabel: panel.querySelector('[data-entry-personal-enter]')?.textContent.trim(),
-        teamRows: panel.querySelectorAll('[data-entry-personal-enter-team]').length,
-        createToggle: !!panel.querySelector('[data-entry-team-create-toggle]'),
-        archivedNote: /archivados/i.test(panel.textContent),
+        enter: !!block.querySelector('[data-entry-personal-enter]'),
+        enterLabel: block.querySelector('[data-entry-personal-enter]')?.textContent.trim(),
+        teamCards: block.querySelectorAll('[data-entry-personal-enter-team]').length,
+        createToggle: !!block.querySelector('[data-entry-team-create-toggle]'),
+        archivedNote: /archivados/i.test(block.textContent),
       };
     });
     assert.ok(state.enter, 'archived-only history must still offer Entrar');
-    assert.equal(state.enterLabel, 'Entrar', 'single Enter affordance (no per-team row)');
-    assert.equal(state.teamRows, 0, 'archived rows stay out of the active list');
+    assert.equal(state.enterLabel, 'Entrar', 'single Enter affordance (no per-team card)');
+    assert.equal(state.teamCards, 0, 'archived teams stay out of the cards');
     assert.ok(state.createToggle, 'create remains available below the cap');
     assert.ok(state.archivedNote, 'the note explains the restore path');
 
     // Entrar activates the personal context — no working-set narrowing.
     log.length = 0;
     await page.evaluate(() => {
-      const el = document.getElementById('app');
-      el.shadowRoot.querySelector('[data-entry-personal-enter]').click();
+      document.getElementById('app').shadowRoot.querySelector('[data-entry-personal-enter]').click();
     });
     await new Promise((r) => setTimeout(r, 300));
     const activate = log.find((r) => r.url.includes('/api/context/v1/activate'));
@@ -505,20 +1014,19 @@ test('archived teams do not appear and do not count against the cap', async () =
         { ...PERSONAL_TEAMS[0], team_id: 'pt-arch', name: 'Viejo', archived: true },
       ],
     });
-    await page.evaluate(() => {
-      const el = document.getElementById('app');
-      el.shadowRoot.querySelector('[data-entry-tab="personal"]').click();
-    });
+    await page.waitForFunction(() =>
+      !!document.getElementById('app').shadowRoot.querySelector('[data-entry-personal-enter-team]'),
+      { timeout: 10000 });
     const state = await page.evaluate(() => {
       const el = document.getElementById('app');
-      const panel = el.shadowRoot.querySelector('.entry-panel');
+      const block = el.shadowRoot.querySelectorAll('.entry-block')[0];
       return {
-        teamRows: panel.querySelectorAll('[data-entry-personal-enter-team]').length,
-        createToggle: !!panel.querySelector('[data-entry-team-create-toggle]'),
-        text: panel.textContent,
+        teamCards: block.querySelectorAll('[data-entry-personal-enter-team]').length,
+        createToggle: !!block.querySelector('[data-entry-team-create-toggle]'),
+        text: block.textContent,
       };
     });
-    assert.equal(state.teamRows, 1, 'archived team must be hidden');
+    assert.equal(state.teamCards, 1, 'archived team must be hidden');
     assert.ok(state.createToggle, 'one active team leaves room to create');
     assert.ok(!state.text.includes('Viejo'));
   } finally {
@@ -568,10 +1076,8 @@ test('no manual invitation-code form anywhere in the entry step', async () => {
       const el = document.getElementById('app');
       const step = el.shadowRoot.querySelector('.entry-step');
       const text = step.textContent;
-      const inputs = [...step.querySelectorAll('input')].map((i) => `${i.type}:${i.name}`);
       return {
         hasInviteLabel: /invitaci[oó]n|c[oó]digo/i.test(text) && !text.includes('Invitación para'),
-        inputs,
         inviteInput: !!step.querySelector('[data-entry-invite] input, input[name="token"], input[name="code"]'),
       };
     });
@@ -585,7 +1091,7 @@ test('no manual invitation-code form anywhere in the entry step', async () => {
 test('+ Crear club opens a name-only form posting {name} — no url/website field', async () => {
   const browser = await chromium.launch();
   try {
-    const { page, log } = await newEntryPage(browser);
+    const { page, log } = await newEntryPage(browser, { personalTeams: [] });
     // Form hidden until the toggle.
     assert.equal(await sel(page, '[data-entry-club-create]'), false);
     await page.evaluate(() => {
@@ -606,46 +1112,12 @@ test('+ Crear club opens a name-only form posting {name} — no url/website fiel
       form.querySelector('input[name="name"]').value = 'Club Nuevo';
       form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
     });
-    await page.waitForFunction(() => true);
     await new Promise((r) => setTimeout(r, 300));
     const createReq = log.find((r) => r.url.includes('/api/context/v1/clubs'));
     assert.ok(createReq, 'club create request must fire');
     const body = JSON.parse(createReq.postData);
     assert.equal(body.name, 'Club Nuevo');
     assert.ok(!('url' in body) && !('website' in body), 'no url/website in the create payload');
-  } finally {
-    await browser.close();
-  }
-});
-
-test('Entrar on Mi equipo posts personal activation; Entrar como posts club activation', async () => {
-  const browser = await chromium.launch();
-  try {
-    const { page, log } = await newEntryPage(browser);
-    // Club list action.
-    await page.evaluate(() => {
-      const el = document.getElementById('app');
-      el.shadowRoot.querySelector('[data-entry-club-activate]').click();
-    });
-    await new Promise((r) => setTimeout(r, 200));
-    const clubReq = log.find((r) => r.url.includes('/api/context/v1/activate'));
-    assert.ok(clubReq);
-    assert.deepEqual(JSON.parse(clubReq.postData), { kind: 'club', club_id: 'club-1' });
-
-    // Switch to Mi equipo → Entrar → personal activation.
-    await page.evaluate(() => {
-      const el = document.getElementById('app');
-      el.shadowRoot.querySelector('[data-entry-tab="personal"]').click();
-    });
-    log.length = 0;
-    await page.evaluate(() => {
-      const el = document.getElementById('app');
-      el.shadowRoot.querySelector('[data-entry-personal-enter]').click();
-    });
-    await new Promise((r) => setTimeout(r, 200));
-    const personalReq = log.find((r) => r.url.includes('/api/context/v1/activate'));
-    assert.ok(personalReq);
-    assert.deepEqual(JSON.parse(personalReq.postData), { kind: 'personal' });
   } finally {
     await browser.close();
   }
@@ -677,13 +1149,14 @@ test('invitation deep link (?invite=) auto-previews and confirms on Mi club', as
   }
 });
 
-// ─── R6: selector reachable under every cohort ───────────────────────────
+// ─── R6: selector reachable under every cohort ──────────────────────────
 
 test('spaces route renders the selector for an existing club member (R6)', async () => {
   const browser = await chromium.launch();
   try {
     const { page } = await newEntryPage(browser, {
       routeQuery: 'spaces',
+      personalTeams: [],
       org: {
         club: { id: 'club-1', name: 'Club Uno' },
         role: 'administrator',
@@ -696,11 +1169,11 @@ test('spaces route renders the selector for an existing club member (R6)', async
       const el = document.getElementById('app');
       return {
         selector: !!el.shadowRoot.querySelector('.entry-step'),
-        tabs: [...el.shadowRoot.querySelectorAll('[data-entry-tab]')].map((b) => b.textContent.trim()),
+        blocks: [...el.shadowRoot.querySelectorAll('.entry-block-title')].map((b) => b.textContent.trim()),
       };
     });
     assert.ok(found.selector, 'a club member must reach the selector via #/onboard/spaces');
-    assert.deepEqual(found.tabs, ['Mi equipo', 'Mi club']);
+    assert.deepEqual(found.blocks, ['Mi equipo', 'Mi club']);
   } finally {
     await browser.close();
   }
@@ -871,13 +1344,7 @@ test('OB60-3: spaces?edit intent survives a failed feed and drains on explicit r
     await page.evaluate(() => {
       document.getElementById('app').route = 'spaces?edit=pt-1';
     });
-    // The selector defaults to Mi club when a club context exists — the
-    // feed error lives on the Mi equipo tab.
-    await page.waitForFunction(() =>
-      !!document.getElementById('app').shadowRoot.querySelector('[data-entry-tab="personal"]'),
-      { timeout: 10000 });
-    await page.evaluate(() =>
-      document.getElementById('app').shadowRoot.querySelector('[data-entry-tab="personal"]').click());
+    // The feed error lives directly in the Mi equipo block — no tabs.
     await page.waitForFunction(() =>
       !!document.getElementById('app').shadowRoot.querySelector('[data-personal-teams-retry]'),
       { timeout: 10000 });
@@ -1096,6 +1563,9 @@ test('OB60-3: delayed stale response after account switch never assigns old data
       personalTeamsHold: (n) => (n <= 2 ? oldResponseHeld : null),
       personalTeamsFailure: (n) =>
         n <= 2 ? { status: 200, body: { teams: [staleTeam] } } : null,
+      // The mount's requests stay held on purpose — the test drives its own
+      // status waits around the account switch.
+      waitFeed: false,
     });
     page.on('pageerror', (e) => errors.push(e));
     const feedGets = () =>
@@ -1165,25 +1635,24 @@ test('OB60-3: disconnect mid-flight aborts — late body cannot resurrect the fe
   }
 });
 
-test('entry head carries a right-aligned Salir — standalone posts logout and redirects to /login', async () => {
+// ─── Salir (canonical exit) ─────────────────────────────────────────────
+
+test('Salir stays reachable in the entry content — standalone posts logout and redirects to /login', async () => {
   const browser = await chromium.launch();
   try {
     const { page, log } = await newEntryPage(browser);
-    const head = await page.evaluate(() => {
+    const state = await page.evaluate(() => {
       const el = document.getElementById('app');
-      const headEl = el.shadowRoot.querySelector('.entry-head');
-      const title = headEl?.querySelector('.entry-title')?.textContent.trim();
-      const btn = headEl?.querySelector('[data-entry-logout]');
-      const style = headEl ? getComputedStyle(headEl) : null;
+      const btn = el.shadowRoot.querySelector('[data-entry-logout]');
       return {
-        title,
         btnText: btn?.textContent.trim(),
-        justify: style?.justifyContent,
+        insideStep: !!btn?.closest('.entry-step'),
+        noChrome: !el.shadowRoot.querySelector('header, footer'),
       };
     });
-    assert.equal(head.title, 'Elige tu perfil');
-    assert.equal(head.btnText, 'Salir');
-    assert.equal(head.justify, 'space-between', 'Salir stays right-aligned to the title');
+    assert.equal(state.btnText, 'Salir');
+    assert.ok(state.insideStep, 'Salir is a secondary action inside the content');
+    assert.ok(state.noChrome, 'onboard draws no header/footer of its own');
 
     await page.evaluate(() => {
       document.getElementById('app').shadowRoot.querySelector('[data-entry-logout]').click();

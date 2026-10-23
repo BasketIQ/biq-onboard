@@ -9,7 +9,7 @@
 //   - help-dialog text >= 4.5:1 vs its surface, close icon >= 3:1
 //     (same gate family as biq-app tests/design-system/menu-contrast).
 //
-// Usage:  npm run build:lib && node scripts/screenshot-entry.mjs [outdir]
+// Usage:  npm run build:lib && node scripts/screenshot-entry.mjs <outdir>
 // Env:    BIQ_APP_DIR — path to the biq-app checkout (default ../../biq-app).
 
 import { chromium } from 'playwright';
@@ -25,8 +25,8 @@ const APP_ROOT = resolve(__dirname, '..');
 const REPO_ROOT = resolve(APP_ROOT, '..');
 const DIST_EMBED = join(REPO_ROOT, 'dist', 'embed', 'biq-onboard.js');
 const BIQ_APP_DIR = process.env.BIQ_APP_DIR || resolve(APP_ROOT, '..', '..', '..', 'biq-app');
-const OUT = process.argv[2]
-  || join(REPO_ROOT, '..', 'handoff/missions/2026-10-23-scouting-team-player/evidence/entry-b2');
+const OUT = process.argv[2];
+if (!OUT) throw new Error('Usage: node scripts/screenshot-entry.mjs <outdir> (explicit output directory required)');
 const PORT = 9152;
 
 if (!existsSync(DIST_EMBED)) throw new Error('Run `npm run build:lib` first.');

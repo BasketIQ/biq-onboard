@@ -10,8 +10,10 @@
  * (debounce → serial queue → chip), keep unknown stored values as an
  * extra selected option, and are fenced by the same seq/fence machinery.
  *
- * Personal rosters (biq-app own-workspace API) must never see player_id —
- * the last test pins the explicit strip (Phase B gap).
+ * Personal rosters (biq-app own-workspace API) preserve player_id: a row
+ * id the read served is echoed back on write — never stripped (M4-F03).
+ * Rows without one send no `player_id` key at all (the server assigns /
+ * backfills; the client never mints ids).
  *
  * Run: `npm run build:lib && node --test tests/scouting-team-editor.test.mjs`
  * Requires: chromium (npx playwright install chromium).
@@ -560,13 +562,14 @@ test('a late save completion never mutates a retired editor generation', async (
   }
 });
 
-// ─── Phase B gap: personal rosters never carry player_id ────────────────
+// ─── M4-F03: personal rosters preserve player_id ────────────────────────
 
-test('personal roster payloads never contain player_id (Phase B)', async () => {
+test('personal roster PUT preserves a served player_id; id-less rows send none', async () => {
   const browser = await chromium.launch();
   try {
-    // Even if a future biq-app payload served player_id, the wire must
-    // strip it — the roster API rejects unknown row keys today.
+    // The own-workspace read serves a row with a stable id — the editor
+    // must echo it back on write. The other row stays id-less and its PUT
+    // row carries no `player_id` key at all.
     const { page, log } = await newPersonalPage(browser, {
       rosterPlayers: [{ name: 'Bea Luna', number: 12, player_id: 'pl_cccccccccccccccc' }],
     });
@@ -582,13 +585,13 @@ test('personal roster payloads never contain player_id (Phase B)', async () => {
     });
     const puts = await waitForPuts(log, 1, '/roster');
     assert.ok(puts.length >= 1, 'personal autosave PUT landed');
-    for (const p of puts) {
-      const body = JSON.parse(p.postData);
-      for (const row of body.players || []) {
-        assert.equal(Object.keys(row).includes('player_id'), false,
-          `player_id must never be sent to the personal roster API: ${JSON.stringify(row)}`);
-      }
-    }
+    const body = JSON.parse(puts[puts.length - 1].postData);
+    assert.equal(body.players.length, 2);
+    assert.equal(body.players[1].player_id, 'pl_cccccccccccccccc',
+      'served player_id must be preserved on write');
+    assert.equal(body.players[1].name, 'Bea Luna Editada');
+    assert.equal('player_id' in body.players[0], false,
+      'rows without an id send no player_id key (server backfills)');
   } finally {
     await browser.close();
   }

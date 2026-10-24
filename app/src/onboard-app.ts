@@ -255,10 +255,11 @@ interface ClubTab {
 interface RosterPlayer {
   name: string;
   number: number | null;
-  // Stable club-roster identity (biq-core 0.25.0 `TeamPlayer.player_id`,
+  // Stable roster identity (biq-core 0.25.0 `TeamPlayer.player_id`,
   // `pl_<16 hex>`). Optional: rows created locally have none until the
-  // server assigns one on save. NEVER sent for personal rosters — the
-  // biq-app own-workspace API rejects unknown row keys (Phase B).
+  // server assigns one on save. Every roster writer preserves it — the
+  // personal roster PUT echoes it back verbatim (rows without one keep
+  // working: backfill is the server's job, never client-generated).
   player_id?: string | null;
 }
 
@@ -1257,7 +1258,22 @@ class BiqOnboardApp extends HTMLElement {
         ) {
           return null;
         }
-        players.push({ name: row.name, number: n as number | null });
+        // Scouting identity (F-CL-3): when the own-workspace API serves a
+        // row id, the editor carries it so the PUT preserves it — ''/null/
+        // absent all mean "no id yet" (server-side ensure/backfill assigns
+        // them on write; the client never mints ids).
+        const pid = row.player_id;
+        if (
+          pid !== null && pid !== undefined && pid !== '' &&
+          (typeof pid !== 'string' || !/^pl_[0-9a-f]{16}$/.test(pid))
+        ) {
+          return null;
+        }
+        players.push({
+          name: row.name,
+          number: n as number | null,
+          player_id: typeof pid === 'string' && pid ? pid : null,
+        });
       }
       // GET success is not edit authority: the server intentionally serves
       // reads for an own team outside the working set. Only working-set
@@ -1304,12 +1320,19 @@ class BiqOnboardApp extends HTMLElement {
               expected_revision: version ?? 0,
               name: draft.name,
               competitive_level: draft.competitive_level,
-              // TODO(Phase B): biq-app's own-workspace roster endpoint
-              // rejects unknown row keys — `player_id` (the club scouting
-              // identity) must NOT be sent here until the personal roster
-              // API supports it. Rows are explicitly narrowed to
-              // {name, number}, never `draft.players` verbatim.
-              players: draft.players.map((p) => ({ name: p.name, number: p.number })),
+              // F-CL-3 identity preservation: a row id the read served is
+              // echoed back verbatim — stripping it would orphan the
+              // scouting identity on every edit. Rows without one send no
+              // `player_id` key at all (the server assigns/backfills it;
+              // the client never mints ids).
+              players: draft.players.map((p) => {
+                const row: { name: string; number: number | null; player_id?: string } = {
+                  name: p.name,
+                  number: p.number,
+                };
+                if (p.player_id) row.player_id = p.player_id;
+                return row;
+              }),
             }),
           });
         } catch {

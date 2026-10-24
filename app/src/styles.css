@@ -1133,6 +1133,32 @@
   text-align: center;
 }
 
+/* F-CL-3 (M4-F05): fecha de nacimiento — ancho fijo como el dorsal, algo
+   más amplio para el formato de fecha del input nativo. */
+.onboard-roster-row .onboard-player-birth {
+  width: 132px;
+  min-width: 0;
+  flex: none;
+}
+
+/* PD-2 «+ Añadir jugadora» offer — panel de vinculación bajo la plantilla. */
+.onboard-addplayer {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--biq-line, #e5e5e5);
+}
+
+.onboard-linkable-list {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.onboard-linkable {
+  text-align: left;
+  font-weight: 600;
+}
+
 /* Mi Club Phase 4: Miembros tab */
 .onboard-invite-card {
   padding: 16px;

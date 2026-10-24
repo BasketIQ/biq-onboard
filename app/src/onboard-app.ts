@@ -255,10 +255,11 @@ interface ClubTab {
 interface RosterPlayer {
   name: string;
   number: number | null;
-  // Stable club-roster identity (biq-core 0.25.0 `TeamPlayer.player_id`,
+  // Stable roster identity (biq-core 0.25.0 `TeamPlayer.player_id`,
   // `pl_<16 hex>`). Optional: rows created locally have none until the
-  // server assigns one on save. NEVER sent for personal rosters — the
-  // biq-app own-workspace API rejects unknown row keys (Phase B).
+  // server assigns one on save. Every roster writer preserves it — the
+  // personal roster PUT echoes it back verbatim (rows without one keep
+  // working: backfill is the server's job, never client-generated).
   player_id?: string | null;
 }
 
@@ -495,6 +496,26 @@ interface TeamEditorPort {
   ): Promise<TeamEditorSave>;
 }
 
+// Editor roster draft row — raw strings so typing never needs a re-render
+// (innerHTML rebuild would wipe in-flight input values). `birth_date`
+// (F-CL-3/PD-2) is player-profile data: minors' personal data live in
+// biq-player `player_profiles/{player_id}`, keyed by the scouting id —
+// never on the team record, so the roster PUT never carries it. The row
+// captures it in the draft and a separate profile PUT (X-Biq-Module:
+// onboard — `player.profile.manage` is an onboard action) persists it
+// once the row has a `player_id`. `birth_loaded`/`birth_dirty` guard the
+// write path: a profile never written stays unknown (not "empty"), and
+// only user-edited values are ever sent.
+interface RosterDraftRow {
+  name: string;
+  number: string;
+  birth_date: string;
+  birth_loaded: boolean;
+  birth_dirty: boolean;
+  existing: boolean;
+  player_id: string | null;
+}
+
 // Category vocabulary mirrors biq-core CATEGORIES (slug → display label).
 const PERSONAL_CATEGORIES: Array<{ key: string; label: string }> = [
   { key: 'babybasket', label: 'Babybasket' },
@@ -554,6 +575,14 @@ class BiqOnboardApp extends HTMLElement {
   // cierre de sesión canónico del shell (opcional en documentos viejos).
   declare shellHosted: boolean;
   declare requestLogout?: () => Promise<void> | void;
+  // `el.remoteConfig` (ADR-009): la carcasa inyecta `{ baseUrl, token }` —
+  // el token es la prueba de actor de contexto emitida para el módulo
+  // `onboard`; biq-player la acepta con la cabecera `X-Biq-Module:
+  // onboard` (`player.profile.manage` está registrada para onboard).
+  declare remoteConfig: { baseUrl?: string; token?: string } | undefined;
+  // Test seam: base URL explícita del servicio biq-player (saltándose el
+  // descubrimiento por /modules.json). '' = mismo origen.
+  declare playerApiBase: string | undefined;
   // Working-context entry state (BIQ-PERSONAL-CLUB-CONTEXT)
   private _context: ContextDescriptor | null = null;
   private _bootstrap: BootstrapPayload | null = null;
@@ -652,13 +681,19 @@ class BiqOnboardApp extends HTMLElement {
   // (la baja solo la produce su acción explícita de quitar).
   // `player_id` (F-CL-3): stable club-roster identity carried through the
   // draft — edits keep it, a removed row drops it, a new row starts with
-  // null and adopts the id the server returns on save.
-  private _rosterDraft: {
-    name: string;
-    number: string;
-    existing: boolean;
-    player_id: string | null;
-  }[] = [];
+  // null and adopts the id the server returns on save. `birth_date` is the
+  // biq-player profile field (PD-2) — see RosterDraftRow.
+  private _rosterDraft: RosterDraftRow[] = [];
+  // PD-2: per-player profile cache (player_id → {birth_date, revision}) as
+  // last confirmed by biq-player; feeds the link-existing offer and the
+  // post-save profile sync diff.
+  private _playerProfiles: Record<string, { birth_date: string; revision: number }> = {};
+  // biq-player service base URL — discovered once from the shell's
+  // /modules.json (the `player` module entry origin). `undefined` =
+  // unresolved, `null` = unavailable (standalone / unconfigured shell).
+  private _playerApiBaseResolved: string | null | undefined;
+  // PD-2 «+ Añadir jugadora» offer — the link-existing chooser is open.
+  private _addPlayerPickerOpen = false;
   // SF1: the loaded editor model + async load state. `_editSeq` fences
   // load/save completions (a stale response for a closed modal or a
   // changed context never paints); `_editFence` binds the open editor to
@@ -1049,6 +1084,7 @@ class BiqOnboardApp extends HTMLElement {
     this._editGenderDraft = '';
     this._editLevelDraft = '';
     this._rosterDraft = [];
+    this._addPlayerPickerOpen = false;
     this._editError = null;
     this._editFence = '';
     this._rosterFocus = false;
@@ -1255,7 +1291,22 @@ class BiqOnboardApp extends HTMLElement {
         ) {
           return null;
         }
-        players.push({ name: row.name, number: n as number | null });
+        // Scouting identity (F-CL-3): when the own-workspace API serves a
+        // row id, the editor carries it so the PUT preserves it — ''/null/
+        // absent all mean "no id yet" (server-side ensure/backfill assigns
+        // them on write; the client never mints ids).
+        const pid = row.player_id;
+        if (
+          pid !== null && pid !== undefined && pid !== '' &&
+          (typeof pid !== 'string' || !/^pl_[0-9a-f]{16}$/.test(pid))
+        ) {
+          return null;
+        }
+        players.push({
+          name: row.name,
+          number: n as number | null,
+          player_id: typeof pid === 'string' && pid ? pid : null,
+        });
       }
       // GET success is not edit authority: the server intentionally serves
       // reads for an own team outside the working set. Only working-set
@@ -1302,12 +1353,19 @@ class BiqOnboardApp extends HTMLElement {
               expected_revision: version ?? 0,
               name: draft.name,
               competitive_level: draft.competitive_level,
-              // TODO(Phase B): biq-app's own-workspace roster endpoint
-              // rejects unknown row keys — `player_id` (the club scouting
-              // identity) must NOT be sent here until the personal roster
-              // API supports it. Rows are explicitly narrowed to
-              // {name, number}, never `draft.players` verbatim.
-              players: draft.players.map((p) => ({ name: p.name, number: p.number })),
+              // F-CL-3 identity preservation: a row id the read served is
+              // echoed back verbatim — stripping it would orphan the
+              // scouting identity on every edit. Rows without one send no
+              // `player_id` key at all (the server assigns/backfills it;
+              // the client never mints ids).
+              players: draft.players.map((p) => {
+                const row: { name: string; number: number | null; player_id?: string } = {
+                  name: p.name,
+                  number: p.number,
+                };
+                if (p.player_id) row.player_id = p.player_id;
+                return row;
+              }),
             }),
           });
         } catch {
@@ -1325,6 +1383,194 @@ class BiqOnboardApp extends HTMLElement {
           : { kind: 'unavailable', message: 'Respuesta de plantilla inválida' };
       },
     };
+  }
+
+  // ─── biq-player profiles (F-CL-3/PD-2: birth dates) ──────────────────
+  // Minors' personal data live in biq-player `player_profiles/{player_id}`,
+  // never on the team record or in `el.org`. The editor talks to
+  // `/api/player/v1/players/{id}/profile` directly with the onboard context
+  // actor token (`X-Biq-Module: onboard`; `player.profile.manage` is an
+  // onboard-registered action). Every failure is typed as "unavailable" —
+  // a profile that could not be read is unknown, never empty.
+
+  // Base URL of the biq-player service: the `player` module entry origin in
+  // the shell's /modules.json (same discovery the carcasa applies to
+  // remoteConfig). `playerApiBase` overrides it in tests/standalone.
+  private async _playerApiBase(): Promise<string | null> {
+    // Explicit override wins ('' = mismo origen — no confundir con "sin
+    // configurar": la cadena vacía es una base válida same-origin).
+    if (this.playerApiBase !== undefined) return this.playerApiBase;
+    if (this._playerApiBaseResolved !== undefined) return this._playerApiBaseResolved;
+    let resolved: string | null = null;
+    try {
+      const res = await fetch('/modules.json', { credentials: 'include', cache: 'no-store' });
+      const data = res.ok ? await res.json().catch(() => null) : null;
+      const mods = (data as { modules?: unknown[] } | null)?.modules;
+      const entry = (Array.isArray(mods) ? mods : [])
+        .find((m) => (m as { id?: unknown })?.id === 'player') as { entry?: unknown } | undefined;
+      if (entry && typeof entry.entry === 'string' && entry.entry) {
+        resolved = new URL(entry.entry, location.href).origin.replace(/\/$/, '');
+      }
+    } catch {
+      resolved = null; // discovery failure — profiles stay unavailable
+    }
+    this._playerApiBaseResolved = resolved;
+    return resolved;
+  }
+
+  private _playerHeaders(): Record<string, string> | null {
+    const token = this.remoteConfig?.token;
+    if (!token) return null;
+    return {
+      'Authorization': `Bearer ${token}`,
+      'X-Biq-Module': 'onboard',
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+    };
+  }
+
+  // null = unavailable/unknown — the profile is never treated as empty.
+  private async _fetchPlayerProfile(
+    teamId: string,
+    playerId: string,
+  ): Promise<{ birth_date: string; revision: number } | null> {
+    const headers = this._playerHeaders();
+    if (!headers) return null;
+    const base = await this._playerApiBase();
+    if (base === null) return null;
+    try {
+      const res = await fetch(
+        `${base}/api/player/v1/players/${encodeURIComponent(playerId)}/profile?team_id=${encodeURIComponent(teamId)}`,
+        { headers, cache: 'no-store' },
+      );
+      if (!res.ok) return null;
+      const data = await res.json().catch(() => null) as Record<string, unknown> | null;
+      if (!data || typeof data !== 'object') return null;
+      const rev = data.revision;
+      return {
+        birth_date: typeof data.birth_date === 'string' ? data.birth_date : '',
+        revision: typeof rev === 'number' && Number.isInteger(rev) ? rev : 0,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  // Persist one row's birth date via the profile API. Returns false on any
+  // failure (unconfigured service, transport, 4xx/5xx, CAS conflict) — the
+  // caller reports it as a pending change, never as saved.
+  private async _writePlayerBirthDate(
+    teamId: string,
+    playerId: string,
+    birthDate: string,
+  ): Promise<boolean> {
+    const headers = this._playerHeaders();
+    if (!headers) return false;
+    const base = await this._playerApiBase();
+    if (base === null) return false;
+    const path =
+      `${base}/api/player/v1/players/${encodeURIComponent(playerId)}/profile` +
+      `?team_id=${encodeURIComponent(teamId)}`;
+    try {
+      // Fresh read for the CAS revision — a stale expected_revision would
+      // conflict on every save after the first.
+      const current = await this._fetchPlayerProfile(teamId, playerId);
+      if (!current) return false;
+      if (current.birth_date === birthDate) {
+        this._playerProfiles[playerId] = current;
+        return true;
+      }
+      const res = await fetch(path, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({
+          birth_date: birthDate || null,
+          expected_revision: current.revision,
+        }),
+      });
+      if (!res.ok) return false;
+      const data = await res.json().catch(() => null) as Record<string, unknown> | null;
+      const rev = data?.revision;
+      this._playerProfiles[playerId] = {
+        birth_date: birthDate,
+        revision: typeof rev === 'number' && Number.isInteger(rev) ? rev : current.revision + 1,
+      };
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  // Lazily fills `birth_date` on draft rows that carry a player_id. Runs
+  // after the editor model lands (and after conflict/reconcile adoptions);
+  // stale generations and moved rows drop their result. A typed value is
+  // never overwritten — only untouched empty fields are filled.
+  private async _loadPlayerProfiles(teamId: string, seq: number): Promise<void> {
+    const rows = this._rosterDraft;
+    await Promise.all(rows.map(async (row, i) => {
+      if (!row.player_id) return;
+      const pid = row.player_id;
+      const profile = await this._fetchPlayerProfile(teamId, pid);
+      if (seq !== this._editSeq || this._editingTeamId !== teamId) return;
+      const live = this._rosterDraft[i];
+      if (!live || live.player_id !== pid) return;
+      if (!profile) return; // unknown stays unknown — never an empty fill
+      this._playerProfiles[pid] = profile;
+      live.birth_loaded = true;
+      if (!live.birth_dirty && !live.birth_date && profile.birth_date) {
+        live.birth_date = profile.birth_date;
+        const input = this.shadow.querySelector(
+          `[data-player-birth="${i}"]`,
+        ) as HTMLInputElement | null;
+        if (input) input.value = profile.birth_date;
+      }
+    }));
+  }
+
+  // Lazy fill for a just-linked player: reads her profile against the
+  // team she was linked FROM (the profile read is team-scoped in
+  // biq-player). A failure leaves the field unknown — never a write.
+  private async _fillLinkedBirthDate(playerId: string, fromTeamId: string): Promise<void> {
+    const profile = await this._fetchPlayerProfile(fromTeamId, playerId);
+    if (!profile) return;
+    this._playerProfiles[playerId] = profile;
+    const i = this._rosterDraft.findIndex((r) => r.player_id === playerId);
+    if (i < 0) return;
+    const row = this._rosterDraft[i];
+    row.birth_loaded = true;
+    if (!row.birth_dirty && !row.birth_date && profile.birth_date) {
+      row.birth_date = profile.birth_date;
+      const input = this.shadow.querySelector(
+        `[data-player-birth="${i}"]`,
+      ) as HTMLInputElement | null;
+      if (input) input.value = profile.birth_date;
+    }
+  }
+
+  // Post-save profile sync: writes every birth_date the user edited on
+  // rows that already hold a player_id (a fresh row adopts its id from the
+  // roster save that just landed). Returns the number of failed writes —
+  // they stay `birth_dirty` so the next pass retries them.
+  private async _syncPlayerBirthDates(
+    owner: { teamId: string | null; seq: number; fence: string },
+  ): Promise<number> {
+    const teamId = owner.teamId;
+    if (!teamId || !this._editModel || this._editModel.category === undefined) {
+      return 0; // personal rosters have no profile channel
+    }
+    let failed = 0;
+    for (const row of this._rosterDraft) {
+      if (!this._isEditOwner(owner)) return failed;
+      if (!row.player_id || !row.birth_dirty) continue;
+      const ok = await this._writePlayerBirthDate(teamId, row.player_id, row.birth_date.trim());
+      if (!this._isEditOwner(owner)) return failed;
+      if (ok) {
+        row.birth_dirty = false;
+      } else {
+        failed += 1;
+      }
+    }
+    return failed;
   }
 
   private async loadPersonalTeams(): Promise<void> {
@@ -2179,6 +2425,7 @@ class BiqOnboardApp extends HTMLElement {
     this._editGenderDraft = '';
     this._editLevelDraft = '';
     this._rosterDraft = [];
+    this._addPlayerPickerOpen = false;
     this._rosterFocus = rosterFocus;
     this._addingTeamCategory = null;
     this._deleteConfirmTeamId = null;
@@ -2235,9 +2482,18 @@ class BiqOnboardApp extends HTMLElement {
       this._rosterDraft = m.players.map((p) => ({
         name: p.name,
         number: p.number === null || p.number === undefined ? '' : String(p.number),
+        birth_date: '',
+        birth_loaded: false,
+        birth_dirty: false,
         existing: true,
         player_id: p.player_id ?? null,
       }));
+      // Club rosters: pull each player's profile (birth_date) from
+      // biq-player. Skipped for personal models (no category/gender
+      // contract → no profile anchor) and read-only views.
+      if (m.category !== undefined && m.permissions.edit) {
+        void this._loadPlayerProfiles(teamId, seq);
+      }
     } else {
       // Typed failure fails closed: no empty draft opens over a denied or
       // missing read — the intent closes and the host surfaces the error.
@@ -2291,7 +2547,7 @@ class BiqOnboardApp extends HTMLElement {
       const pname = p.name.trim();
       if (!pname) {
         // Fila nueva totalmente vacía — edición incompleta, espera.
-        if (!p.existing && !p.number.trim()) {
+        if (!p.existing && !p.number.trim() && !p.birth_date.trim()) {
           return { ok: false, message: 'Completa o quita la fila nueva del jugador.' };
         }
         // Fila persistida o con dorsal pero sin nombre — conserva al
@@ -2470,12 +2726,25 @@ class BiqOnboardApp extends HTMLElement {
         }
       }
       this._syncEditDraftFromDom();
+      // PD-2: birth dates persist through biq-player profiles keyed by
+      // player_id (the roster save just adopted any server-assigned ids;
+      // the DOM was just flushed so birth edits typed during the flight
+      // are included). A failed profile write stays dirty and reports
+      // honestly — never a silent loss nor a blocked roster save.
+      const birthFailures = await this._syncPlayerBirthDates(owner);
+      if (!this._isEditOwner(owner)) return;
       const now = this._editDraftPayload();
       const nowJson = now.ok ? this._editSnapshotJson(now) : null;
       if (nowJson === sentJson) {
-        this._editDirty = false;
-        this._editSaveStatus = 'saved';
-        this._editSaveMessage = null;
+        this._editDirty = birthFailures > 0;
+        if (birthFailures > 0) {
+          this._editSaveStatus = 'error';
+          this._editSaveMessage =
+            'La plantilla se guardó; no se pudieron guardar las fechas de nacimiento. Reintentar las vuelve a enviar.';
+        } else {
+          this._editSaveStatus = 'saved';
+          this._editSaveMessage = null;
+        }
       } else {
         // Hay ediciones posteriores — se encola el siguiente envío.
         this._editSaveStatus = 'pending';
@@ -2707,10 +2976,18 @@ class BiqOnboardApp extends HTMLElement {
       this._rosterDraft = server.players.map((p) => ({
         name: p.name,
         number: p.number === null || p.number === undefined ? '' : String(p.number),
+        birth_date: '',
+        birth_loaded: false,
+        birth_dirty: false,
         existing: true,
         player_id: p.player_id ?? null,
       }));
       this._paintRosterRows();
+      // Las fechas de nacimiento adoptadas son desconocidas — recarga los
+      // perfiles para la plantilla nueva.
+      if (this._editModel?.category !== undefined && this._editModel?.permissions.edit) {
+        void this._loadPlayerProfiles(this._editModel.id, this._editSeq);
+      }
     }
     if (serverWins.length) {
       this._editSaveMessage = 'Se incorporaron los cambios hechos en otro lugar.';
@@ -2718,6 +2995,26 @@ class BiqOnboardApp extends HTMLElement {
     this._editSaveStatus = 'pending';
     this._updateEditStatusDom();
     return 'resolved';
+  }
+
+  // Fila de plantilla del editor compartido. La fecha de nacimiento solo
+  // aparece en plantillas de club (model.category !== undefined): es dato
+  // de perfil (biq-player), anclado a player_id — los equipos personales
+  // no tienen ese canal.
+  private _rosterRowHtml(
+    p: RosterDraftRow,
+    i: number,
+    readOnly: boolean,
+    showBirth: boolean,
+  ): string {
+    const off = readOnly ? ' disabled' : '';
+    return `
+      <div class="onboard-roster-row" data-roster-row>
+        <input type="text" class="onboard-input onboard-input-sm" data-player-name="${i}" placeholder="Nombre y apellidos" aria-label="Nombre y apellidos del jugador" value="${escapeHtml(p.name)}"${off} />
+        <input type="text" class="onboard-input onboard-input-sm onboard-player-num" data-player-number="${i}" placeholder="Nº" aria-label="Dorsal" inputmode="numeric" maxlength="2" value="${escapeHtml(p.number)}"${off} />
+        ${showBirth ? `<input type="date" class="onboard-input onboard-input-sm onboard-player-birth" data-player-birth="${i}" aria-label="Fecha de nacimiento" value="${escapeHtml(p.birth_date)}"${off} />` : ''}
+        ${readOnly ? '' : `<button class="onboard-icon-btn onboard-icon-btn-danger" data-remove-player="${i}" type="button" title="Quitar jugador" aria-label="Quitar jugador"${off}>${ICON_TRASH}</button>`}
+      </div>`;
   }
 
   // Repinta solo las filas de plantilla tras adoptar el roster del
@@ -2729,13 +3026,10 @@ class BiqOnboardApp extends HTMLElement {
     const holder = modal?.querySelector('[data-edit-roster-rows]');
     if (!holder) return;
     const readOnly = !this._editModel?.permissions.edit;
-    const off = readOnly ? ' disabled' : '';
-    const rowsHtml = this._rosterDraft.map((p, i) => `
-      <div class="onboard-roster-row" data-roster-row>
-        <input type="text" class="onboard-input onboard-input-sm" data-player-name="${i}" placeholder="Nombre y apellidos" aria-label="Nombre y apellidos del jugador" value="${escapeHtml(p.name)}"${off} />
-        <input type="text" class="onboard-input onboard-input-sm onboard-player-num" data-player-number="${i}" placeholder="Nº" aria-label="Dorsal" inputmode="numeric" maxlength="2" value="${escapeHtml(p.number)}"${off} />
-        ${readOnly ? '' : `<button class="onboard-icon-btn onboard-icon-btn-danger" data-remove-player="${i}" type="button" title="Quitar jugador" aria-label="Quitar jugador"${off}>${ICON_TRASH}</button>`}
-      </div>`).join('');
+    const showBirth = !!this._editModel && this._editModel.category !== undefined;
+    const rowsHtml = this._rosterDraft
+      .map((p, i) => this._rosterRowHtml(p, i, readOnly, showBirth))
+      .join('');
     this._editDomFreeze = true;
     try {
       holder.innerHTML = rowsHtml ||
@@ -3026,6 +3320,7 @@ class BiqOnboardApp extends HTMLElement {
     this._editGenderDraft = '';
     this._editLevelDraft = '';
     this._rosterDraft = [];
+    this._addPlayerPickerOpen = false;
     this._rosterFocus = false;
     this._editError = null;
     if (this._editSaveTimer) {
@@ -3078,11 +3373,26 @@ class BiqOnboardApp extends HTMLElement {
     modal.querySelectorAll('[data-roster-row]').forEach((row, i) => {
       const pname = row.querySelector('[data-player-name]') as HTMLInputElement | null;
       const pnum = row.querySelector('[data-player-number]') as HTMLInputElement | null;
+      const pbirth = row.querySelector('[data-player-birth]') as HTMLInputElement | null;
       if (!this._rosterDraft[i]) {
-        this._rosterDraft[i] = { name: '', number: '', existing: false, player_id: null };
+        this._rosterDraft[i] = {
+          name: '', number: '', birth_date: '',
+          birth_loaded: false, birth_dirty: false,
+          existing: false, player_id: null,
+        };
       }
       this._rosterDraft[i].name = pname?.value ?? '';
       this._rosterDraft[i].number = pnum?.value ?? '';
+      // Solo existe el input en plantillas de club; un cambio respecto al
+      // valor cargado marca la fecha como editada por el usuario (es lo
+      // que la sincronización de perfiles escribe tras el save).
+      if (pbirth) {
+        const birth = pbirth.value;
+        if (birth !== this._rosterDraft[i].birth_date) {
+          this._rosterDraft[i].birth_dirty = true;
+        }
+        this._rosterDraft[i].birth_date = birth;
+      }
     });
   }
 
@@ -5452,12 +5762,14 @@ class BiqOnboardApp extends HTMLElement {
     // mientras guarda es el caso central; la cola serial lo ordena.
     const readOnly = !model.permissions.edit;
     const off = readOnly ? ' disabled' : '';
-    const rosterRows = this._rosterDraft.map((p, i) => `
-      <div class="onboard-roster-row" data-roster-row>
-        <input type="text" class="onboard-input onboard-input-sm" data-player-name="${i}" placeholder="Nombre y apellidos" aria-label="Nombre y apellidos del jugador" value="${escapeHtml(p.name)}"${off} />
-        <input type="text" class="onboard-input onboard-input-sm onboard-player-num" data-player-number="${i}" placeholder="Nº" aria-label="Dorsal" inputmode="numeric" maxlength="2" value="${escapeHtml(p.number)}"${off} />
-        ${readOnly ? '' : `<button class="onboard-icon-btn onboard-icon-btn-danger" data-remove-player="${i}" type="button" title="Quitar jugador" aria-label="Quitar jugador"${off}>${ICON_TRASH}</button>`}
-      </div>`).join('');
+    // Club teams only: the birth-date field is a biq-player profile field
+    // anchored on player_id, and the add-player offer links existing club
+    // players — personal rosters have neither channel.
+    const isClub = model.category !== undefined;
+    const showBirth = isClub;
+    const rosterRows = this._rosterDraft
+      .map((p, i) => this._rosterRowHtml(p, i, readOnly, showBirth))
+      .join('');
     return `<section class="onboard-section onboard-subscreen" data-edit-modal aria-labelledby="edit-team-title">
       <div class="onboard-subscreen-card">
         <h3 class="onboard-card-title" id="edit-team-title">${readOnly ? 'Equipo (solo lectura)' : 'Editar equipo'}</h3>
@@ -5480,6 +5792,7 @@ class BiqOnboardApp extends HTMLElement {
           <div class="onboard-roster-rows" data-edit-roster-rows>
             ${rosterRows || '<p class="onboard-card-desc onboard-roster-empty">Sin jugadores todavía — añade el primero con «Añadir jugador».</p>'}
           </div>
+          ${!readOnly && isClub && this._addPlayerPickerOpen ? this._addPlayerPickerHtml() : ''}
         </div>
         ${this._editError ? `<div class="onboard-error onboard-modal-error" role="alert">${escapeHtml(this._editError)}</div>` : ''}
         ${readOnly ? '' : `<div class="onboard-save-state">
@@ -5494,6 +5807,69 @@ class BiqOnboardApp extends HTMLElement {
         </div>
       </div>
     </section>`;
+  }
+
+  // ─── PD-2 «+ Añadir jugadora» offer ──────────────────────────────────
+  // Before creating a new row, the club editor offers to link an existing
+  // club player: same person appearing in another team's plantilla keeps
+  // her `player_id` (the server accepts same-club ids as a link, PD-2).
+  // Candidates come from the already-loaded club catalog (_teams, every
+  // team's roster); a player already in this draft is never offered twice.
+
+  private _clubPlayerCandidates(): {
+    player_id: string;
+    name: string;
+    number: number | null;
+    teamId: string;
+    teamName: string;
+    birth_date: string;
+  }[] {
+    const inDraft = new Set(
+      this._rosterDraft.map((r) => r.player_id).filter((p) => !!p) as string[],
+    );
+    const seen = new Set<string>();
+    const out: {
+      player_id: string;
+      name: string;
+      number: number | null;
+      teamId: string;
+      teamName: string;
+      birth_date: string;
+    }[] = [];
+    for (const t of this._teams) {
+      for (const p of t.players || []) {
+        const pid = p.player_id;
+        if (!pid || seen.has(pid) || inDraft.has(pid)) continue;
+        seen.add(pid);
+        out.push({
+          player_id: pid,
+          name: p.name,
+          number: p.number,
+          teamId: t.id,
+          teamName: t.name,
+          birth_date: this._playerProfiles[pid]?.birth_date || '',
+        });
+      }
+    }
+    return out;
+  }
+
+  private _addPlayerPickerHtml(): string {
+    const candidates = this._clubPlayerCandidates();
+    const list = candidates.length
+      ? `<div class="onboard-linkable-list">${candidates.map((c) => `
+          <button class="onboard-linkbtn onboard-linkable" data-link-player="${escapeHtml(c.player_id)}" type="button">
+            ${escapeHtml(c.name)}${c.number !== null ? ` · Nº ${c.number}` : ''} — ${escapeHtml(c.teamName)}${c.birth_date ? ` · ${escapeHtml(c.birth_date)}` : ''}
+          </button>`).join('')}</div>`
+      : '<p class="onboard-card-desc">No hay más jugadoras en las plantillas del club.</p>';
+    return `<div class="onboard-addplayer" data-add-player-picker>
+      <p class="onboard-card-desc">¿Ya figura en otra plantilla del club? Vincúlala para conservar su identidad de scouting.</p>
+      ${list}
+      <div class="onboard-team-actions">
+        <button class="onboard-btn onboard-btn-sm" data-add-new-player type="button">Nueva jugadora</button>
+        <button class="onboard-btn onboard-btn-sm onboard-btn-quiet" data-cancel-link type="button">Cancelar</button>
+      </div>
+    </div>`;
   }
 
   private renderProfile(): string {
@@ -5984,9 +6360,15 @@ class BiqOnboardApp extends HTMLElement {
       this._rosterDraft = server.players.map((p) => ({
         name: p.name,
         number: p.number === null || p.number === undefined ? '' : String(p.number),
+        birth_date: '',
+        birth_loaded: false,
+        birth_dirty: false,
         existing: true,
         player_id: p.player_id ?? null,
       }));
+      if (server.category !== undefined && server.permissions.edit) {
+        void this._loadPlayerProfiles(server.id, this._editSeq);
+      }
       this._editDirty = false;
       this._editSaveStatus = 'saved';
       this._editSaveMessage = 'Se cargó la versión actual del equipo.';
@@ -6001,7 +6383,15 @@ class BiqOnboardApp extends HTMLElement {
     if (addPlayerBtn) {
       addPlayerBtn.addEventListener('click', () => {
         this._syncEditDraftFromDom();
-        this._rosterDraft.push({ name: '', number: '', existing: false, player_id: null });
+        // Club rosters (PD-2): antes de crear una fila nueva se ofrece
+        // vincular una jugadora existente del club — conserva su
+        // player_id y, por tanto, su identidad de scouting.
+        if (this._editModel && this._editModel.category !== undefined) {
+          this._addPlayerPickerOpen = true;
+          this.render();
+          return;
+        }
+        this._rosterDraft.push({ name: '', number: '', birth_date: '', birth_loaded: false, birth_dirty: false, existing: false, player_id: null });
         this._rosterFocus = true;
         this.render();
         // La fila nueva vacía es un borrador incompleto — se marca
@@ -6009,6 +6399,45 @@ class BiqOnboardApp extends HTMLElement {
         this._scheduleEditorSave(false);
       });
     }
+    // PD-2 picker: «Nueva jugadora» crea la fila vacía como siempre;
+    // «Vincular jugadora existente» adopta su player_id (link mismo-club).
+    this.shadow.querySelector('[data-add-new-player]')?.addEventListener('click', () => {
+      this._syncEditDraftFromDom();
+      this._rosterDraft.push({ name: '', number: '', birth_date: '', birth_loaded: false, birth_dirty: false, existing: false, player_id: null });
+      this._addPlayerPickerOpen = false;
+      this._rosterFocus = true;
+      this.render();
+      this._scheduleEditorSave(false);
+    });
+    this.shadow.querySelector('[data-cancel-link]')?.addEventListener('click', () => {
+      this._addPlayerPickerOpen = false;
+      this.render();
+    });
+    this.shadow.querySelectorAll('[data-link-player]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        this._syncEditDraftFromDom();
+        const pid = (btn as HTMLElement).dataset.linkPlayer || '';
+        const c = this._clubPlayerCandidates().find((x) => x.player_id === pid);
+        if (!c) return; // ya vinculada o catálogo movido — nada que enlazar
+        this._rosterDraft.push({
+          name: c.name,
+          number: c.number === null || c.number === undefined ? '' : String(c.number),
+          birth_date: c.birth_date,
+          birth_loaded: !!this._playerProfiles[pid],
+          birth_dirty: false,
+          existing: false,
+          player_id: pid,
+        });
+        this._addPlayerPickerOpen = false;
+        this.render();
+        // El vínculo es un cambio real de plantilla — persiste ya.
+        this._scheduleEditorSave(true);
+        // Fecha de nacimiento de la jugadora vinculada: lectura perezosa
+        // contra su equipo de origen (puede quedar fuera del grant — la
+        // fila se queda sin fecha y nunca escribe a ciegas).
+        if (!c.birth_date) void this._fillLinkedBirthDate(pid, c.teamId);
+      });
+    });
     this.shadow.querySelectorAll('[data-remove-player]').forEach(btn => {
       btn.addEventListener('click', () => {
         this._syncEditDraftFromDom();
@@ -6025,7 +6454,7 @@ class BiqOnboardApp extends HTMLElement {
     if (modal && this._editModel?.permissions.edit) {
       const isField = (el: EventTarget | null) =>
         (el as HTMLElement | null)?.closest?.(
-          '[data-edit-team-name],[data-edit-team-level],[data-edit-team-category],[data-edit-team-gender],[data-player-name],[data-player-number]',
+          '[data-edit-team-name],[data-edit-team-level],[data-edit-team-category],[data-edit-team-gender],[data-player-name],[data-player-number],[data-player-birth]',
         ) !== null;
       modal.addEventListener('input', (e) => {
         if (isField(e.target)) this._scheduleEditorSave(false);

@@ -543,9 +543,12 @@ test('Plantilla: roster modal prefills players, add-row survives re-render, PUT 
   assert.equal(prefilled.p0num, '7');
   assert.ok(prefilled.editingRowGone, 'no inline editing row — edit lives in the modal');
 
-  // «Añadir jugador» appends a row; the prefilled values must survive the re-render.
+  // «Añadir jugador» opens the PD-2 link/new offer; «Nueva jugadora»
+  // appends a row — the prefilled values must survive both re-renders.
   await page.evaluate(() => {
-    document.getElementById('app').shadowRoot.querySelector('[data-add-player]').click();
+    const sr = document.getElementById('app').shadowRoot;
+    sr.querySelector('[data-add-player]').click();
+    sr.querySelector('[data-add-new-player]').click();
   });
   await page.waitForFunction(() => {
     return !!document.getElementById('app').shadowRoot.querySelector('[data-player-name="1"]');
@@ -607,7 +610,9 @@ test('Plantilla: a blank new row blocks autosave until explicitly removed (R1)',
   // surface pending feedback, never "Guardado".
   for (let i = 0; i < 2; i++) {
     await page.evaluate(() => {
-      document.getElementById('app').shadowRoot.querySelector('[data-add-player]').click();
+      const sr = document.getElementById('app').shadowRoot;
+      sr.querySelector('[data-add-player]').click();
+      sr.querySelector('[data-add-new-player]').click();
     });
     await page.waitForFunction((idx) => {
       return !!document.getElementById('app').shadowRoot.querySelector(`[data-player-name="${idx}"]`);

@@ -412,6 +412,9 @@ interface EntryIntent {
   team_id?: string;
   emitted: boolean;
   mutated: boolean;
+  /** Ticket de la pantalla única (T1) — inyectado por la carcasa; null
+   * si la carcasa no soporta el contrato o no hay productor. */
+  navTicket?: { id: string; close: () => boolean } | null;
 }
 
 // Recovery surfaces after an applied-or-uncertain mutation:
@@ -1698,6 +1701,10 @@ class BiqOnboardApp extends HTMLElement {
 
   private _invalidateEntryScope(): void {
     this._entryGen += 1;
+    // Invalidar el scope retira cualquier ticket no cedido aún.
+    try {
+      this._entryIntent?.navTicket?.close();
+    } catch { /* sin ticket */ }
     this._entryIntent = null;
     this._entryBusy = false;
     this._entryRecovery = null;
@@ -1738,6 +1745,27 @@ class BiqOnboardApp extends HTMLElement {
     this._entryBusy = true;
     this._entryError = null;
     this._entryRecovery = null;
+    // Pantalla única de transición (T1): la carcasa cubre el selector
+    // desde la admisión del gesto hasta que Inicio acredita readiness.
+    // Null = carcasa antigua o sin productor — el flujo legacy no cambia.
+    try {
+      intent.navTicket =
+        (
+          this as unknown as {
+            navBegin?: (spec: unknown) => { id: string; close: () => boolean } | null;
+          }
+        ).navBegin?.({
+          journey: 't1',
+          target: {
+            module: 'home',
+            kind,
+            club_id: extra.club_id,
+            team_id: extra.team_id,
+          },
+        }) ?? null;
+    } catch {
+      intent.navTicket = null;
+    }
     // An entry mutation dismisses the club picker — a failure surfaces on
     // the main screen where the error and recovery affordances live.
     this._clubPickerOpen = false;
@@ -1856,6 +1884,9 @@ class BiqOnboardApp extends HTMLElement {
       } catch (err) {
         if (!this._intentCurrent(intent)) return; // stale: release/recover nothing
         this._finishEntryIntent(intent);
+        // La entrada falló: la pantalla de transición se retira y el
+        // selector muestra su error/recuperación honesta.
+        intent.navTicket?.close();
         // The resync clears entry state — recovery/error are set AFTER it
         // so they survive the refresh.
         if (err instanceof EntryNarrowingFailure) {

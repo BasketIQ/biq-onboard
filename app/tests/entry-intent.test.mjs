@@ -243,7 +243,7 @@ test('double click → exactly 1 activate POST and 1 event', async () => {
 test('success → exactly 1 biq-context:activated and busy stays «Entrando…»', async () => {
   const browser = await chromium.launch();
   try {
-    // No coached teams → non-coach member → «Mi club» access renders (PD-ENTRY).
+    // «Mi club» always renders (Director 2026-10-24) — club access available.
     const { page, events } = await newIntentPage(browser, { personalTeams: [] });
     await page.waitForFunction(() =>
       !!document.getElementById('app').shadowRoot.querySelector('[data-entry-club-activate]'),

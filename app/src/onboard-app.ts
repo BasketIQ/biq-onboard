@@ -509,13 +509,11 @@ const PERSONAL_CATEGORIES: Array<{ key: string; label: string }> = [
 ];
 
 // ─── Entry screen v1 (entry-login lot, 2026-10-23) ─────────────────────
-// PD-ENTRY (Director 2026-10-23): «Mi equipo» shows the teams the user
-// coaches; «Mi club» is not shown to a coach. The coached universe the
-// entry screen can attest is the personal-teams feed (the bootstrap
-// carries no per-club role or coached-team catalog — README §PD-ENTRY);
-// a confirmed coach (feed loaded, ≥1 active coached team) sees only
-// «Mi equipo». Until the feed resolves, or if it cannot, the club block
-// stays visible — hiding it would strand memberships we cannot disprove.
+// «Mi equipo» shows the teams the user coaches (the personal-teams feed —
+// the bootstrap carries no per-club role or coached-team catalog,
+// README §PD-ENTRY). «Mi club» is ALWAYS shown (Director 2026-10-24,
+// superseding the 2026-10-23 PD-ENTRY coach-hiding): a user with no club
+// gets the «Crear club» action whenever the server allows `club.create`.
 // The «Entrenador» chip describes the coach space itself; the club block
 // carries NO role chip because the feed cannot attest «Director
 // deportivo» for every membership (PD-CLUBS: no role on club access).
@@ -4220,15 +4218,9 @@ class BiqOnboardApp extends HTMLElement {
 
     const personalTeams = (this._personalTeams || []).filter((t) => !t.archived);
     const archivedTeams = (this._personalTeams || []).filter((t) => t.archived);
-    // PD-ENTRY: «Mi club» is not shown to a coach. A coach is CONFIRMED
-    // only by a loaded feed with ≥1 active coached team — while the feed
-    // is loading or after a bounded error the club block stays up (the
-    // honest fallback: hiding it would strand memberships on a feed
-    // failure).
-    const isCoach =
-      this._personalReadAllowed() &&
-      this._personalTeamsStatus === 'ready' &&
-      personalTeams.length > 0;
+    // Director 2026-10-24 (bugfix-auth-club-roster, bug 2): «Mi club» is
+    // ALWAYS shown — the PD-ENTRY coach-hiding gate is removed; with no
+    // clubs the block offers «Crear club».
     const atTeamCap = personalTeams.length >= 2;
     const teamMeta = (t: PersonalTeamRow) =>
       `${escapeHtml(t.category_label || t.category_key)}${t.gender && t.gender !== 'X' ? ` · ${escapeHtml(t.gender)}` : ''}${t.age_band ? ` · ${escapeHtml(t.age_band)}` : ''}`;
@@ -4286,8 +4278,8 @@ class BiqOnboardApp extends HTMLElement {
       </section>`;
 
     // Emailed invites are an explicit join gesture, not part of the club
-    // membership universe — they stay reachable even when the club block
-    // is hidden for a coach (PD-ENTRY).
+    // membership universe — they stay reachable regardless of the club
+    // block content.
     const inviteBlock = this._invitePreview ? `
       <div class="entry-invite">
         <p>Invitación para <strong>${escapeHtml(this._invitePreview.club_name || this._invitePreview.club_id)}</strong></p>
@@ -4377,7 +4369,7 @@ class BiqOnboardApp extends HTMLElement {
             </ul>`
       : `<p class="entry-empty">No tienes clubes todavía.</p>`;
 
-    const clubBlock = isCoach ? '' : `
+    const clubBlock = `
       <section class="entry-block" aria-labelledby="entry-club-heading">
         <div class="entry-block-head">
           <h2 class="entry-block-title" id="entry-club-heading">Mi club</h2>

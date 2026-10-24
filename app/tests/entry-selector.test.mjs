@@ -671,9 +671,11 @@ test('≥3 clubs: a successful club entry stores the account-bound reciente mark
   }
 });
 
-// ─── PD-ENTRY: «Mi club» is not shown to a coach ────────────────────────
+// ─── «Mi club» always renders (Director 2026-10-24 — supersedes the
+// PD-ENTRY 2026-10-23 coach-hiding): with no clubs the block offers
+// «Crear club»; membership never depends on the personal-teams feed ────
 
-test('PD-ENTRY: a confirmed coach sees «Mi equipo» only — «Mi club» is hidden', async () => {
+test('«Mi club» always renders: a user with personal teams and clubs sees both blocks', async () => {
   const browser = await chromium.launch();
   try {
     const { page } = await newEntryPage(browser, {
@@ -689,16 +691,42 @@ test('PD-ENTRY: a confirmed coach sees «Mi equipo» only — «Mi club» is hid
         teamCards: el.shadowRoot.querySelectorAll('[data-entry-personal-enter-team]').length,
       };
     });
-    assert.deepEqual(state.blocks, ['Mi equipo'], 'only the coached space renders');
-    assert.equal(state.clubCards, 0, 'no club access at all');
-    assert.equal(state.crearClub, false, 'club creation hides with the block');
+    assert.deepEqual(state.blocks, ['Mi equipo', 'Mi club'], 'coach and club spaces render together');
+    assert.equal(state.clubCards, 2, 'both club cards render');
+    assert.equal(state.crearClub, true, 'club creation stays reachable');
     assert.equal(state.teamCards, 1);
   } finally {
     await browser.close();
   }
 });
 
-test('PD-ENTRY: archived-only owner is not a coach — «Mi club» stays visible', async () => {
+// Bug 2 regression (2026-10-24-bugfix-auth-club-roster): the exact case the
+// Director reported — a user with a personal team and NO club must see
+// «Mi club» with the «Crear club» action.
+test('a personal-team user with no club sees «Mi club» + «Crear club»', async () => {
+  const browser = await chromium.launch();
+  try {
+    const { page } = await newEntryPage(browser, {
+      bootstrap: { ...BOOTSTRAP, contexts: [] },
+      personalTeams: [TEAM('pt-1', 'Paquetillos 1')],
+    });
+    const state = await page.evaluate(() => {
+      const el = document.getElementById('app');
+      return {
+        blocks: [...el.shadowRoot.querySelectorAll('.entry-block-title')].map((b) => b.textContent.trim()),
+        crearClub: !!el.shadowRoot.querySelector('[data-entry-club-create-toggle]'),
+        teamCards: el.shadowRoot.querySelectorAll('[data-entry-personal-enter-team]').length,
+      };
+    });
+    assert.deepEqual(state.blocks, ['Mi equipo', 'Mi club'], 'Mi club renders with no clubs');
+    assert.equal(state.crearClub, true, '«Crear club» is offered when the user has none');
+    assert.equal(state.teamCards, 1);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('archived-only owner — «Mi club» stays visible', async () => {
   const browser = await chromium.launch();
   try {
     const { page } = await newEntryPage(browser, {
@@ -708,13 +736,13 @@ test('PD-ENTRY: archived-only owner is not a coach — «Mi club» stays visible
     const blocks = await page.evaluate(() =>
       [...document.getElementById('app').shadowRoot.querySelectorAll('.entry-block-title')]
         .map((b) => b.textContent.trim()));
-    assert.deepEqual(blocks, ['Mi equipo', 'Mi club'], 'archived teams do not make a coach');
+    assert.deepEqual(blocks, ['Mi equipo', 'Mi club']);
   } finally {
     await browser.close();
   }
 });
 
-test('PD-ENTRY: a failed team feed cannot confirm the coach — «Mi club» stays reachable (honest fallback)', async () => {
+test('a failed team feed keeps «Mi club» reachable', async () => {
   const browser = await chromium.launch();
   try {
     const { page } = await newEntryPage(browser, {
@@ -738,7 +766,7 @@ test('PD-ENTRY: a failed team feed cannot confirm the coach — «Mi club» stay
   }
 });
 
-test('PD-ENTRY: a coach still sees an emailed invite — redemption is not part of the club block', async () => {
+test('a coach still sees an emailed invite — redemption is not part of the club block', async () => {
   const browser = await chromium.launch();
   try {
     const { page } = await newEntryPage(browser, {
@@ -757,7 +785,7 @@ test('PD-ENTRY: a coach still sees an emailed invite — redemption is not part 
       };
     });
     assert.ok(state.invite.includes('Club Invitado'), 'the invite preview renders for a coach');
-    assert.deepEqual(state.blocks, ['Mi equipo']);
+    assert.deepEqual(state.blocks, ['Mi equipo', 'Mi club']);
   } finally {
     await browser.close();
   }

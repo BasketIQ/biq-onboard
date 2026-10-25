@@ -583,6 +583,14 @@ class BiqOnboardApp extends HTMLElement {
   // `onboard`; biq-player la acepta con la cabecera `X-Biq-Module:
   // onboard` (`player.profile.manage` está registrada para onboard).
   declare remoteConfig: { baseUrl?: string; token?: string } | undefined;
+  // `el.navReady` (pantalla de transición unificada, misión
+  // 2026-10-24-unified-transition-screen): la carcasa lo inyecta al
+  // montar; el módulo lo invoca UNA vez por destino cuando los datos
+  // esenciales de la sub-ruta alcanzan un estado terminal renderizado.
+  // Best-effort — sin carcasa/ticket la llamada es no-op.
+  declare navReady?: (result: {
+    state: 'content' | 'empty' | 'degraded' | 'blocked' | 'error';
+  }) => unknown;
   // Test seam: base URL explícita del servicio biq-player (saltándose el
   // descubrimiento por /modules.json). '' = mismo origen.
   declare playerApiBase: string | undefined;
@@ -627,6 +635,12 @@ class BiqOnboardApp extends HTMLElement {
   private _entryConfirmTimer: ReturnType<typeof setTimeout> | null = null;
   private _entryConfirmMs = 15000;
   private _subRoute = '';
+  // navReady: último destino acreditado (`<subRoute>:<clubId>`) — una
+  // señal por destino; entrar en otra pestaña habilita una emisión nueva.
+  private _navReadySent = '';
+  // Club cuya primera carga de tema ya resolvió — la reentrada en
+  // caliente a Estilo/landing acredita sin esperar un refetch inexistente.
+  private _themeReadyClub = '';
   private _theme: ClubTheme | null = null;
   private _themeJob: ThemeJob | null = null;
   private _loading = false;
@@ -1616,6 +1630,7 @@ class BiqOnboardApp extends HTMLElement {
         this._maybeOpenPendingPersonalEdit();
         this._maybeOpenPendingEdit();
         this.render();
+        this._maybeTeamsNavReady();
       }
     }
   }
@@ -2100,6 +2115,10 @@ class BiqOnboardApp extends HTMLElement {
     // en el setter): la confirmación a la carcasa va tras aplicar — nunca
     // antes; su bookkeeping sigue la ruta realmente vigente.
     this._reportAppliedRoute();
+    // Reentrada en caliente: si los datos esenciales de la pestaña ya
+    // estaban cargados, el destino acredita ahora — las cargas que sí se
+    // dispararon emitirán en su finally.
+    this._navReadyNow();
   }
   get route(): string { return this._subRoute; }
 
@@ -2144,6 +2163,14 @@ class BiqOnboardApp extends HTMLElement {
       this._error = (err as Error).message;
     } finally {
       this.render();
+      // Primera resolución del tema para este club — habilita la
+      // acreditación inmediata en reentradas; la señal solo sale si el
+      // destino vigente es Estilo/landing (transición unificada).
+      this._themeReadyClub = clubId;
+      const sub = this._subRoute;
+      if (sub === '' || sub === 'club-details') {
+        this._emitNavReady(this._error ? 'error' : 'content', sub, clubId);
+      }
     }
   }
 
@@ -2164,6 +2191,7 @@ class BiqOnboardApp extends HTMLElement {
     } finally {
       this._clubSummaryLoading = false;
       this.render();
+      this._maybeProfileNavReady(clubId);
     }
   }
 
@@ -2189,6 +2217,9 @@ class BiqOnboardApp extends HTMLElement {
       }
       this.render();
     }
+    // Click de pestaña con datos ya presentes: acredita en caliente (una
+    // señal por destino — la de 'spaces' es del flujo de entrada).
+    this._navReadyNow();
   }
 
   // Mi Club Phase 4: roster is loaded on first entry and retried after a
@@ -2273,6 +2304,7 @@ class BiqOnboardApp extends HTMLElement {
       if (requestId === this._membersRequestId) {
         this._membersLoading = false;
         this.render();
+        this._maybeMembersNavReady(clubId);
       }
     }
   }
@@ -2325,6 +2357,7 @@ class BiqOnboardApp extends HTMLElement {
       this._myTeamsLoading = false;
       this.render();
       this._maybeOpenPendingEdit();
+      this._maybeTeamsNavReady();
     }
   }
 
@@ -2436,6 +2469,7 @@ class BiqOnboardApp extends HTMLElement {
       this._teamsLoading = false;
       this.render();
       this._maybeOpenPendingEdit();
+      this._maybeTeamsNavReady(clubId);
     }
   }
 
@@ -3249,6 +3283,110 @@ class BiqOnboardApp extends HTMLElement {
     } catch { /* sin carcasa escuchando — standalone */ }
   }
 
+  // ─── navReady — acreditación de destino (transición unificada) ────────
+
+  // Una señal por destino (`<subRoute>:<clubId>`): solo acredita si el
+  // destino y el club siguen vigentes — una respuesta tardía de otra
+  // pestaña o de otro club nunca cierra el ticket del actual.
+  private _emitNavReady(
+    state: 'content' | 'empty' | 'degraded' | 'blocked' | 'error',
+    dest: string = this._subRoute,
+    clubId: string = this._org?.club?.id ?? '',
+  ): void {
+    if (dest !== this._subRoute) return;
+    if (clubId !== (this._org?.club?.id ?? '')) return;
+    const key = `${dest}:${clubId}`;
+    if (this._navReadySent === key) return;
+    this._navReadySent = key;
+    try {
+      this.navReady?.({ state });
+    } catch { /* sin carcasa o contrato ausente — no-op */ }
+  }
+
+  // Reentrada en caliente (route aplicada por la carcasa o click de
+  // pestaña con datos ya cargados): la acreditación es inmediata — el
+  // destino no espera cargas que los _ensure*/load* no van a disparar.
+  // Las cargas que sí se disparan emiten en su finally con la misma
+  // marca (una señal por destino). 'spaces' no emite: su journey usa el
+  // ticket propio del flujo de entrada.
+  private _navReadyNow(): void {
+    const sub = this._subRoute;
+    if (sub === 'teams') {
+      this._maybeTeamsNavReady();
+    } else if (sub === 'members') {
+      this._maybeMembersNavReady();
+    } else if (sub === 'profile') {
+      this._maybeProfileNavReady();
+    } else if (sub === '' || sub === 'club-details') {
+      const clubId = this._org?.club?.id ?? '';
+      // Sin club el 'blocked' lo emite render(); con club, el finally de
+      // loadThemeData acredita salvo que la carga ya resolviera (warm).
+      if (clubId && this._themeReadyClub === clubId) {
+        this._emitNavReady(this._error ? 'error' : 'content');
+      }
+    }
+  }
+
+  private _maybeTeamsNavReady(clubId?: string): void {
+    if (this._subRoute !== 'teams') return;
+    const cid = clubId ?? this._org?.club?.id ?? '';
+    if (this._isPersonalContext()) {
+      // Contexto personal: la pestaña Equipos es el panel «Mi equipo» —
+      // su dato esencial es el feed de equipos personales.
+      if (this._personalTeamsStatus === 'ready') {
+        this._emitNavReady(
+          (this._personalTeams?.length ?? 0) > 0 ? 'content' : 'empty',
+          'teams', cid,
+        );
+      } else if (this._personalTeamsStatus === 'error') {
+        this._emitNavReady('error', 'teams', cid);
+      }
+      return;
+    }
+    if (!cid || this._myTeamsLoading || this._teamsLoading) return;
+    if (this._myTeamsError) {
+      this._emitNavReady('error', 'teams', cid);
+      return;
+    }
+    // Feed de gestión caído pero selección servida — superficie parcial.
+    if (this._canManageTeams() && this._teamsError) {
+      this._emitNavReady('degraded', 'teams', cid);
+      return;
+    }
+    // Sin el feed autogestionado confirmado aún no hay estado terminal.
+    if (!this._myTeamsLoaded) return;
+    const rows = this._canManageTeams() ? this._teams.length : this._myTeamsCatalog.length;
+    this._emitNavReady(rows > 0 ? 'content' : 'empty', 'teams', cid);
+  }
+
+  private _maybeMembersNavReady(clubId?: string): void {
+    if (this._subRoute !== 'members') return;
+    const cid = clubId ?? this._org?.club?.id ?? '';
+    if (!cid || this._membersLoading) return;
+    if (!this._canManageMembers()) {
+      this._emitNavReady('blocked', 'members', cid);
+      return;
+    }
+    if (this._membersError) {
+      this._emitNavReady('error', 'members', cid);
+      return;
+    }
+    if (this._members === null) return; // aún no cargó — el finally emite
+    this._emitNavReady(this._members.length > 0 ? 'content' : 'empty', 'members', cid);
+  }
+
+  private _maybeProfileNavReady(clubId?: string): void {
+    if (this._subRoute !== 'profile') return;
+    const cid = clubId ?? this._org?.club?.id ?? '';
+    if (!cid || this._clubSummaryLoading) return;
+    if (this._clubSummaryError) {
+      this._emitNavReady('error', 'profile', cid);
+      return;
+    }
+    if (!this._clubSummary) return;
+    this._emitNavReady('content', 'profile', cid);
+  }
+
   // Salida voluntaria del editor (Volver / flecha de sección): vacía la
   // cola y solo entonces cierra; con fallo el editor queda visible. La
   // misma propiedad de dueño: una continuación vieja no cierra el editor
@@ -3579,6 +3717,7 @@ class BiqOnboardApp extends HTMLElement {
       history.replaceState(null, '', '#/onboard');
       this._reportAppliedRoute();
     }
+    this._navReadyNow();
   }
 
   // F12: Mirror of _maybeStartPolling for the seeding job — same 3s initial
@@ -4128,6 +4267,10 @@ class BiqOnboardApp extends HTMLElement {
         this._paint(`<style>${styles}</style>
           <div class="onboard-app onboard-clubstep">${this.renderEntryStep()}</div>`);
         this.wireEntryEvents();
+        // Sin club resuelto el destino Mi club queda bloqueado — estado
+        // terminal honesto (la autoridad la aporta la entrada, no este
+        // módulo); las pintas «Cargando…» no emiten: no son terminales.
+        this._emitNavReady('blocked');
         return;
       }
       if (!this._bootstrapFailed) {
@@ -4141,6 +4284,7 @@ class BiqOnboardApp extends HTMLElement {
       this._paint(`<style>${styles}</style>
         <div class="onboard-app onboard-clubstep">${this.renderClubStep()}</div>`);
       this.wireClubStepEvents();
+      this._emitNavReady('blocked');
       return;
     }
 

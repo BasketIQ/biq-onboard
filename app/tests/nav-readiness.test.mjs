@@ -174,3 +174,123 @@ test('club-details: un fallo del feed del tema acredita error una vez', async ()
     await browser.close();
   }
 });
+
+// ── spaces: el selector también es productor (back/historia, «Cambiar de
+// espacio») — una emisión por scope de entrada; nunca con un intent en
+// vuelo, porque ese ticket pertenece al T1 → home.
+
+const BOOT_PERSONAL = {
+  schema_version: '1.0', state: 'ready', account_id: 'acc_1', identity_verified: true,
+  contexts: [], active: null, entry_actions: {},
+};
+
+/** Página con los endpoints del flujo de entrada controlados. */
+async function newSpacesPage(browser, { bootstrapStatus = 200, bootstrap = BOOT_PERSONAL, holdTeams = false } = {}) {
+  const page = await browser.newPage();
+  let releaseTeams = null;
+  const teamsGate = holdTeams ? new Promise((r) => { releaseTeams = r; }) : Promise.resolve();
+  if (holdTeams) await page.exposeFunction('__releaseTeams', () => releaseTeams());
+  await page.route('**/api/**', async (route) => {
+    const u = route.request().url();
+    if (u.includes('/api/context/v1/bootstrap')) {
+      await route.fulfill({ status: bootstrapStatus, contentType: 'application/json', body: JSON.stringify(bootstrap) });
+      return;
+    }
+    if (u.includes('/api/context/v1/personal-teams')) {
+      await teamsGate;
+      await route.fulfill({
+        status: 200, contentType: 'application/json',
+        body: JSON.stringify({ teams: [{
+          team_id: 'pt1', name: 'Cadete Verde', role: 'coach', archived: false, team_revision: 1,
+          category_key: 'cadete', category_label: 'Cadete', age_band: 'U15', gender: 'mixed',
+          section_applicability: 'both', timezone: 'Europe/Madrid', season: '2026',
+        }] }),
+      });
+      return;
+    }
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true }) });
+  });
+  await page.goto(`http://localhost:${PORT}/`);
+  await page.waitForSelector('biq-onboard-app', { state: 'attached' });
+  await page.evaluate(() => customElements.whenDefined('biq-onboard-app'));
+  await page.evaluate(() => {
+    window.__nav = [];
+    document.getElementById('app').navReady = (r) => { window.__nav.push(r); return true; };
+  });
+  const nav = () => page.evaluate(() => window.__nav);
+  return { page, nav };
+}
+
+test('spaces: el selector acredita content tras el resync y vuelve a emitir en cada scope', async () => {
+  const browser = await chromium.launch();
+  try {
+    const { page, nav } = await newSpacesPage(browser);
+    // Contexto inyectado por la carcasa (scope personal) antes de entrar.
+    await page.evaluate(() => { document.getElementById('app').context = { owner_scope: { kind: 'personal', workspace_id: 'ws1' } }; });
+    await page.evaluate(() => { document.getElementById('app').route = 'spaces'; });
+    await page.waitForFunction(() => window.__nav.length === 1, null, { timeout: 10000 });
+    assert.deepEqual(await nav(), [{ state: 'content' }]);
+
+    // Salir y volver: el resync abre un scope nuevo → segunda emisión.
+    await page.evaluate(() => { document.getElementById('app').route = 'profile'; });
+    await page.evaluate(() => { document.getElementById('app').route = 'spaces'; });
+    await page.waitForFunction(() => window.__nav.length === 2, null, { timeout: 10000 });
+    assert.deepEqual(await nav(), [{ state: 'content' }, { state: 'content' }]);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('spaces: sin autoridad de contexto (bootstrap fallido) acredita blocked — la vista legacy', async () => {
+  const browser = await chromium.launch();
+  try {
+    const { page, nav } = await newSpacesPage(browser, { bootstrapStatus: 500 });
+    await page.evaluate(() => { document.getElementById('app').route = 'spaces'; });
+    await page.waitForFunction(() => window.__nav.length === 1, null, { timeout: 10000 });
+    assert.deepEqual(await nav(), [{ state: 'blocked' }]);
+    await page.waitForTimeout(300);
+    assert.equal((await nav()).length, 1, 'una señal por scope');
+  } finally {
+    await browser.close();
+  }
+});
+
+test('spaces: nunca emite con un intent de entrada en vuelo (el ticket es de home)', async () => {
+  const browser = await chromium.launch();
+  try {
+    const { page, nav } = await newSpacesPage(browser, { holdTeams: true });
+    await page.evaluate(() => { document.getElementById('app').context = { owner_scope: { kind: 'personal', workspace_id: 'ws1' } }; });
+    await page.evaluate(() => { document.getElementById('app').route = 'spaces'; });
+    // Bootstrap resuelto; el feed de equipos queda retenido por la puerta.
+    await page.waitForFunction(() => {
+      const el = document.getElementById('app');
+      return el && el.shadowRoot && el.shadowRoot.querySelector('.entry-loading');
+    }, null, { timeout: 10000 });
+    // Gesto de entrada admitido: intent en vuelo ANTES de que asiente el feed.
+    await page.evaluate(() => { document.getElementById('app')._beginEntryIntent('personal_team', { team_id: 'pt1' }); });
+    await page.evaluate(() => window.__releaseTeams());
+    await page.waitForTimeout(500);
+    assert.equal((await nav()).length, 0, 'el feed asentó pero el intent en vuelo veta la emisión');
+  } finally {
+    await browser.close();
+  }
+});
+
+test('spaces: con un club activo (contexto club) el selector también acredita — el guard de club no lo veta', async () => {
+  const browser = await chromium.launch();
+  try {
+    const { page, nav } = await newSpacesPage(browser);
+    // Org con club inyectada como en la carcasa real — pre-fix el guard
+    // `clubId !== org.club.id` rechazaba siempre la emisión de 'spaces'.
+    await page.evaluate((org) => { document.getElementById('app').org = org; }, ORG);
+    // La landing ('') acredita primero con su destino propio.
+    await page.waitForFunction(() => window.__nav.length === 1, null, { timeout: 10000 });
+    assert.deepEqual(await nav(), [{ state: 'content' }]);
+    await page.evaluate(() => { document.getElementById('app').route = 'spaces'; });
+    await page.waitForFunction(() => window.__nav.length === 2, null, { timeout: 10000 });
+    assert.deepEqual(await nav(), [{ state: 'content' }, { state: 'content' }],
+      'spaces emite aunque org.club esté poblado — su identidad es el scope, no el club');
+  } finally {
+    await browser.close();
+  }
+});

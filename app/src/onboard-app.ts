@@ -1028,6 +1028,7 @@ class BiqOnboardApp extends HTMLElement {
       if (current()) {
         this._bootstrapLoading = false;
         this.render();
+        this._maybeSpacesNavReady();
       }
     }
   }
@@ -1631,6 +1632,7 @@ class BiqOnboardApp extends HTMLElement {
         this._maybeOpenPendingEdit();
         this.render();
         this._maybeTeamsNavReady();
+        this._maybeSpacesNavReady();
       }
     }
   }
@@ -2218,7 +2220,7 @@ class BiqOnboardApp extends HTMLElement {
       this.render();
     }
     // Click de pestaña con datos ya presentes: acredita en caliente (una
-    // señal por destino — la de 'spaces' es del flujo de entrada).
+    // señal por destino — 'spaces' acredita al asentar el resync).
     this._navReadyNow();
   }
 
@@ -3294,8 +3296,11 @@ class BiqOnboardApp extends HTMLElement {
     clubId: string = this._org?.club?.id ?? '',
   ): void {
     if (dest !== this._subRoute) return;
-    if (clubId !== (this._org?.club?.id ?? '')) return;
-    const key = `${dest}:${clubId}`;
+    // El selector no tiene club: su identidad de destino es el scope de
+    // entrada (`_entryGen`) — cada resync/reentrada es un destino nuevo y
+    // el guard de club no aplica (un club activo nunca puede vetarlo).
+    if (dest !== 'spaces' && clubId !== (this._org?.club?.id ?? '')) return;
+    const key = dest === 'spaces' ? `spaces:${this._entryGen}` : `${dest}:${clubId}`;
     if (this._navReadySent === key) return;
     this._navReadySent = key;
     try {
@@ -3307,11 +3312,13 @@ class BiqOnboardApp extends HTMLElement {
   // pestaña con datos ya cargados): la acreditación es inmediata — el
   // destino no espera cargas que los _ensure*/load* no van a disparar.
   // Las cargas que sí se disparan emiten en su finally con la misma
-  // marca (una señal por destino). 'spaces' no emite: su journey usa el
-  // ticket propio del flujo de entrada.
+  // marca (una señal por destino). 'spaces' también emite — una vez por
+  // scope de entrada, nunca con un intent en vuelo (ese ticket es de home).
   private _navReadyNow(): void {
     const sub = this._subRoute;
-    if (sub === 'teams') {
+    if (sub === 'spaces') {
+      this._maybeSpacesNavReady();
+    } else if (sub === 'teams') {
       this._maybeTeamsNavReady();
     } else if (sub === 'members') {
       this._maybeMembersNavReady();
@@ -3385,6 +3392,41 @@ class BiqOnboardApp extends HTMLElement {
     }
     if (!this._clubSummary) return;
     this._emitNavReady('content', 'profile', cid);
+  }
+
+  // Selector de espacios (T1 origen, ahora también destino de
+  // back/historia y gestos «Cambiar de espacio»): emite cuando la
+  // pantalla es terminal — bootstrap resuelto y, en scope personal, el
+  // feed de equipos asentado. NUNCA con un intent de entrada en vuelo:
+  // ese ticket pertenece al flujo T1 → home.
+  private _maybeSpacesNavReady(): void {
+    if (this._subRoute !== 'spaces') return;
+    if (this._entryIntent) return;
+    if (this._bootstrapLoading) return; // los finally emiten al resolver
+    if (this._bootstrapFailed) {
+      this._emitNavReady('error', 'spaces', '');
+      return;
+    }
+    if (!this._bootstrap) return; // la carga aún no arrancó — render la dispara
+    if (this._isPersonalContext()) {
+      if (!this._personalReadAllowed()) {
+        // Sesión sin autoridad personal (R1): la superficie terminal es el
+        // aviso de elevación, no tarjetas.
+        this._emitNavReady('blocked', 'spaces', '');
+        return;
+      }
+      if (this._personalTeamsStatus === 'uninitialized') {
+        // El resync resetea el feed — dispara la carga; su finally emite.
+        this.loadPersonalTeams();
+        return;
+      }
+      if (this._personalTeamsStatus === 'loading') return;
+      if (this._personalTeamsStatus === 'error') {
+        this._emitNavReady('error', 'spaces', '');
+        return;
+      }
+    }
+    this._emitNavReady('content', 'spaces', '');
   }
 
   // Salida voluntaria del editor (Volver / flecha de sección): vacía la

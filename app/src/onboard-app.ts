@@ -1846,6 +1846,13 @@ class BiqOnboardApp extends HTMLElement {
 
   private _emitActivated(intent: EntryIntent): void {
     intent.emitted = true;
+    // El ticket pasa a la carcasa: una vez emitida la activación, el
+    // desmontaje de este elemento no debe cerrar la pantalla de
+    // transición — la cierra el productor destino (navReady) o la propia
+    // carcasa. Seguimos guardando la referencia solo para el camino de
+    // recuperación «No se pudo confirmar la entrada».
+    const ceded = intent.navTicket ?? null;
+    intent.navTicket = null;
     // PD-CLUBS «Club reciente»: a successful club entry is the datum that
     // feeds the main access on the next visit — stored per account, only
     // ever honored while the club still appears in the entry feed.
@@ -1869,6 +1876,12 @@ class BiqOnboardApp extends HTMLElement {
     this._entryConfirmTimer = setTimeout(() => {
       this._entryConfirmTimer = null;
       if (!this._intentCurrent(intent)) return;
+      // La activación nunca se confirmó: retiramos la transición cedida
+      // para que la recuperación del selector no quede oculta bajo ella.
+      // close() es idempotente — no-op si el destino ya publicó navReady.
+      try {
+        ceded?.close();
+      } catch { /* ticket ya cerrado o carcasa ausente */ }
       this._finishEntryIntent(intent);
       this._entryRecovery = { kind: 'confirm', message: 'No se pudo confirmar la entrada' };
       this.render();

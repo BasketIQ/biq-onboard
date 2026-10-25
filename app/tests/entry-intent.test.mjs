@@ -501,3 +501,104 @@ test('unconfirmed entry: after the bounded wait, «No se pudo confirmar la entra
     await browser.close();
   }
 });
+
+test('navTicket cedido: tras activated el desmontaje NO cierra el ticket', async () => {
+  const browser = await chromium.launch();
+  try {
+    const { page, events } = await newIntentPage(browser);
+    await page.evaluate(() => {
+      window.__navSpecs = [];
+      window.__closes = [];
+      document.getElementById('app').navBegin = (spec) => {
+        window.__navSpecs.push(spec);
+        return { id: 'tr_x', close: () => { window.__closes.push('tr_x'); return true; } };
+      };
+    });
+    await page.waitForFunction(() =>
+      !!document.getElementById('app').shadowRoot.querySelector('[data-entry-personal-enter-team="pt-1"]'),
+      { timeout: 10000 });
+    await clickShadow(page, '[data-entry-personal-enter-team="pt-1"]');
+    await page.waitForFunction(() => window.__activatedEvents.length === 1, { timeout: 10000 });
+    const nav = await page.evaluate(() => {
+      const intent = document.getElementById('app')._entryIntent;
+      return {
+        specs: window.__navSpecs,
+        closes: window.__closes,
+        intentTicket: intent ? intent.navTicket : 'no-intent',
+      };
+    });
+    assert.equal(nav.specs.length, 1, 'navBegin fired once at gesture admission');
+    assert.equal(nav.specs[0].journey, 't1');
+    assert.equal(nav.specs[0].target.module, 'home');
+    assert.equal(nav.intentTicket, null, 'the ticket is ceded to the shell on activation');
+    // El shell desmonta el origen tras activated (fingerprint cambia): el
+    // unmount NO debe retirar la transición — la publica el destino.
+    await page.evaluate(() => document.getElementById('app').remove());
+    await new Promise((r) => setTimeout(r, 300));
+    const closes = await page.evaluate(() => window.__closes);
+    assert.equal(closes.length, 0, 'disconnect after cession never closes the ticket');
+    assert.equal((await events()).length, 1);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('navTicket cedido: el wait de confirmación agotado cierra el ticket una vez', async () => {
+  const browser = await chromium.launch();
+  try {
+    const { page } = await newIntentPage(browser, { personalTeams: [] });
+    await page.evaluate(() => {
+      window.__navSpecs = [];
+      window.__closes = [];
+      document.getElementById('app').navBegin = (spec) => {
+        window.__navSpecs.push(spec);
+        return { id: 'tr_x', close: () => { window.__closes.push('tr_x'); return true; } };
+      };
+      document.getElementById('app')._entryConfirmMs = 150;
+    });
+    await clickShadow(page, '[data-entry-club-activate]');
+    await page.waitForFunction(() =>
+      !!document.getElementById('app').shadowRoot.querySelector('[data-entry-check]'),
+      { timeout: 10000 });
+    // La recuperación «No se pudo confirmar la entrada» no puede quedar
+    // oculta bajo la transición: el ticket cedido se cierra al expirar.
+    const closes = await page.evaluate(() => window.__closes);
+    assert.equal(closes.length, 1, 'confirm-timeout closes the ceded ticket exactly once');
+    assert.equal(closes[0], 'tr_x');
+    const text = await page.evaluate(() => document.getElementById('app').shadowRoot.textContent);
+    assert.ok(text.includes('No se pudo confirmar la entrada'));
+  } finally {
+    await browser.close();
+  }
+});
+
+test('navTicket sin ceder: la entrada fallida sigue cerrando el ticket', async () => {
+  const browser = await chromium.launch();
+  try {
+    const { page } = await newIntentPage(browser, {
+      putSpec: () => ({ status: 409, body: { detail: 'working-set conflict' } }),
+    });
+    await page.evaluate(() => {
+      window.__navSpecs = [];
+      window.__closes = [];
+      document.getElementById('app').navBegin = (spec) => {
+        window.__navSpecs.push(spec);
+        return { id: 'tr_x', close: () => { window.__closes.push('tr_x'); return true; } };
+      };
+    });
+    await page.waitForFunction(() =>
+      !!document.getElementById('app').shadowRoot.querySelector('[data-entry-personal-enter-team="pt-1"]'),
+      { timeout: 10000 });
+    await clickShadow(page, '[data-entry-personal-enter-team="pt-1"]');
+    await page.waitForFunction(() =>
+      !!document.getElementById('app').shadowRoot.querySelector('[data-entry-retry-team]'),
+      { timeout: 10000 });
+    // Sin activated no hay cesión: el fallo retira la transición para
+    // mostrar la recuperación honesta del selector.
+    const closes = await page.evaluate(() => window.__closes);
+    assert.equal(closes.length, 1, 'failure path still closes the unceded ticket');
+    assert.equal(closes[0], 'tr_x');
+  } finally {
+    await browser.close();
+  }
+});

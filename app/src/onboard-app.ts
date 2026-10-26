@@ -708,7 +708,6 @@ class BiqOnboardApp extends HTMLElement {
   // biq-player service base URL — discovered once from the shell's
   // /modules.json (the `player` module entry origin). `undefined` =
   // unresolved, `null` = unavailable (standalone / unconfigured shell).
-  private _playerApiBaseResolved: string | null | undefined;
   // PD-2 «+ Añadir jugadora» offer — the link-existing chooser is open.
   private _addPlayerPickerOpen = false;
   // SF1: the loaded editor model + async load state. `_editSeq` fences
@@ -1411,40 +1410,29 @@ class BiqOnboardApp extends HTMLElement {
   // onboard-registered action). Every failure is typed as "unavailable" —
   // a profile that could not be read is unknown, never empty.
 
-  // Base URL of the biq-player service: the `player` module entry origin in
-  // the shell's /modules.json (same discovery the carcasa applies to
-  // remoteConfig). `playerApiBase` overrides it in tests/standalone.
+  // Base URL del servicio biq-player: la pasarela same-origin
+  // `/api/m/player` (2026-10-26-module-gateway) — sin descubrimiento en
+  // /modules.json ni llamada cross-origin. `playerApiBase` override en
+  // tests/standalone.
   private async _playerApiBase(): Promise<string | null> {
-    // Explicit override wins ('' = mismo origen — no confundir con "sin
-    // configurar": la cadena vacía es una base válida same-origin).
     if (this.playerApiBase !== undefined) return this.playerApiBase;
-    if (this._playerApiBaseResolved !== undefined) return this._playerApiBaseResolved;
-    let resolved: string | null = null;
-    try {
-      const res = await fetch('/modules.json', { credentials: 'include', cache: 'no-store' });
-      const data = res.ok ? await res.json().catch(() => null) : null;
-      const mods = (data as { modules?: unknown[] } | null)?.modules;
-      const entry = (Array.isArray(mods) ? mods : [])
-        .find((m) => (m as { id?: unknown })?.id === 'player') as { entry?: unknown } | undefined;
-      if (entry && typeof entry.entry === 'string' && entry.entry) {
-        resolved = new URL(entry.entry, location.href).origin.replace(/\/$/, '');
-      }
-    } catch {
-      resolved = null; // discovery failure — profiles stay unavailable
-    }
-    this._playerApiBaseResolved = resolved;
-    return resolved;
+    return '/api/m/player';
   }
 
   private _playerHeaders(): Record<string, string> | null {
-    const token = this.remoteConfig?.token;
-    if (!token) return null;
-    return {
-      'Authorization': `Bearer ${token}`,
+    // Pasarela: sin Bearer — la pasarela acuña la credencial de onboard;
+    // X-Biq-Module conserva la audiencia onboard en biq-player y el
+    // contexto declarado liga la petición al descriptor vigente.
+    const headers: Record<string, string> = {
       'X-Biq-Module': 'onboard',
       'Content-Type': 'application/json',
       'Accept': 'application/json',
     };
+    if (this._context?.context_id) {
+      headers['X-BIQ-Context-Id'] = this._context.context_id;
+      headers['X-BIQ-Context-Epoch'] = String(this._context.context_epoch ?? '');
+    }
+    return headers;
   }
 
   // null = unavailable/unknown — the profile is never treated as empty.

@@ -713,7 +713,7 @@ test('editing a birth date persists it through the biq-player profile PUT', asyn
     assert.equal(body.birth_date, '2012-07-01');
     assert.equal(body.expected_revision, 0, 'fresh CAS revision read before write');
     assert.equal(profilePut.headers['x-biq-module'], 'onboard');
-    assert.equal(profilePut.headers['authorization'], 'Bearer tok-onboard');
+    assert.equal(profilePut.headers['authorization'], undefined, 'pasarela: sin Bearer en el navegador');
     assert.equal(PROFILES.pl_bbbbbbbbbbbbbbbb.birth_date, '2012-07-01');
 
     // The roster PUT payload never carries birth_date — it is not a team

@@ -4,13 +4,15 @@
  *
  *   - ONE screen: no tabs, no visible title; a visually hidden <h1>
  *     keeps the accessible heading;
- *   - «Mi equipo» / «Entrenador» and «Mi club» / «Director deportivo»
- *     block headers with the approved copies;
+ *   - «Mi equipo» head carries «Salir» (logout) and «Mi club» has no
+ *     head chip; block copies are the Director's 2026-10-26 «Modo …»
+ *     lines;
  *   - team/club cards are full-card buttons: name + category/composition
- *     (team) or name only (club), plus an arrow — no player count, no
- *     role line, no locality/team count;
- *   - «Entrar con todos los equipos» stays when ≥2 teams; the 2-personal-
- *     team cap and its note are unchanged; archived-only keeps note+Entrar;
+ *     (team) or name + «Entrar como <rol>» from memberships (club), plus
+ *     an arrow — no player count, no locality/team count;
+ *   - the joint «Entrar con todos los equipos» link and the 2-personal-
+ *     team cap note are removed (Director 2026-10-26); archived-only
+ *     keeps note+Entrar;
  *   - one Chispa help action (module-local chispa-head-compact-v2.svg)
  *     opens an accessible dialog (role/aria-modal, Escape, focus return,
  *     inert background);
@@ -240,13 +242,13 @@ test('single screen (non-coach member): no tabs, no visible title, hidden h1, bo
     assert.deepEqual(state.heads, [
       {
         title: 'Mi equipo',
-        role: 'Entrenador',
-        copy: 'Prepara entrenamientos, organiza la temporada y sigue tus partidos. Todo para entrenar a tu equipo.',
+        role: 'Salir',
+        copy: 'Modo entrenador. Usa BasketSpark para llevar a tu equipo a su mejor nivel esta temporada.',
       },
       {
         title: 'Mi club',
         role: undefined,
-        copy: 'Coordina los equipos y el staff. Define la metodología y acompaña la planificación de todo el club.',
+        copy: 'Modo Director Deportivo. Diseña la estrategia deportiva de tu club de baloncesto y usa BasketSpark para alcanzar el mejor nivel con todos los equipos.',
       },
     ]);
   } finally {
@@ -254,27 +256,40 @@ test('single screen (non-coach member): no tabs, no visible title, hidden h1, bo
   }
 });
 
-test('Mi club carries no role label — the feed cannot attest «Director deportivo» (PD-ENTRY/PD-CLUBS)', async () => {
+test('club cards state «Entrar como <rol>» from the memberships feed; club block head carries no chip', async () => {
   const browser = await chromium.launch();
   try {
     const { page } = await newEntryPage(browser, {
       bootstrap: { ...BOOTSTRAP, contexts: [CLUB('c1', 'Club Uno'), CLUB('c2', 'Club Dos')] },
       personalTeams: [],
+      org: {
+        club: null,
+        email: 'e2e@basketiq.io',
+        display_name: 'E2E',
+        memberships: [
+          { club_id: 'c1', club_name: 'Club Uno', role: 'sports_director' },
+          { club_id: 'c2', club_name: 'Club Dos', role: 'coach' },
+        ],
+      },
     });
     const state = await page.evaluate(() => {
       const el = document.getElementById('app');
       const clubBlock = [...el.shadowRoot.querySelectorAll('.entry-block')]
         .find((b) => b.querySelector('.entry-block-title')?.textContent.trim() === 'Mi club');
-      const text = el.shadowRoot.querySelector('.entry-step').textContent;
+      const cards = [...clubBlock.querySelectorAll('[data-entry-club-activate]')].map((c) => ({
+        title: c.querySelector('.entry-card-title')?.textContent.trim(),
+        metas: [...c.querySelectorAll('.entry-card-meta')].map((m) => m.textContent.trim()),
+      }));
       return {
-        roleChip: !!clubBlock?.querySelector('.entry-role'),
-        dirDeportivo: (text.match(/Director deportivo/g) || []).length,
-        direccion: /Direcci[oó]n deportiva/i.test(text),
+        roleChip: !!clubBlock?.querySelector('.entry-block-head .entry-role'),
+        cards,
       };
     });
-    assert.equal(state.roleChip, false, 'no role chip on the club block');
-    assert.equal(state.dirDeportivo, 0, 'never claims Director deportivo');
-    assert.equal(state.direccion, false, 'never «Dirección deportiva»');
+    assert.equal(state.roleChip, false, 'no role chip on the club block head');
+    assert.deepEqual(state.cards, [
+      { title: 'Club Uno', metas: ['Entrar como Director deportivo'] },
+      { title: 'Club Dos', metas: ['Entrar como Entrenador'] },
+    ]);
   } finally {
     await browser.close();
   }
@@ -381,7 +396,7 @@ test('1 team: one card, no joint entry', async () => {
   }
 });
 
-test('2 teams: both cards + «Entrar con todos los equipos» + the unchanged cap note', async () => {
+test('2 teams: both cards, no joint-entry link, no cap note (Director 2026-10-26 copy cut)', async () => {
   const browser = await chromium.launch();
   try {
     const { page } = await newEntryPage(browser, {
@@ -398,15 +413,15 @@ test('2 teams: both cards + «Entrar con todos los equipos» + the unchanged cap
       };
     });
     assert.equal(state.cards, 2);
-    assert.equal(state.enterAll, 'Entrar con todos los equipos');
+    assert.equal(state.enterAll, undefined, 'joint-entry link removed');
     assert.equal(state.createToggle, false, 'no create affordance at the cap');
-    assert.ok(state.capNote, 'cap note must explain delete-to-create');
+    assert.equal(state.capNote, false, 'cap note removed');
   } finally {
     await browser.close();
   }
 });
 
-test('3 teams: all active teams render as cards with joint entry and the cap note', async () => {
+test('3 teams: all active teams render as cards without joint entry or cap note', async () => {
   const browser = await chromium.launch();
   try {
     const { page } = await newEntryPage(browser, {
@@ -422,8 +437,8 @@ test('3 teams: all active teams render as cards with joint entry and the cap not
       };
     });
     assert.equal(state.cards, 3, 'every active team renders as a card');
-    assert.ok(state.enterAll);
-    assert.ok(state.capNote);
+    assert.equal(state.enterAll, false, 'joint-entry link removed');
+    assert.equal(state.capNote, false, 'cap note removed');
   } finally {
     await browser.close();
   }
@@ -909,24 +924,20 @@ test('team card click activates personal context and narrows the working set', a
   }
 });
 
-test('«Entrar con todos los equipos» posts personal activation without narrowing', async () => {
+test('joint entry control is gone — a team card always narrows to that team', async () => {
   const browser = await chromium.launch();
   try {
-    const { page, log } = await newEntryPage(browser, {
+    const { page } = await newEntryPage(browser, {
       personalTeams: [TEAM('pt-1', 'Paquetillos 1'), TEAM('pt-2', 'Paquetillos 2')],
     });
     await page.waitForFunction(() =>
-      !!document.getElementById('app').shadowRoot.querySelector('[data-entry-personal-enter]'),
+      !!document.getElementById('app').shadowRoot.querySelector('[data-entry-personal-enter-team]'),
       { timeout: 10000 });
-    log.length = 0;
-    await page.evaluate(() => {
-      document.getElementById('app').shadowRoot.querySelector('[data-entry-personal-enter]').click();
-    });
-    await new Promise((r) => setTimeout(r, 300));
-    const activate = log.find((r) => r.url.includes('/api/context/v1/activate'));
-    assert.ok(activate);
-    assert.deepEqual(JSON.parse(activate.postData), { kind: 'personal' });
-    assert.ok(!log.some((r) => r.url.includes('/active/working-teams')), 'joint entry narrows nothing');
+    assert.equal(
+      await sel(page, '.entry-step [data-entry-personal-enter]'),
+      false,
+      '«Entrar con todos los equipos» removed (Director 2026-10-26)',
+    );
   } finally {
     await browser.close();
   }

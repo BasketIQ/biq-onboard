@@ -538,10 +538,10 @@ const PERSONAL_CATEGORIES: Array<{ key: string; label: string }> = [
 // README §PD-ENTRY). «Mi club» is ALWAYS shown (Director 2026-10-24,
 // superseding the 2026-10-23 PD-ENTRY coach-hiding): a user with no club
 // gets the «Crear club» action whenever the server allows `club.create`.
-// The «Entrenador» chip describes the coach space itself; the club block
-// carries NO role chip because the feed cannot attest «Director
-// deportivo» for every membership (PD-CLUBS: no role on club access).
-const ENTRY_TEAM_ROLE_LABEL = 'Entrenador';
+// Director 2026-10-26: the «Mi equipo» head carries the «Salir» action
+// (not a role chip), and each club card states «Entrar como <rol>» from
+// the memberships feed — PD-CLUBS' no-role rule is superseded by an
+// authoritative per-club role.
 // PD-CLUBS (Director 2026-10-23): 2 clubs → two cards; ≥3 → one main
 // access (the «Club reciente» when a valid datum bound to the current
 // user exists — the server's active context, else the account-bound
@@ -4772,9 +4772,9 @@ class BiqOnboardApp extends HTMLElement {
       <section class="entry-block" aria-labelledby="entry-team-heading">
         <div class="entry-block-head">
           <h2 class="entry-block-title" id="entry-team-heading">Mi equipo</h2>
-          <span class="entry-role">${ENTRY_TEAM_ROLE_LABEL}</span>
+          <button class="entry-role entry-logout" type="button" data-entry-logout ${busy ? 'disabled' : ''}>Salir</button>
         </div>
-        <p class="entry-block-copy">Prepara entrenamientos, organiza la temporada y sigue tus partidos. Todo para entrenar a tu equipo.</p>
+        <p class="entry-block-copy">Modo entrenador. Usa BasketSpark para llevar a tu equipo a su mejor nivel esta temporada.</p>
         ${busyNote('personal')}
         ${!this._personalReadAllowed() ? `
           <p class="entry-note">El espacio personal requiere una sesión verificada. Cierra sesión y entra con tu cuenta para usarlo.</p>` : `
@@ -4796,10 +4796,8 @@ class BiqOnboardApp extends HTMLElement {
                   <span class="entry-card-arrow">${ENTRY_ARROW_SVG}</span>
                 </button></li>`).join('')}
             </ul>` : ''}
-          ${personalTeams.length > 1 ? `
-            <button class="entry-textlink" type="button" data-entry-personal-enter ${busy ? 'disabled' : ''}>Entrar con todos los equipos</button>` : ''}
           ${atTeamCap
-            ? '<p class="entry-note">Puedes tener hasta 2 equipos personales. Elimina uno desde «Mis equipos» para crear otro.</p>'
+            ? ''
             : `<button class="entry-create" type="button" data-entry-team-create-toggle ${busy ? 'disabled' : ''}>${ENTRY_PLUS_SVG}<span>Crear equipo</span></button>
               ${this._teamCreateOpen ? `
                 <form class="entry-form" data-entry-personal-create>
@@ -4833,6 +4831,8 @@ class BiqOnboardApp extends HTMLElement {
     ) => {
       const clubId = c.owner_scope.club_id || '';
       const clubName = c.name || clubId;
+      const myRole = (this._org?.memberships || []).find((m) => m.club_id === clubId)?.role;
+      const roleLabel = myRole ? ROLE_LABELS[myRole] || myRole : '';
       const rowAttrs = opts.pickerRow
         ? ` data-entry-club-picker-row="${escapeHtml(normEntryText(clubName))}"`
         : '';
@@ -4842,6 +4842,7 @@ class BiqOnboardApp extends HTMLElement {
           <span class="entry-card-copy">
             <span class="entry-card-title">${escapeHtml(clubName)}</span>
             ${meta ? `<span class="entry-card-meta">${escapeHtml(meta)}</span>` : ''}
+            ${roleLabel ? `<span class="entry-card-meta">Entrar como ${escapeHtml(roleLabel)}</span>` : ''}
           </span>
           <span class="entry-card-arrow">${ENTRY_ARROW_SVG}</span>
         </button></li>`;
@@ -4914,7 +4915,7 @@ class BiqOnboardApp extends HTMLElement {
         <div class="entry-block-head">
           <h2 class="entry-block-title" id="entry-club-heading">Mi club</h2>
         </div>
-        <p class="entry-block-copy">Coordina los equipos y el staff. Define la metodología y acompaña la planificación de todo el club.</p>
+        <p class="entry-block-copy">Modo Director Deportivo. Diseña la estrategia deportiva de tu club de baloncesto y usa BasketSpark para alcanzar el mejor nivel con todos los equipos.</p>
         ${busyNote('club')}
         ${clubAccess}
         ${createAllowed ? `

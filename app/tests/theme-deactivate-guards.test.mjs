@@ -31,23 +31,9 @@ test('deactivateTheme method is implemented and calls /deactivate endpoint', () 
   );
 });
 
-test('activation switch uncheck triggers deactivateTheme instead of revertTheme', () => {
-  const switchIdx = SRC.indexOf("activateSwitch.addEventListener('change'");
-  assert.ok(switchIdx > 0, 'activateSwitch change listener should exist');
-  const handlerBody = SRC.slice(switchIdx, SRC.indexOf('});', switchIdx) + 3);
-
-  assert.ok(
-    handlerBody.includes('this.activateTheme(clubId)'),
-    'checked branch should call activateTheme'
-  );
-  assert.ok(
-    handlerBody.includes('this.deactivateTheme(clubId)'),
-    'unchecked branch should call deactivateTheme'
-  );
-  assert.ok(
-    !handlerBody.includes('this.revertTheme(clubId)'),
-    'unchecked branch should NOT call revertTheme'
-  );
+test('default identity button calls non-destructive deactivation', () => {
+  assert.ok(SRC.includes("[data-identity-default]"));
+  assert.ok(SRC.includes("addEventListener('click', () => this.deactivateTheme(clubId))"));
 });
 
 // ─── Requirement 2: Polling UI Guards ─────────────────────────────────
@@ -59,11 +45,9 @@ test('website input is disabled when polling', () => {
   );
 });
 
-test('activate switch is disabled when polling', () => {
-  assert.ok(
-    SRC.includes("data-activate-switch ${isActive ? 'checked' : ''} ${this._loading || (isPolling && !this._isStale) ? 'disabled' : ''}"),
-    'data-activate-switch should be disabled during polling'
-  );
+test('explicit apply is guarded by gate, polling, loading and unsaved colours', () => {
+  assert.ok(SRC.includes("theme.gate?.passed === true && !isPolling && !this._loading && !dirty"));
+  assert.ok(SRC.includes("data-identity-apply ${!ready || active ? 'disabled' : ''}"));
 });
 
 // ─── Requirement 3: Theme preview preserved during polling ────────────

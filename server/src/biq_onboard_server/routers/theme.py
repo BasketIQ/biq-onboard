@@ -34,6 +34,9 @@ theme_job is a whole-field replacement, not a merge.
 
 from __future__ import annotations
 
+import copy
+import uuid
+from typing import Literal
 import hmac
 import os
 import time
@@ -137,6 +140,7 @@ class ManualThemeRequest(BaseModel):
     """Manual colour override (ADDENDUM-02 section 8 PUT)."""
     seed_brand: str
     seed_brand_alt: str | None = None
+    variant: Literal["standard", "contrast", "soft"] = "standard"
 
     @field_validator("seed_brand", "seed_brand_alt")
     @classmethod
@@ -169,6 +173,8 @@ class ResultRequest(BaseModel):
 class ActivateRequest(BaseModel):
     """Activate a draft theme (B14)."""
     confirmed: bool = True
+    restore_previous: bool = False
+    expected_revision: str | None = None
 
 
 # ─── S2S result authentication (B12) ────────────────────────────────────
@@ -231,6 +237,7 @@ def _enqueue_generation_task(
     schedule_delay_seconds: int = 0,
     manual_seed_brand: str = "",
     manual_seed_alt: str = "",
+    manual_variant: str = "standard",
 ) -> str:
     """Enqueue a club-theme generation task to Cloud Tasks.
 
@@ -291,6 +298,8 @@ def _enqueue_generation_task(
     # extraction and uses these seeds directly for ramp/gate generation.
     if manual_seed_brand:
         env_vars.append({"name": "MANUAL_SEED_BRAND", "value": manual_seed_brand})
+    if manual_seed_brand:
+        env_vars.append({"name": "MANUAL_THEME_VARIANT", "value": manual_variant})
     if manual_seed_alt:
         env_vars.append({"name": "MANUAL_SEED_BRAND_ALT", "value": manual_seed_alt})
 
@@ -592,6 +601,9 @@ def generate_theme(club_id: str, payload: GenerateRequest, request: Request) -> 
     existing_job = getattr(club, "theme_job", {}) or {}
     lease_id = f"lease-{club_id}-{int(time.time())}"
     new_theme_job = {
+        "previousTheme": existing_job.get("previousTheme"),
+        "draftTheme": copy.deepcopy(existing_job.get("draftTheme")),
+        "revision": uuid.uuid4().hex,
         "status": "pending",
         "sourceUrl": url,
         "requestedAt": now,
@@ -671,6 +683,9 @@ def retry_theme(club_id: str, request: Request) -> dict:
     now = _now_iso()
     lease_id = f"lease-{club_id}-{int(time.time())}"
     new_theme_job = {
+        "previousTheme": existing_job.get("previousTheme"),
+        "draftTheme": copy.deepcopy(existing_job.get("draftTheme")),
+        "revision": uuid.uuid4().hex,
         "status": "pending",
         "sourceUrl": source_url,
         "requestedAt": now,
@@ -699,6 +714,27 @@ def retry_theme(club_id: str, request: Request) -> dict:
     return {"ok": True, "status": "pending", "jobId": task_id, "themeJob": new_theme_job}
 
 
+def _empty_identity(club_id):
+    return {"schemaVersion": 1, "clubId": club_id, "status": "draft", "seed": {},
+            "tokens": None, "gate": {"passed": False, "pending": True}, "logo": None}
+
+
+def _editable_theme(club):
+    job = getattr(club, "theme_job", None) or {}
+    import copy
+    return copy.deepcopy(job.get("draftTheme") or getattr(club, "theme", None))
+
+
+def _save_draft(registry, club_id, club, theme):
+    import copy
+    job = copy.deepcopy(getattr(club, "theme_job", None) or {})
+    draft = copy.deepcopy(theme)
+    draft["status"] = "draft" if draft.get("gate", {}).get("passed") else "uncertain"
+    job["draftTheme"] = draft
+    job["revision"] = uuid.uuid4().hex
+    registry.merge_club_fields(club_id, {"theme_job": job})
+
+
 @router.post("/activate")
 def activate_theme(club_id: str, payload: ActivateRequest, request: Request) -> dict:
     """Promote a draft/uncertain theme to active (B14).
@@ -713,7 +749,20 @@ def activate_theme(club_id: str, payload: ActivateRequest, request: Request) -> 
     if club is None:
         raise HTTPException(status_code=404, detail="club not found")
 
-    theme = getattr(club, "theme", None)
+    current_job = getattr(club, "theme_job", None) or {}
+    if payload.expected_revision is not None and payload.expected_revision != current_job.get("revision"):
+        raise HTTPException(status_code=409, detail="proposal changed; reload before applying")
+    if current_job.get("status") in ("pending", "running"):
+        raise HTTPException(status_code=409, detail="proposal generation is pending or running")
+    if not payload.confirmed:
+        raise HTTPException(status_code=400, detail="explicit confirmation required")
+    theme = _editable_theme(club)
+    if payload.restore_previous:
+        import copy
+        theme = copy.deepcopy((getattr(club, "theme_job", None) or {}).get("previousTheme"))
+        if theme:
+            theme["status"] = "draft"
+
     if not theme or not isinstance(theme, dict):
         raise HTTPException(status_code=404, detail="no theme found")
 
@@ -791,10 +840,15 @@ def activate_theme(club_id: str, payload: ActivateRequest, request: Request) -> 
         "reason": "admin-activated",
         "decidedAt": _now_iso(),
     }
-    registry.merge_club_fields(club_id, {"theme": theme})
+    import copy
+    theme_job = copy.deepcopy(getattr(club, "theme_job", None) or {})
+    previous = getattr(club, "theme", None)
+    theme_job["previousTheme"] = copy.deepcopy(previous)
+    theme_job.pop("draftTheme", None)
+    theme_job["revision"] = uuid.uuid4().hex
+    registry.merge_club_fields(club_id, {"theme": theme, "theme_job": theme_job})
 
     # Update theme_job to succeeded if it was running
-    theme_job = getattr(club, "theme_job", {}) or {}
     if isinstance(theme_job, dict) and theme_job.get("status") in ("pending", "running"):
         theme_job["status"] = "succeeded"
         theme_job["finishedAt"] = _now_iso()
@@ -856,6 +910,7 @@ def get_theme(club_id: str, request: Request) -> dict:
         "ok": True,
         "theme": theme,
         "themeJob": theme_job,
+        "draftTheme": (theme_job or {}).get("draftTheme"),
     }
 
 
@@ -882,6 +937,7 @@ def put_theme(club_id: str, payload: ManualThemeRequest, request: Request) -> di
     now = _now_iso()
     seed_brand = payload.seed_brand
     seed_brand_alt = payload.seed_brand_alt
+    prior = _editable_theme(club) or {}
 
     # R4: Store the manual seed as a draft theme. Tokens and gate are
     # pending — they will be populated by the generation job when it
@@ -901,8 +957,9 @@ def put_theme(club_id: str, payload: ManualThemeRequest, request: Request) -> di
             "brand": seed_brand,
             "brandAlt": seed_brand_alt,
             "detectedFrom": "manual",
+            "variant": payload.variant,
         },
-        "logo": None,
+        "logo": copy.deepcopy(prior.get("logo")),
         "tokens": None,  # R4: pending job population — no empty fallback
         "gate": {
             "passed": False,
@@ -919,14 +976,14 @@ def put_theme(club_id: str, payload: ManualThemeRequest, request: Request) -> di
         },
     }
 
-    registry.merge_club_fields(club_id, {"theme": theme})
+    # Persist the proposal and its new job lease together.
 
     # V4: Enqueue the canonical JS generation job with the manual seed.
     # The worker receives MANUAL_SEED_BRAND env override and skips website
     # extraction, using the manual seed directly for ramp/gate generation.
     # Manual jobs are not URL-driven, so sourceUrl is always "" per callback contract.
     source_url = ""
-    lease_id = f"lease-{club_id}-manual-{int(time.time())}"
+    lease_id = f"lease-{club_id}-manual-{uuid.uuid4().hex}"
     manual_job = {
         "status": "pending",
         "sourceUrl": source_url,
@@ -937,9 +994,13 @@ def put_theme(club_id: str, payload: ManualThemeRequest, request: Request) -> di
         "notifiedAt": None,
         "lease": _create_lease(lease_id),
         "history": [],
+        "draftTheme": theme,
+        "revision": uuid.uuid4().hex,
+        "previousTheme": (getattr(club, "theme_job", None) or {}).get("previousTheme"),
         "manualSeed": {  # V4: manual seed contract for the JS worker
             "brand": seed_brand,
             "brandAlt": seed_brand_alt,
+            "variant": payload.variant,
         },
     }
     _record_attempt(manual_job, source_url)
@@ -951,6 +1012,7 @@ def put_theme(club_id: str, payload: ManualThemeRequest, request: Request) -> di
             club_id, source_url, lease_id,
             manual_seed_brand=seed_brand,
             manual_seed_alt=seed_brand_alt,
+            manual_variant=payload.variant,
         )
     except Exception as exc:
         failed_job = dict(manual_job)
@@ -1001,7 +1063,7 @@ def affirm_logo_rights(club_id: str, payload: LogoRightsRequest, request: Reques
     if club is None:
         raise HTTPException(status_code=404, detail="club not found")
 
-    theme = getattr(club, "theme", None)
+    theme = _editable_theme(club)
     if not theme or not isinstance(theme, dict):
         raise HTTPException(status_code=404, detail="no theme found")
 
@@ -1018,7 +1080,7 @@ def affirm_logo_rights(club_id: str, payload: LogoRightsRequest, request: Reques
         logo["status"] = "awaiting_rights"
 
     theme["logo"] = logo
-    registry.merge_club_fields(club_id, {"theme": theme})
+    _save_draft(registry, club_id, club, theme)
 
     return {"ok": True, "logo": logo}
 
@@ -1044,27 +1106,11 @@ def update_logo_url(club_id: str, payload: LogoUrlRequest, request: Request) -> 
     if club is None:
         raise HTTPException(status_code=404, detail="club not found")
 
-    theme = getattr(club, "theme", None)
-    if not theme or not isinstance(theme, dict):
-        raise HTTPException(status_code=404, detail="no theme found")
+    theme = _editable_theme(club) or _empty_identity(club_id)
 
-    # Fetch the image and convert to data URI
-    import base64
-    import urllib.request
-
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": "BasketIQ-ThemePipeline/1.0"})
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            content_type = resp.headers.get("Content-Type", "image/png")
-            data = resp.read()
-            if len(data) > 512 * 1024:
-                raise HTTPException(status_code=413, detail="logo image too large (max 512KB)")
-            b64 = base64.b64encode(data).decode("ascii")
-            data_uri = f"data:{content_type};base64,{b64}"
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"failed to fetch logo: {exc}")
+    from ..identity_assets import download_logo, image_data_uri
+    data, content_type = download_logo(url)
+    data_uri = image_data_uri(data, content_type)
 
     logo = theme.get("logo") or {}
     logo["onLight"] = data_uri
@@ -1073,9 +1119,10 @@ def update_logo_url(club_id: str, payload: LogoUrlRequest, request: Request) -> 
     logo["status"] = "confirmed"
     logo["rightsConfirmedAt"] = _now_iso()
     logo["reason"] = None
+    logo["manuallySelected"] = True
 
     theme["logo"] = logo
-    registry.merge_club_fields(club_id, {"theme": theme})
+    _save_draft(registry, club_id, club, theme)
 
     return {"ok": True, "logo": logo}
 
@@ -1097,29 +1144,20 @@ async def upload_logo_file(club_id: str, request: Request) -> dict:
         raise HTTPException(status_code=400, detail="missing 'file' field")
 
     # Read the uploaded bytes
-    data = await upload.read()
+    data = await upload.read(512 * 1024 + 1)
     if len(data) > 512 * 1024:
         raise HTTPException(status_code=413, detail="logo image too large (max 512KB)")
 
     content_type = upload.content_type or "image/png"
-    # Accept common image types + SVG
-    allowed = {"image/png", "image/jpeg", "image/gif", "image/webp", "image/svg+xml", "image/svg"}
-    if content_type not in allowed:
-        raise HTTPException(status_code=415, detail=f"unsupported content type: {content_type}")
-
-    import base64
-
-    b64 = base64.b64encode(data).decode("ascii")
-    data_uri = f"data:{content_type};base64,{b64}"
+    from ..identity_assets import image_data_uri
+    data_uri = image_data_uri(data, content_type)
 
     registry = org.get_registry()
     club = registry.get_club(club_id)
     if club is None:
         raise HTTPException(status_code=404, detail="club not found")
 
-    theme = getattr(club, "theme", None)
-    if not theme or not isinstance(theme, dict):
-        raise HTTPException(status_code=404, detail="no theme found")
+    theme = _editable_theme(club) or _empty_identity(club_id)
 
     logo = theme.get("logo") or {}
     logo["onLight"] = data_uri
@@ -1128,9 +1166,10 @@ async def upload_logo_file(club_id: str, request: Request) -> dict:
     logo["status"] = "confirmed"
     logo["rightsConfirmedAt"] = _now_iso()
     logo["reason"] = None
+    logo["manuallySelected"] = True
 
     theme["logo"] = logo
-    registry.merge_club_fields(club_id, {"theme": theme})
+    _save_draft(registry, club_id, club, theme)
 
     return {"ok": True, "logo": logo}
 
@@ -1240,7 +1279,17 @@ def post_result(club_id: str, payload: ResultRequest, request: Request) -> dict:
 
     # Persist theme if provided (whole-field replacement, §C9.3a)
     if payload.theme:
-        registry.merge_club_fields(club_id, {"theme": payload.theme})
+        import copy
+        draft = copy.deepcopy(payload.theme)
+        draft["status"] = "draft" if draft.get("gate", {}).get("passed") else "uncertain"
+        draft["activation"] = {"themeStatus": draft["status"], "reason": "explicit confirmation required", "decidedAt": now}
+        # Preserve a manually uploaded logo while generating colours.
+        prior_draft = existing_job.get("draftTheme") or {}
+        prior_logo = prior_draft.get("logo") or (getattr(club, "theme", None) or {}).get("logo")
+        if prior_logo and (not draft.get("logo") or prior_logo.get("sourceUrl") == "manual-upload" or prior_logo.get("manuallySelected")):
+            draft["logo"] = prior_logo
+        new_theme_job["draftTheme"] = draft
+        new_theme_job["revision"] = uuid.uuid4().hex
 
     registry.merge_club_fields(club_id, {"theme_job": new_theme_job})
 
@@ -1262,6 +1311,9 @@ def post_result(club_id: str, payload: ResultRequest, request: Request) -> dict:
                 "attempts": new_theme_job.get("attempts", 1) + 1,
                 "verdict": None,
                 "notifiedAt": None,
+                "draftTheme": copy.deepcopy(new_theme_job.get("draftTheme")),
+                "previousTheme": copy.deepcopy(new_theme_job.get("previousTheme")),
+                "revision": uuid.uuid4().hex,
                 "autoRetried": True,  # R5: persist retry intent
                 "lease": _create_lease(retry_lease),
                 "history": new_theme_job.get("history", []),  # R7: preserve history

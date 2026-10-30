@@ -1,0 +1,45 @@
+name: Identity validation (no deploy)
+on:
+  push:
+    branches: ['mission/2026-10-30-club-identity-assisted']
+  pull_request:
+    paths: ['app/src/onboard-app.ts', 'app/src/styles.css', 'app/tests/theme*.mjs', '.github/workflows/identity-validation.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: identity-validation-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  browser:
+    # Rule 06 browser lane: development only, no hosted/integration fallback.
+    runs-on: [self-hosted, development]
+    timeout-minutes: 15
+    env:
+      CI: 'true'
+      BIQ_IDENTITY_AI: fake
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-self-hosted-env
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm ci --ignore-scripts
+        working-directory: app
+      - run: npx playwright install chromium
+        working-directory: app
+      - run: npm run typecheck && npm run build:lib
+        working-directory: app
+      - name: Identity regression suite (mock APIs only)
+        run: node --test --test-concurrency=1 tests/theme-*.test.mjs
+        working-directory: app
+        env:
+          BIQ_IDENTITY_SCREENSHOTS: ${{ runner.temp }}/identity-screenshots
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: identity-browser-evidence
+          path: ${{ runner.temp }}/identity-screenshots
+      - name: Remove screenshot working files
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/identity-screenshots"

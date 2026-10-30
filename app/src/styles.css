@@ -1844,3 +1844,22 @@
     align-items: center;
   }
 }
+
+.identity-previews { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 20px; }
+.identity-preview { padding: 16px; border: 1px solid var(--biq-color-border, #7a8ab0); border-radius: 16px; font-size: 16px; }
+.identity-preview-header { border-bottom: 5px solid; padding: 12px 0; font-weight: 700; }
+.identity-preview button { background: #c94500; color: #fff; padding: 10px 16px; border: 0; border-radius: 12px; opacity: 1; }
+@media (max-width: 420px) { .identity-previews { grid-template-columns: 1fr; } }
+
+.identity-colours { display: flex; gap: 24px; margin: 16px 0; }
+.identity-colours label { display: grid; gap: 8px; font-size: 16px; }
+.identity-colours input { width: 72px; height: 44px; cursor: pointer; }
+.identity-variants { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+.identity-preview-header { display: flex; align-items: center; gap: 8px; padding: 12px; border-radius: 8px; overflow-wrap: anywhere; }
+.identity-preview-header img { max-width: 48px; max-height: 44px; object-fit: contain; background: white; border-radius: 4px; }
+.identity-preview-selection { padding: 12px; border-radius: 8px; }
+
+.identity-editor .onboard-card-desc,
+.identity-editor .onboard-input,
+.identity-editor .onboard-btn { font-size: 16px; }
+.identity-editor .onboard-btn { min-height: 44px; }

@@ -50,10 +50,12 @@ interface ClubTheme {
     brand: string;
     brandAlt: string | null;
     detectedFrom: string;
+    variant?: string;
   };
   logo?: {
     url: string | null;
     onLight: string | null;
+    onDark?: string | null;
     rightsConfirmedAt: string | null;
     status: 'awaiting_rights' | 'confirmed' | 'rejected';
   } | null;
@@ -80,6 +82,8 @@ interface ClubTheme {
 }
 
 interface ThemeJob {
+  revision?: string;
+  previousTheme?: ClubTheme | null;
   // Canonical states (B10) — the server has no "completed" vocabulary.
   status: 'pending' | 'running' | 'succeeded' | 'uncertain' |
     'rejected_not_a_club' | 'unsupported_source' | 'unreachable' |
@@ -105,8 +109,8 @@ const THEME_JOB_COPY: Record<string, { title: string; description: string; actio
     description: 'Extrayendo colores y generando el estilo.',
   },
   succeeded: {
-    title: 'Estilo disponible y activo',
-    description: 'El estilo del club está activo. Puedes ajustarlo, regenerarlo o revertirlo.',
+    title: 'Propuesta disponible',
+    description: 'Revisa los colores y el escudo antes de aplicar la identidad.',
     action: 'adjust/regenerate/revert',
   },
   uncertain: {
@@ -641,6 +645,7 @@ class BiqOnboardApp extends HTMLElement {
   // Club cuya primera carga de tema ya resolvió — la reentrada en
   // caliente a Estilo/landing acredita sin esperar un refetch inexistente.
   private _themeReadyClub = '';
+  private _identityColours: Record<string, { brand: string; alt: string }> = {};
   private _theme: ClubTheme | null = null;
   private _themeJob: ThemeJob | null = null;
   private _loading = false;
@@ -2137,7 +2142,7 @@ class BiqOnboardApp extends HTMLElement {
         // Job reached terminal state (or no job) — show the theme
         this._awaitingNewJob = false;
         this._loading = false; // reset loading on terminal state
-        this._theme = data.theme || null;
+        this._theme = data.draftTheme || data.theme || null;
         this._themeJob = data.themeJob || null;
       }
       // B14: start polling if pending/running
@@ -3718,7 +3723,7 @@ class BiqOnboardApp extends HTMLElement {
       : 'club-details';
     const title = {
       landing: 'Mi Club',
-      'club-details': 'Mi Club: Estilo',
+      'club-details': 'Mi Club: Identidad',
       teams: 'Mi Club: Equipos',
       members: 'Mi Club: Miembros',
       profile: 'Mi Club: Perfil',
@@ -3994,7 +3999,7 @@ class BiqOnboardApp extends HTMLElement {
       } else {
         this._awaitingNewJob = false;
         this._loading = false; // reset loading on terminal state
-        this._theme = data.theme || null;
+        this._theme = data.draftTheme || data.theme || null;
         this._themeJob = data.themeJob || null;
       }
       const newStatus = this._themeJob?.status;
@@ -4038,8 +4043,7 @@ class BiqOnboardApp extends HTMLElement {
     this._pollStartedAt = 0;
     // F5: Clear previous theme/job state so stale errors and branding
     // cards from a prior generation don't persist into the new one.
-    this._theme = null;
-    this._themeJob = null;
+    // Keep the current preview while the replacement is prepared.
     this._awaitingNewJob = true;
     this.render();
     try {
@@ -4151,7 +4155,7 @@ class BiqOnboardApp extends HTMLElement {
   }
 
   // B14: Activate a draft/uncertain theme
-  private async activateTheme(clubId: string): Promise<void> {
+  private async activateTheme(clubId: string, restorePrevious = false): Promise<void> {
     this._loading = true;
     this._error = null;
     this.render();
@@ -4160,12 +4164,13 @@ class BiqOnboardApp extends HTMLElement {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ confirmed: true }),
+        body: JSON.stringify({ confirmed: true, restore_previous: restorePrevious, expected_revision: this._themeJob?.revision }),
       });
       if (!res.ok) {
         const data = await res.json().catch(() => null);
         throw new Error(data?.detail || `HTTP ${res.status}`);
       }
+      delete this._identityColours[clubId];
       await this.loadThemeData(clubId);
     } catch (err) {
       this._error = (err as Error).message;
@@ -4206,8 +4211,7 @@ class BiqOnboardApp extends HTMLElement {
     this._pollStartedAt = 0;
     // F5: Clear previous theme/job state so stale errors and branding
     // cards from a prior run don't persist into the retry.
-    this._theme = null;
-    this._themeJob = null;
+    // Keep the current preview while the replacement is prepared.
     this._awaitingNewJob = true;
     this.render();
     try {
@@ -4337,9 +4341,9 @@ class BiqOnboardApp extends HTMLElement {
 
     this._paint(`<style>${styles}</style>
       <div class="onboard-app">
-        ${this._renderSectionSubhead(this._subheadSpec(section, canManageMembers))}
+        ${section === 'club-details' && !inSubscreen ? '' : this._renderSectionSubhead(this._subheadSpec(section, canManageMembers))}
         ${inSubscreen ? '' : `<nav class="onboard-nav">
-          <button class="onboard-nav-item ${section === 'club-details' ? 'active' : ''}" data-nav="club-details">Estilo</button>
+          <button class="onboard-nav-item ${section === 'club-details' ? 'active' : ''}" data-nav="club-details">Identidad</button>
           <button class="onboard-nav-item ${section === 'teams' ? 'active' : ''}" data-nav="teams">Equipos</button>
           ${canManageMembers ? `<button class="onboard-nav-item ${section === 'members' ? 'active' : ''}" data-nav="members">Miembros</button>` : ''}
           <button class="onboard-nav-item ${section === 'profile' ? 'active' : ''}" data-nav="profile">Perfil</button>
@@ -4378,18 +4382,18 @@ class BiqOnboardApp extends HTMLElement {
     const canRetry = jobStatus === 'failed' || jobStatus === 'unreachable' || jobStatus === 'rejected_not_a_club' || jobStatus === 'unsupported_source' || this._isStale;
 
     return `
-      <section class="onboard-section">
-        <h2 class="onboard-section-title">${escapeHtml(club.name || club.id)}</h2>
+      <section class="onboard-section identity-editor">
+        <h2 class="onboard-section-title">${escapeHtml(club.name || 'Mi club')}</h2>
 
         ${this._error ? `<div class="onboard-error">${escapeHtml(this._error)}</div>` : ''}
 
         <div class="onboard-card">
-          <h3 class="onboard-card-title">Estilo de la app</h3>
-          <p class="onboard-card-desc">Introduce la URL de la web de tu club. Crearemos un estilo propio en esta app para vosotros.</p>
+          <h3 class="onboard-card-title">Identidad visual</h3>
+          <p class="onboard-card-desc">Obtén una propuesta desde la web de tu club o elige tus colores. Revísala antes de aplicarla.</p>
           <div class="onboard-form-row">
             <input type="url" class="onboard-input" data-website-input value="${escapeHtml(website)}" placeholder="https://www.miclub.com" ${this._loading || (isPolling && !this._isStale) ? 'disabled' : ''} />
             <button class="onboard-btn onboard-btn-primary" data-generate-btn ${this._loading || (isPolling && !this._isStale) ? 'disabled' : ''}>
-              ${isPolling && !this._isStale ? 'Procesando…' : this._loading ? 'Generando…' : 'Generar estilo'}
+              ${isPolling && !this._isStale ? 'Procesando…' : this._loading ? 'Generando…' : 'Proponer identidad'}
             </button>
           </div>
         </div>
@@ -4407,60 +4411,39 @@ class BiqOnboardApp extends HTMLElement {
 
         ${this._loading && !theme && !jobCopy ? '<div class="onboard-loading">Cargando…</div>' : ''}
 
-        ${theme ? this.renderActivationToggle(theme, isPolling) : ''}
-        ${theme ? this.renderLogoSection(theme) : ''}
+        ${ADMIN_ROLES.includes(this._org?.role || '') ? `${this.renderLogoSection(theme)}${this.renderIdentityEditor(club.id)}${theme ? this.renderActivationToggle(theme, isPolling) : ''}` : '<p class="onboard-card-desc">La identidad del club la gestiona un administrador.</p>'}
       </section>`;
   }
 
-  private renderActivationToggle(theme: ClubTheme, isPolling: boolean = false): string {
-    const isActive = theme.status === 'active';
-    const gateFailed = theme.gate && theme.gate.passed === false;
-    if (gateFailed) {
-      // Gate failed — show why + revert button, no switch
-      return `
-      <div class="onboard-card onboard-activation-card">
-        <h3 class="onboard-card-title">Activar estilo</h3>
-        <div class="onboard-gate-failure">
-          <h4>El estilo no superó el control de contraste</h4>
-          <p>Algunas combinaciones de color no cumplen WCAG 2.2 AA. Puedes ajustar manualmente los colores o usar el estilo BasketIQ por defecto.</p>
-          <ul class="onboard-gate-failures">
-            ${(theme.gate?.failures || []).slice(0, 5).map(f => {
-              if (f.error) {
-                return `<li>${escapeHtml(f.fg || '?')} → ${escapeHtml(f.bg || '?')}: ${escapeHtml(f.error)}</li>`;
-              }
-              const ratio = f.ratio != null ? f.ratio.toFixed(2) : '?';
-              const required = f.required != null ? f.required.toFixed(1) : '?';
-              return `<li>${escapeHtml(f.fg || '?')} sobre ${escapeHtml(f.bg || '?')}: ratio ${ratio}:1 (mínimo ${required}:1)</li>`;
-            }).join('')}
-            ${(theme.gate?.failures || []).length > 5 ? `<li>… y ${(theme.gate?.failures || []).length - 5} más</li>` : ''}
-          </ul>
-        </div>
-        <button class="onboard-btn onboard-btn-danger" data-revert-btn ${this._loading ? 'disabled' : ''}>
-          Restablecer estilo BasketIQ
-        </button>
-      </div>`;
-    }
-    return `
-      <div class="onboard-card onboard-activation-card">
-        <div class="onboard-activation-row">
-          <h3 class="onboard-card-title">Activar estilo</h3>
-          <label class="onboard-switch ${isActive ? 'on' : ''}">
-            <input type="checkbox" data-activate-switch ${isActive ? 'checked' : ''} ${this._loading || (isPolling && !this._isStale) ? 'disabled' : ''} />
-            <span class="onboard-switch-track"><span class="onboard-switch-thumb"></span></span>
-          </label>
-        </div>
-        <p class="onboard-card-desc">
-          ${isActive
-            ? 'El estilo del club está activo y visible para todos los miembros.'
-            : 'Al activar, el estilo del club será visible y aplicable a todos los miembros del equipo.'}
-        </p>
-      </div>`;
+  private renderIdentityEditor(clubId: string): string {
+    const hex = (v: string | null | undefined, fallback: string) => /^#[0-9a-f]{6}$/i.test(v || '') ? v! : fallback;
+    const colours = this._identityColours[clubId] || { brand: hex(this._theme?.seed?.brand, '#123456'), alt: hex(this._theme?.seed?.brandAlt, '#ffffff') };
+    const previews = (['light', 'dark'] as const).map(mode => {
+      const t = this._theme?.tokens?.[mode];
+      const bg = mode === 'light' ? '#f4f6fa' : '#080d1a';
+      const fg = mode === 'light' ? '#0d1735' : '#f4f6fb';
+      const header = hex(t?.['--biq-color-surface-inverse'], '#0a153a');
+      const text = hex(t?.['--biq-color-inverse-text'], '#ffffff');
+      const tint = hex(t?.['--biq-color-brand-tint'], bg);
+      const onTint = hex(t?.['--biq-color-on-brand-tint'], fg);
+      const logo = mode === 'light' ? this._theme?.logo?.onLight : this._theme?.logo?.onDark || this._theme?.logo?.onLight;
+      return `<div class="identity-preview" style="background:${bg};color:${fg}"><span>${mode === 'light' ? 'Claro' : 'Oscuro'}</span><div class="identity-preview-header" style="background:${header};color:${text}">${logo ? `<img src="${escapeHtml(logo)}" alt="Escudo en vista previa">` : ''}${escapeHtml(this._org?.club?.name || 'Tu club')}</div><p>Planifica la próxima jugada.</p><p class="identity-preview-selection" style="background:${tint};color:${onTint}">Objetivo seleccionado</p><button type="button" tabindex="-1" aria-disabled="true">Añadir</button></div>`;
+    }).join('');
+    return `<div class="onboard-card"><h3 class="onboard-card-title">Colores del club</h3><p class="onboard-card-desc">Elige principal y secundario. El fondo y el texto se adaptan a cada modo; las acciones conservan el naranja de BasketSpark.</p><div class="identity-colours"><label>Principal <input aria-label="Color principal" type="color" data-identity-brand value="${colours.brand}"></label><label>Secundario <input aria-label="Color secundario" type="color" data-identity-alt value="${colours.alt}"></label></div><div class="identity-variants">${[['standard', 'Preparar vista previa'], ['contrast', 'Más contraste'], ['soft', 'Más suave']].map(([id, label]) => `<button class="onboard-btn ${id === 'standard' ? 'onboard-btn-primary' : 'onboard-btn-secondary'}" data-identity-variant="${id}" ${this._loading ? 'disabled' : ''}>${label}</button>`).join('')}</div><p class="onboard-card-desc" role="status">${this._theme?.tokens ? 'Vista previa de la última propuesta calculada. Prepara una nueva vista previa para comprobar tus cambios.' : 'Prepara una propuesta para comprobar los colores antes de aplicar.'}</p><div class="identity-previews">${previews}</div></div>`;
   }
 
-  private renderLogoSection(theme: ClubTheme): string {
-    const logo = theme.logo;
+  private renderActivationToggle(theme: ClubTheme, isPolling: boolean = false): string {
+    const active = theme.status === 'active';
+    const edited = this._identityColours[this._org?.club?.id || ''];
+    const dirty = edited && (edited.brand.toLowerCase() !== theme.seed?.brand?.toLowerCase() || edited.alt.toLowerCase() !== theme.seed?.brandAlt?.toLowerCase());
+    const ready = theme.gate?.passed === true && !isPolling && !this._loading && !dirty;
+    return `<div class="onboard-card"><h3 class="onboard-card-title">${active ? 'Identidad aplicada' : 'Tu propuesta'}</h3><p class="onboard-card-desc">${active ? 'Visible para los miembros del club.' : 'Comprueba el escudo y las vistas clara y oscura antes de aplicar. La identidad actual se conserva hasta entonces.'}</p><button class="onboard-btn onboard-btn-primary" data-identity-apply ${!ready || active ? 'disabled' : ''}>Aplicar identidad</button>${active ? `<button class="onboard-btn" data-identity-default ${this._loading || isPolling ? 'disabled' : ''}>Usar identidad BasketSpark</button>` : ''}${this._themeJob?.previousTheme ? `<button class="onboard-btn" data-identity-restore ${this._loading || isPolling ? 'disabled' : ''}>Restaurar identidad anterior</button>` : ''}${dirty ? '<p role="status">Hay cambios de color pendientes de preparar.</p>' : ''}${theme.gate?.passed === false ? '<p role="status">Prepara la vista previa para validar el contraste antes de aplicar.</p>' : ''}</div>`;
+  }
+
+  private renderLogoSection(theme: ClubTheme | null): string {
+    const logo = theme?.logo;
     const logoSrc = logo?.onLight ?? null;
-    const awaitingRights = logo && logo.rightsConfirmedAt === null;
+    const awaitingRights = logo && !logo.rightsConfirmedAt;
     return `
       <div class="onboard-card">
         <h3 class="onboard-card-title">Logo del club</h3>
@@ -6442,6 +6425,29 @@ class BiqOnboardApp extends HTMLElement {
   // ─── Event wiring ──────────────────────────────────────────────────────
 
   private wireEvents(clubId: string): void {
+    const brand = this.shadow.querySelector('[data-identity-brand]') as HTMLInputElement | null;
+    const alt = this.shadow.querySelector('[data-identity-alt]') as HTMLInputElement | null;
+    const keepColours = () => { if (brand && alt) { this._identityColours[clubId] = { brand: brand.value, alt: alt.value }; const apply = this.shadow.querySelector('[data-identity-apply]') as HTMLButtonElement | null; if (apply) apply.disabled = true; } };
+    brand?.addEventListener('input', keepColours);
+    alt?.addEventListener('input', keepColours);
+    this.shadow.querySelector('[data-identity-default]')?.addEventListener('click', () => this.deactivateTheme(clubId));
+    this.shadow.querySelector('[data-identity-restore]')?.addEventListener('click', () => this.activateTheme(clubId, true));
+    this.shadow.querySelector('[data-identity-apply]')?.addEventListener('click', () => this.activateTheme(clubId));
+    this.shadow.querySelectorAll('[data-identity-variant]').forEach(button => button.addEventListener('click', async () => {
+      keepColours();
+      const colours = this._identityColours[clubId];
+      if (!colours) return;
+      this._loading = true;
+      this._error = null;
+      this.render();
+      try {
+        const res = await fetch(`/api/clubs/${clubId}/theme`, { method: 'PUT', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ seed_brand: colours.brand, seed_brand_alt: colours.alt, variant: (button as HTMLElement).dataset.identityVariant }) });
+        if (!res.ok) throw new Error((await res.json().catch(() => null))?.detail || 'No se pudo preparar la propuesta');
+        await this.loadThemeData(clubId);
+      } catch (err) { this._error = (err as Error).message; }
+      finally { this._loading = false; this.render(); }
+    }));
+
     // Navigation — shared path so every tab entry triggers its loader.
     this.shadow.querySelectorAll('[data-nav]').forEach(btn => {
       btn.addEventListener('click', () => {
@@ -6461,16 +6467,7 @@ class BiqOnboardApp extends HTMLElement {
     }
 
     // Activation switch — direct toggle, no modal
-    const activateSwitch = this.shadow.querySelector('[data-activate-switch]') as HTMLInputElement | null;
-    if (activateSwitch) {
-      activateSwitch.addEventListener('change', () => {
-        if (activateSwitch.checked) {
-          this.activateTheme(clubId);
-        } else {
-          this.deactivateTheme(clubId);
-        }
-      });
-    }
+
 
     // Revert theme (gate-failed case)
     const revertBtn = this.shadow.querySelector('[data-revert-btn]');

@@ -806,8 +806,8 @@ def test_logo_upload_happy_path(admin_client, club_id):
     assert logo["rightsConfirmedAt"] is not None
 
 
-def test_logo_upload_404_without_theme(admin_client, club_id):
-    """Upload requires an existing theme."""
+def test_logo_upload_creates_draft_without_theme(admin_client, club_id):
+    """Logo-first manual setup does not require website extraction."""
     import base64
 
     tiny_png = base64.b64decode(
@@ -817,7 +817,10 @@ def test_logo_upload_404_without_theme(admin_client, club_id):
         f"/api/admin/clubs/{club_id}/theme/logo/upload",
         files={"file": ("logo.png", tiny_png, "image/png")},
     )
-    assert r.status_code == 404
+    assert r.status_code == 200
+    state = admin_client.get(f"/api/admin/clubs/{club_id}/theme").json()
+    assert state["theme"] is None
+    assert state["draftTheme"]["logo"]["sourceUrl"] == "manual-upload"
 
 
 def test_logo_upload_rejects_oversized(admin_client, club_id):
@@ -1046,3 +1049,73 @@ def test_reactivating_deactivated_draft_theme_succeeds(admin_client, club_id):
     reg = org.get_registry()
     club = reg.get_club(club_id)
     assert club.theme["status"] == "active"
+
+
+def test_identity_manual_callback_apply_and_restore(admin_client, club_id, monkeypatch):
+    import copy
+    from biq_onboard_server import org
+    original = copy.deepcopy(_seed_active_gated_theme(club_id))
+    base = f"/api/admin/clubs/{club_id}/theme"
+    manual = admin_client.put(base, json={"seed_brand": "#112233", "seed_brand_alt": "#abcdef", "variant": "soft"})
+    assert manual.status_code == 200
+    state = admin_client.get(base).json()
+    assert state["theme"] == original
+    assert state["draftTheme"]["logo"] == original["logo"]
+    assert state["draftTheme"]["seed"]["variant"] == "soft"
+    assert admin_client.post(base + "/activate", json={"confirmed": True}).status_code == 409
+    job = state["themeJob"]
+    proposal = copy.deepcopy(original)
+    proposal["seed"]["brand"] = "#112233"
+    proposal["status"] = "active"  # a worker cannot self-activate
+    monkeypatch.setenv("BIQ_THEME_JOB_RESULT_TOKEN", "test-result")
+    result = {"status": "succeeded", "theme": proposal, "jobId": job["lease"]["holder"], "sourceUrl": ""}
+    assert admin_client.post(base + "/result", json=result, headers={"Authorization": "Bearer test-result"}).status_code == 200
+    state = admin_client.get(base).json()
+    assert state["theme"] == original
+    assert state["draftTheme"]["status"] == "draft"
+    assert admin_client.post(base + "/activate", json={"confirmed": True, "expected_revision": job["revision"]}).status_code == 409
+    assert admin_client.post(base + "/activate", json={"confirmed": False}).status_code == 400
+    assert admin_client.post(base + "/activate", json={"confirmed": True, "expected_revision": state["themeJob"]["revision"]}).status_code == 200
+    applied = admin_client.get(base).json()
+    assert applied["theme"]["seed"]["brand"] == "#112233"
+    assert applied["draftTheme"] is None
+    assert applied["themeJob"]["previousTheme"] == original
+    assert admin_client.post(base + "/activate", json={"confirmed": True, "restore_previous": True, "expected_revision": applied["themeJob"]["revision"]}).status_code == 200
+    restored = org.get_registry().get_club(club_id).theme
+    assert restored["seed"] == original["seed"]
+    assert restored["tokens"] == original["tokens"]
+
+
+def test_identity_superseded_manual_job_cannot_replace_newer_draft(admin_client, club_id, monkeypatch):
+    base = f"/api/admin/clubs/{club_id}/theme"
+    first = admin_client.put(base, json={"seed_brand": "#112233"}).json()["themeJob"]
+    second = admin_client.put(base, json={"seed_brand": "#445566"}).json()["themeJob"]
+    assert first["lease"]["holder"] != second["lease"]["holder"]
+    monkeypatch.setenv("BIQ_THEME_JOB_RESULT_TOKEN", "test-result")
+    r = admin_client.post(base + "/result", json={"status": "succeeded", "theme": {"gate": {"passed": True}}, "jobId": first["lease"]["holder"], "sourceUrl": ""}, headers={"Authorization": "Bearer test-result"})
+    assert r.status_code == 409
+    assert admin_client.get(base).json()["draftTheme"]["seed"]["brand"] == "#445566"
+
+
+def test_identity_manual_logo_survives_colour_generation(admin_client, club_id):
+    import base64
+    base = f"/api/admin/clubs/{club_id}/theme"
+    png = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==")
+    assert admin_client.put(base + "/logo/upload", files={"file": ("logo.png", png, "image/png")}).status_code == 200
+    assert admin_client.put(base, json={"seed_brand": "#112233"}).status_code == 200
+    state = admin_client.get(base).json()
+    assert state["draftTheme"]["logo"]["sourceUrl"] == "manual-upload"
+    assert state["theme"] is None
+
+
+@pytest.mark.parametrize("svg", [b'<svg><script>alert(1)</script></svg>', b'<svg onload="alert(1)"/>', b'<svg><image href="https://internal/"/></svg>', b'<!DOCTYPE svg [<!ENTITY x SYSTEM "file:///etc/passwd">]><svg/>'])
+def test_identity_rejects_active_svg(admin_client, club_id, svg):
+    r = admin_client.put(f"/api/admin/clubs/{club_id}/theme/logo/upload", files={"file": ("logo.svg", svg, "image/svg+xml")})
+    assert r.status_code == 415
+
+
+def test_identity_logo_url_rejects_private_address(admin_client, club_id, monkeypatch):
+    import socket
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **k: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 443))])
+    r = admin_client.put(f"/api/admin/clubs/{club_id}/theme/logo", json={"logo_url": "https://club.example/logo.png"})
+    assert r.status_code == 400

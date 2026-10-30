@@ -185,13 +185,13 @@ class TestF5GateE2E:
         r = admin_client.get(f"/api/admin/clubs/{club_id}/theme")
         assert r.status_code == 200
         data = r.json()
-        assert data["theme"] is not None
-        assert data["theme"]["status"] == "draft"
-        assert data["theme"]["gate"]["passed"] is True
+        assert data["draftTheme"] is not None
+        assert data["draftTheme"]["status"] == "draft"
+        assert data["draftTheme"]["gate"]["passed"] is True
         assert data["themeJob"]["status"] == "succeeded"
 
         # F5: Verify the REPAIRED token value is stored, not the original
-        dark_ghost = data["theme"]["tokens"]["dark"]["--biq-color-action-ghost-text"]
+        dark_ghost = data["draftTheme"]["tokens"]["dark"]["--biq-color-action-ghost-text"]
         assert dark_ghost == "#EB5200", f"expected repaired #EB5200, got {dark_ghost}"
 
     def test_activate_gate_passing_theme_succeeds(self, admin_client, pending_job, monkeypatch):

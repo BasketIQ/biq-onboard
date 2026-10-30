@@ -3723,7 +3723,7 @@ class BiqOnboardApp extends HTMLElement {
       : 'club-details';
     const title = {
       landing: 'Mi Club',
-      'club-details': 'Mi Club: Estilo',
+      'club-details': 'Mi Club: Identidad',
       teams: 'Mi Club: Equipos',
       members: 'Mi Club: Miembros',
       profile: 'Mi Club: Perfil',
@@ -4341,7 +4341,7 @@ class BiqOnboardApp extends HTMLElement {
 
     this._paint(`<style>${styles}</style>
       <div class="onboard-app">
-        ${this._renderSectionSubhead(this._subheadSpec(section, canManageMembers))}
+        ${section === 'club-details' && !inSubscreen ? '' : this._renderSectionSubhead(this._subheadSpec(section, canManageMembers))}
         ${inSubscreen ? '' : `<nav class="onboard-nav">
           <button class="onboard-nav-item ${section === 'club-details' ? 'active' : ''}" data-nav="club-details">Identidad</button>
           <button class="onboard-nav-item ${section === 'teams' ? 'active' : ''}" data-nav="teams">Equipos</button>
@@ -4382,8 +4382,8 @@ class BiqOnboardApp extends HTMLElement {
     const canRetry = jobStatus === 'failed' || jobStatus === 'unreachable' || jobStatus === 'rejected_not_a_club' || jobStatus === 'unsupported_source' || this._isStale;
 
     return `
-      <section class="onboard-section">
-        <h2 class="onboard-section-title">${escapeHtml(club.name || club.id)}</h2>
+      <section class="onboard-section identity-editor">
+        <h2 class="onboard-section-title">${escapeHtml(club.name || 'Mi club')}</h2>
 
         ${this._error ? `<div class="onboard-error">${escapeHtml(this._error)}</div>` : ''}
 
@@ -4429,7 +4429,7 @@ class BiqOnboardApp extends HTMLElement {
       const logo = mode === 'light' ? this._theme?.logo?.onLight : this._theme?.logo?.onDark || this._theme?.logo?.onLight;
       return `<div class="identity-preview" style="background:${bg};color:${fg}"><span>${mode === 'light' ? 'Claro' : 'Oscuro'}</span><div class="identity-preview-header" style="background:${header};color:${text}">${logo ? `<img src="${escapeHtml(logo)}" alt="Escudo en vista previa">` : ''}${escapeHtml(this._org?.club?.name || 'Tu club')}</div><p>Planifica la próxima jugada.</p><p class="identity-preview-selection" style="background:${tint};color:${onTint}">Objetivo seleccionado</p><button type="button" tabindex="-1" aria-disabled="true">Añadir</button></div>`;
     }).join('');
-    return `<div class="onboard-card"><h3 class="onboard-card-title">Colores del club</h3><p class="onboard-card-desc">Elige principal y secundario. El fondo y el texto se adaptan a cada modo; las acciones conservan el naranja de BasketSpark.</p><div class="identity-colours"><label>Principal <input aria-label="Color principal" type="color" data-identity-brand value="${colours.brand}"></label><label>Secundario <input aria-label="Color secundario" type="color" data-identity-alt value="${colours.alt}"></label></div><div class="identity-variants">${[['standard', 'Preparar vista previa'], ['contrast', 'Más contraste'], ['soft', 'Más suave']].map(([id, label]) => `<button class="onboard-btn ${id === 'standard' ? 'onboard-btn-primary' : ''}" data-identity-variant="${id}" ${this._loading ? 'disabled' : ''}>${label}</button>`).join('')}</div><p class="onboard-card-desc" role="status">${this._theme?.tokens ? 'Vista previa de la última propuesta calculada. Prepara una nueva vista previa para comprobar tus cambios.' : 'Prepara una propuesta para comprobar los colores antes de aplicar.'}</p><div class="identity-previews">${previews}</div></div>`;
+    return `<div class="onboard-card"><h3 class="onboard-card-title">Colores del club</h3><p class="onboard-card-desc">Elige principal y secundario. El fondo y el texto se adaptan a cada modo; las acciones conservan el naranja de BasketSpark.</p><div class="identity-colours"><label>Principal <input aria-label="Color principal" type="color" data-identity-brand value="${colours.brand}"></label><label>Secundario <input aria-label="Color secundario" type="color" data-identity-alt value="${colours.alt}"></label></div><div class="identity-variants">${[['standard', 'Preparar vista previa'], ['contrast', 'Más contraste'], ['soft', 'Más suave']].map(([id, label]) => `<button class="onboard-btn ${id === 'standard' ? 'onboard-btn-primary' : 'onboard-btn-secondary'}" data-identity-variant="${id}" ${this._loading ? 'disabled' : ''}>${label}</button>`).join('')}</div><p class="onboard-card-desc" role="status">${this._theme?.tokens ? 'Vista previa de la última propuesta calculada. Prepara una nueva vista previa para comprobar tus cambios.' : 'Prepara una propuesta para comprobar los colores antes de aplicar.'}</p><div class="identity-previews">${previews}</div></div>`;
   }
 
   private renderActivationToggle(theme: ClubTheme, isPolling: boolean = false): string {

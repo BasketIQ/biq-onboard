@@ -753,7 +753,7 @@ def activate_theme(club_id: str, payload: ActivateRequest, request: Request) -> 
     if payload.expected_revision is not None and payload.expected_revision != current_job.get("revision"):
         raise HTTPException(status_code=409, detail="proposal changed; reload before applying")
     if current_job.get("status") in ("pending", "running"):
-        raise HTTPException(status_code=409, detail="proposal generation is still running")
+        raise HTTPException(status_code=409, detail="proposal generation is pending or running")
     if not payload.confirmed:
         raise HTTPException(status_code=400, detail="explicit confirmation required")
     theme = _editable_theme(club)

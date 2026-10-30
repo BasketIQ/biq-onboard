@@ -41,7 +41,7 @@ for (const mode of ['light','dark']) for (const width of [390,1280]) {
         if(u.pathname.endsWith('/theme/generate')) {state.themeJob={...state.themeJob,status:'unreachable'};return route.fulfill({json:{ok:true}});}
         if(u.pathname.startsWith('/api/')) return route.fulfill({json:{ok:true}});
         const dark=mode==='dark';
-        return route.fulfill({contentType:'text/html',body:`<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><style>:root{--biq-text:${dark?'#f4f6fb':'#0d1735'};--biq-muted:${dark?'#aab4c8':'#5f6b82'};--biq-surface:${dark?'#111a2d':'#ffffff'};--biq-surface-2:${dark?'#162039':'#eef1f6'};--biq-border:${dark?'#7a8ab0':'#dce2ef'};--biq-orange:${dark?'#ff6a18':'#c94500'};--biq-on-orange:${dark?'#080d1a':'#ffffff'};font:16px system-ui;color:var(--biq-text);background:${dark?'#080d1a':'#f4f6fa'}}body{margin:0}*{box-sizing:border-box}</style><biq-onboard-app></biq-onboard-app><script type="module" src="/bundle.js"></script>`});
+        return route.fulfill({contentType:'text/html',body:`<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><style>:root{--biq-text:${dark?'#f4f6fb':'#0d1735'};--biq-muted:${dark?'#aab4c8':'#5f6b82'};--biq-surface:${dark?'#111a2d':'#ffffff'};--biq-surface-2:${dark?'#162039':'#eef1f6'};--biq-card:${dark?'#111a2d':'#ffffff'};--biq-surface-1:${dark?'#111a2d':'#ffffff'};--biq-surface-3:${dark?'#1b2742':'#eef1f6'};--biq-line:${dark?'#7a8ab0':'#dce2ef'};--biq-border:${dark?'#7a8ab0':'#dce2ef'};--biq-orange:${dark?'#ff6a18':'#c94500'};--biq-on-orange:${dark?'#080d1a':'#ffffff'};font:16px system-ui;color:var(--biq-text);background:${dark?'#080d1a':'#f4f6fa'}}body{margin:0}*{box-sizing:border-box}</style><biq-onboard-app></biq-onboard-app><script type="module" src="/bundle.js"></script>`});
       });
       await page.goto('https://identity.fixture/');
       await page.evaluate(async initial=>{
@@ -58,7 +58,14 @@ for (const mode of ['light','dark']) for (const width of [390,1280]) {
       await page.waitForFunction(()=>!document.querySelector('biq-onboard-app').shadowRoot.querySelector('[data-identity-apply]').disabled);
       assert.equal(state.theme.seed.brand,'#123456');
       assert.equal(calls[0].variant,'soft');
+      const savedRevision = state.themeJob.revision;
+      state.themeJob.status='pending';
+      await page.evaluate(()=>document.querySelector('biq-onboard-app').loadThemeData('demo'));
+      assert.equal(await apply().isDisabled(),true,'apply blocked during generation');
+      state.themeJob.status='succeeded';state.themeJob.revision=savedRevision;
+      await page.evaluate(()=>document.querySelector('biq-onboard-app').loadThemeData('demo'));
       assert.equal(state.draftTheme.seed.brand,'#224466');
+      await page.evaluate(()=>window.scrollTo(0,0));
       if(process.env.BIQ_IDENTITY_SCREENSHOTS){mkdirSync(process.env.BIQ_IDENTITY_SCREENSHOTS,{recursive:true});await page.screenshot({path:resolve(process.env.BIQ_IDENTITY_SCREENSHOTS,`${mode}-${width}.png`),fullPage:true});}
       assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true,'no horizontal page overflow');
       await apply().click();
@@ -75,6 +82,9 @@ for (const mode of ['light','dark']) for (const width of [390,1280]) {
       await page.getByRole('button',{name:'Usar identidad BasketSpark'}).click();
       await page.waitForFunction(()=>document.querySelector('biq-onboard-app')._theme.status==='draft');
       assert.equal(state.theme.tokens.light['--biq-color-surface-inverse'],'#132334','deactivate retains tokens');
+      await page.getByRole('button',{name:'Perfil',exact:true}).click();
+      await page.getByRole('button',{name:'Identidad',exact:true}).click();
+      await page.getByLabel('Color principal').waitFor();
       assert.deepEqual(errors,[]);
     } finally {await browser.close();}
   });

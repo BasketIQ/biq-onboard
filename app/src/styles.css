@@ -1858,3 +1858,8 @@
 .identity-preview-header { display: flex; align-items: center; gap: 8px; padding: 12px; border-radius: 8px; overflow-wrap: anywhere; }
 .identity-preview-header img { max-width: 48px; max-height: 44px; object-fit: contain; background: white; border-radius: 4px; }
 .identity-preview-selection { padding: 12px; border-radius: 8px; }
+
+.identity-editor .onboard-card-desc,
+.identity-editor .onboard-input,
+.identity-editor .onboard-btn { font-size: 16px; }
+.identity-editor .onboard-btn { min-height: 44px; }

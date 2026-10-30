@@ -70,7 +70,8 @@ def test_manual_theme_submission_succeeds_without_prior_theme(admin_client, club
     # Verify theme is now persisted and readable
     resp = admin_client.get(f"/api/admin/clubs/{club_id}/theme")
     assert resp.status_code == 200
-    theme = resp.json()["theme"]
+    assert resp.json()["theme"] is None
+    theme = resp.json()["draftTheme"]
     assert theme["status"] == "draft"
     assert theme["seed"]["brand"] == "#FF5A00"
     assert theme["seed"]["detectedFrom"] == "manual"
@@ -84,17 +85,11 @@ def test_manual_theme_persists_draft_even_if_enqueue_fails(monkeypatch, admin_cl
     This ensures the manual fallback is resilient: the admin's color
     choice is never lost due to an infrastructure failure.
     """
-    # Simulate enqueue failure by setting a queue env without real GCP access
-    monkeypatch.setenv("BIQ_CLOUD_TASKS_QUEUE", "club-theme-generation")
-    monkeypatch.setenv("GCP_PROJECT_ID", "fake-project")
-    monkeypatch.setenv("GCP_TASKS_QUEUE", "club-theme-generation")
-    monkeypatch.setenv("GCP_TASKS_LOCATION", "europe-west1")
-    monkeypatch.setenv("GCP_THEME_JOB_NAME", "club-theme-generation")
-    monkeypatch.setenv("GCP_TASK_INVOKER_SA", "invoker@fake-project.iam.gserviceaccount.com")
-
-    # The _get_tasks_client() will try to create a real client and may
-    # succeed (library installed), but create_task will fail because the
-    # project/queue doesn't exist. Either way, the 503 is expected.
+    # Hermetic enqueue failure: do not discover ADC or contact Cloud Tasks.
+    from biq_onboard_server.routers import theme as theme_router
+    def unavailable(*args, **kwargs):
+        raise RuntimeError("fixture queue unavailable")
+    monkeypatch.setattr(theme_router, "_enqueue_generation_task", unavailable)
     resp = admin_client.put(f"/api/admin/clubs/{club_id}/theme", json={
         "seed_brand": "#FF5A00",
         "seed_brand_alt": None,
@@ -105,7 +100,8 @@ def test_manual_theme_persists_draft_even_if_enqueue_fails(monkeypatch, admin_cl
     # Verify the theme draft was still persisted (resilient fallback)
     resp = admin_client.get(f"/api/admin/clubs/{club_id}/theme")
     assert resp.status_code == 200
-    theme = resp.json()["theme"]
+    assert resp.json()["theme"] is None
+    theme = resp.json()["draftTheme"]
     assert theme["status"] == "draft"
     assert theme["seed"]["brand"] == "#FF5A00"
     assert theme["source"]["kind"] == "manual"

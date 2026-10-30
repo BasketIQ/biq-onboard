@@ -127,8 +127,8 @@ def test_url_entry_point_persists_intent_and_accepts_callback(admin_client, club
     club = reg.get_club(club_id)
     assert club.theme_job["status"] == "succeeded"
     assert club.theme_job["finishedAt"] is not None
-    assert club.theme is not None
-    assert club.theme["status"] == "active"
+    assert club.theme is None  # generation must not activate
+    assert club.theme_job["draftTheme"]["status"] == "draft"
 
 
 # ─── F5: Manual-colour entry point — same callback contract ──────────────
@@ -195,8 +195,8 @@ def test_manual_entry_point_persists_intent_and_accepts_callback(admin_client, c
     # 4. Final state
     club = reg.get_club(club_id)
     assert club.theme_job["status"] == "succeeded"
-    assert club.theme is not None
-    assert club.theme["source"]["kind"] == "manual"
+    assert club.theme is None  # manual generation also waits for Apply
+    assert club.theme_job["draftTheme"]["source"]["kind"] == "manual"
 
 
 # ─── F5: Dispatch failure — governed 503, retryable state ────────────────

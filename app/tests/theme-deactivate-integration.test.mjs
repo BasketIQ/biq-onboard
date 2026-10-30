@@ -47,7 +47,7 @@ for (const mode of ['light','dark']) for (const width of [390,1280]) {
       await page.evaluate(async initial=>{
         await customElements.whenDefined('biq-onboard-app');
         const el=document.querySelector('biq-onboard-app');
-        el._org={club:{id:'demo',name:'Club Baloncesto Prueba',website:'https://club.example'},role:'admin'};
+        el._org={club:{id:'demo',name:'Club Baloncesto Prueba',website:'https://club.example'},role:'administrator'};
         el._subRoute='club-details';el._theme=initial.theme;el._themeJob=initial.themeJob;el._loading=false;el.render();
       },state);
       const apply=()=>page.getByRole('button',{name:'Aplicar identidad',exact:true});

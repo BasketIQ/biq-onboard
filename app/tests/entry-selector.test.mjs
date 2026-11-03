@@ -551,6 +551,15 @@ test('≥3 clubs with no reciente datum: the neutral «Elegir club» access open
         searchFocus: el.shadowRoot.activeElement?.matches('[data-entry-club-picker-search]'),
       };
     });
+    await page.setViewportSize({width: 360, height: 580});
+    const visible = await page.evaluate(() => {
+      const host = document.getElementById('app');
+      host.style.setProperty('--shell-footer-space', '64px');
+      const dlg = host.shadowRoot.querySelector('.entry-help-dialog');
+      dlg.scrollTop = dlg.scrollHeight;
+      return dlg.querySelector('.entry-help-note').getBoundingClientRect().bottom <= innerHeight - 64;
+    });
+    assert.ok(visible, 'the last line can scroll above the fixed shell footer');
     assert.equal(open.role, 'dialog');
     assert.equal(open.modal, 'true');
     assert.equal(open.rows, 5, 'every club is a direct-entry row');
@@ -1689,6 +1698,7 @@ test('Salir stays reachable in the entry content — standalone posts logout and
         noChrome: !el.shadowRoot.querySelector('header, footer'),
       };
     });
+    assert.equal(await page.locator('[data-entry-logout]').count(), 1);
     assert.equal(state.btnText, 'Salir');
     assert.ok(state.insideStep, 'Salir is a secondary action inside the content');
     assert.ok(state.noChrome, 'onboard draws no header/footer of its own');

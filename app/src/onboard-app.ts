@@ -4960,7 +4960,6 @@ class BiqOnboardApp extends HTMLElement {
             <img class="entry-chispa-icon" src="${CHISPA_HEAD_COMPACT_URI}" alt="" aria-hidden="true">
             <span class="entry-chispa-copy"><strong>¿Mi equipo o mi club?</strong><small>Chispa te ayuda a elegir.</small></span>
           </button>
-          <button class="entry-logout" type="button" data-entry-logout ${busy ? 'disabled' : ''}>Salir</button>
         </div>
       </div>
       ${helpDialog}

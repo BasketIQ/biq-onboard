@@ -1665,13 +1665,13 @@
 
 .entry-help-backdrop {
   position: fixed;
-  inset: 0;
+  inset: 0 0 max(var(--shell-footer-space, 0px), env(safe-area-inset-bottom, 0px));
   background: var(--biq-color-scrim, rgb(0 0 0 / 45%));
   display: flex;
   align-items: flex-end;
   justify-content: center;
   z-index: 60;
-  padding: 16px 16px calc(16px + env(safe-area-inset-bottom, 0px));
+  padding: 16px;
 }
 
 .entry-help-dialog {
@@ -1681,7 +1681,9 @@
   padding: 18px;
   width: 100%;
   max-width: 380px;
-  max-height: min(80vh, 560px);
+  box-sizing: border-box;
+  max-height: min(100%, 560px);
+  overscroll-behavior: contain;
   overflow-y: auto;
   display: flex;
   flex-direction: column;

@@ -146,10 +146,10 @@ test('club-details/landing: el tema resuelto acredita una vez; reentrada en cali
     await page.waitForTimeout(300);
     assert.equal((await nav()).length, 2);
 
-    // Equipos: su catálogo resuelve y acredita su propio destino.
+    // Equipos pertenece a los administradores. La ruta directa de un entrenador queda bloqueada.
     await page.evaluate(() => { document.getElementById('app').route = 'teams'; });
     await page.waitForFunction(() => window.__nav.length === 3, null, { timeout: 10000 });
-    assert.deepEqual((await nav())[2], { state: 'content' });
+    assert.deepEqual((await nav())[2], { state: 'blocked' });
 
     // Vuelta a club-details: otro destino → acredita de nuevo en caliente.
     await page.evaluate(() => { document.getElementById('app').route = 'club-details'; });

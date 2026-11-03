@@ -2456,6 +2456,8 @@ class BiqOnboardApp extends HTMLElement {
       ]);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
+      if (this._org?.club?.id !== clubId) return;
+      this._pendingCatalogClub = data.setup_pending === true ? clubId : '';
       this._teams = data.teams || [];
       this._maybeStartSeedingPolling(clubId);
     } catch (err) {
@@ -2772,6 +2774,10 @@ class BiqOnboardApp extends HTMLElement {
       // pueden llevar texto nuevo tecleado durante el vuelo.
       this._editModel = res.model;
       this._editSavedChanges = true;
+      const savedClub = this._org?.club?.id;
+      if (savedClub && this._pendingCatalogClub === savedClub && !this._isPersonalContext() && this._canManageTeams()) {
+        void this._confirmTeamCatalog(savedClub);
+      }
       // F-CL-3: adopta los player_id que el servidor acaba de asignar, para
       // que el siguiente autosave los reenvíe (estabilidad de identidad —
       // una fila reenviada sin id recibiría uno nuevo). El roster viaja
@@ -5737,6 +5743,26 @@ class BiqOnboardApp extends HTMLElement {
   }
 
   // F12: Render the Equipos tab — club team catalog management.
+  private _pendingCatalogClub = '';
+  private _confirmedCatalogClub = '';
+  private _catalogConfirmationError = '';
+
+  private async _confirmTeamCatalog(clubId: string): Promise<void> {
+    try {
+      const result = await fetch(`/api/club-checklist/${encodeURIComponent(clubId)}/teams-setup/confirm`, {
+        method: 'POST', credentials: 'include',
+      });
+      if (!result.ok) throw new Error();
+      if (this._org?.club?.id !== clubId) return;
+      this._confirmedCatalogClub = clubId;
+      this._catalogConfirmationError = '';
+    } catch {
+      if (this._org?.club?.id !== clubId) return;
+      this._catalogConfirmationError = clubId;
+    }
+    if (this._activeSubscreen() !== 'team-edit') this.render();
+  }
+
   private renderTeamsTab(): string {
     const canPick = this._canPickTeams();
     const canManage = this._canManageTeams();
@@ -5938,6 +5964,9 @@ class BiqOnboardApp extends HTMLElement {
       ${seedingBanner}
       ${this._teamsError ? `<div class="onboard-error" role="alert">${escapeHtml(this._teamsError)}</div>` : ''}
       ${sections || '<p class="onboard-card-desc">No hay equipos.</p>'}
+      ${canManage && this._pendingCatalogClub === this._org?.club?.id && this._teams.length && !this._teamsError && !this._teamsLoading && !seedingBanner && this._confirmedCatalogClub !== this._org?.club?.id
+        ? '<button class="onboard-btn onboard-btn-primary" data-confirm-team-catalog>Confirmar equipos</button>' : ''}
+      ${this._catalogConfirmationError && this._catalogConfirmationError === this._org?.club?.id ? '<p role="alert">No se ha podido confirmar el catálogo. Vuelve a pulsar Confirmar equipos.</p>' : ''}
       ${deleteModal}
     </section>`;
   }
@@ -6757,6 +6786,9 @@ class BiqOnboardApp extends HTMLElement {
     }
 
     // Reseed the team catalog after a failed/stalled seeding job.
+    this.shadow.querySelector('[data-confirm-team-catalog]')?.addEventListener('click', () => {
+      void this._confirmTeamCatalog(clubId);
+    });
     const reseedBtn = this.shadow.querySelector('[data-reseed-teams]');
     if (reseedBtn) {
       reseedBtn.addEventListener('click', async () => {
@@ -6814,6 +6846,7 @@ class BiqOnboardApp extends HTMLElement {
             credentials: 'include',
           });
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          if (this._pendingCatalogClub === clubId) await this._confirmTeamCatalog(clubId);
           await this.loadTeams(clubId);
         } catch (err) {
           this._teamsError = (err as Error).message;
@@ -6832,6 +6865,7 @@ class BiqOnboardApp extends HTMLElement {
             credentials: 'include',
           });
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          if (this._pendingCatalogClub === clubId) await this._confirmTeamCatalog(clubId);
           await this.loadTeams(clubId);
         } catch (err) {
           this._teamsError = (err as Error).message;
@@ -6870,6 +6904,7 @@ class BiqOnboardApp extends HTMLElement {
           });
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
           this._deleteConfirmTeamId = null;
+          if (this._pendingCatalogClub === clubId) await this._confirmTeamCatalog(clubId);
           await this.loadTeams(clubId);
         } catch (err) {
           this._teamsError = (err as Error).message;
@@ -6924,6 +6959,7 @@ class BiqOnboardApp extends HTMLElement {
           });
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
           this._addingTeamCategory = null;
+          if (this._pendingCatalogClub === clubId) await this._confirmTeamCatalog(clubId);
           await this.loadTeams(clubId);
         } catch (err) {
           this._teamsError = (err as Error).message;

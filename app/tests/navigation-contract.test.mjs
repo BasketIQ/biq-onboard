@@ -449,3 +449,29 @@ test('§C provider var --biq-shell-chrome-top wins over the measured-header fall
     await browser.close();
   }
 });
+
+test('el catálogo solo se confirma al pulsar y un fallo permite reintentar', async () => {
+  const browser = await chromium.launch();
+  try {
+    const page = await newPage(browser);
+    let confirmations = 0;
+    await page.route('**/api/clubs/club1/teams', route =>
+      route.fulfill({ json: { teams: MGMT_TEAMS, setup_pending: true } }));
+    await page.route('**/teams-setup/confirm', route => {
+      confirmations++;
+      return route.fulfill({ status: confirmations === 1 ? 503 : 200, json: {} });
+    });
+    await mountAdmin(page);
+    await page.evaluate(() => { document.getElementById('app').route = 'teams'; });
+    const confirm = page.getByRole('button', { name: 'Confirmar equipos' });
+    await confirm.waitFor();
+    assert.equal(confirmations, 0);
+    await confirm.click();
+    await page.getByRole('alert').filter({ hasText: 'Vuelve a pulsar' }).waitFor();
+    await confirm.click();
+    await confirm.waitFor({ state: 'hidden' });
+    assert.equal(confirmations, 2);
+  } finally {
+    await browser.close();
+  }
+});

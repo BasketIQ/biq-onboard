@@ -539,6 +539,7 @@ class TestOpsClubCreate:
         assert resp.status_code == 201, resp.text
         d = resp.json()
         assert d["club"]["name"] == "Nuevo Club"
+        assert org.get_registry().get_club(d["club"]["id"]).owner_account_id == "acc_new"
         assert d["membership_subject_id"].startswith("f1f2m_")
         membership = org.get_registry().get_user(d["membership_subject_id"])
         assert membership.club_id == d["club"]["id"]

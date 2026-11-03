@@ -29,6 +29,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, ValidationError
 
+from biq_core.org import Club
 from biq_core.roles import can_assign_role, effective_capabilities
 
 from . import entry_proof, invitations, org
@@ -303,6 +304,12 @@ async def invitation_redeem(request: Request) -> dict:
     return plan.response or {}
 
 
+class AccountOwnedClub(Club):
+    """Persist account ownership in the registry's club creation transaction."""
+
+    owner_account_id: str
+
+
 class ClubCreateBody(BaseModel):
     # Loosely typed: auth (S2S + entry proof) must precede field validation.
     name: str = Field(default="", max_length=200)
@@ -334,7 +341,7 @@ async def ops_create_club(request: Request) -> dict:
     if website and not website.startswith("https://"):
         raise HTTPException(status_code=422, detail="website must use https://")
 
-    from biq_core.org import Club, User
+    from biq_core.org import User
     from biq_core.roles import RoleAssignment
 
     registry = org.get_registry()
@@ -375,7 +382,8 @@ async def ops_create_club(request: Request) -> dict:
     scope = f"club:{club_id}"
     email = (body.email or "").strip().lower()
 
-    club = Club(id=club_id, name=name, status="active", website=website or None)
+    club = AccountOwnedClub(id=club_id, name=name, status="active", website=website or None,
+                            owner_account_id=account_id)
     membership = User(
         id=membership_id,
         club_id=club_id,

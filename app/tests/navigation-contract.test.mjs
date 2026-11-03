@@ -226,7 +226,7 @@ test('§C team edit subscreen: «Mi Club: Equipos» + secondary context, back �
         .querySelector('.onboard-subhead-title strong')?.textContent.trim(),
     }));
     assert.equal(after.modal, false);
-    assert.equal(after.title, 'Mi Club: Equipos', 'Equipos list keeps the parent section title');
+    assert.equal(after.title, undefined, 'Equipos list has no redundant subheader');
     assert.equal(after.hash, '#/onboard/teams', 'back clears ?edit= and stays on the section Home');
     assert.ok(!after.hash.includes('edit='), 'no ?edit= survives the back navigation');
   } finally {
@@ -313,17 +313,13 @@ test('addendum §2/§3: submenu title matrix on every club-selected view; list b
     const page = await newPage(browser);
     await mountAdmin(page);
 
-    // Mi Club landing (bare #/onboard): «Mi Club», no section-back.
-    const landing = await page.evaluate(subheadState);
-    assert.equal(landing.present, true, 'landing renders the section submenu');
-    assert.equal(landing.title, 'Mi Club');
-    assert.equal(landing.hasBack, false, 'landing has no section-back — it IS the section Home');
-    assert.equal(landing.context, null);
+    assert.equal((await page.evaluate(subheadState)).present, false);
+    await page.evaluate(() => { document.getElementById('app').route = 'teams'; });
+    await page.locator('[data-team-row]').first().waitFor();
+    assert.equal((await page.evaluate(subheadState)).present, false);
 
     // Section lists: exact titles + «Volver a Mi Club» → landing.
     for (const [route, title, marker] of [
-      ['club-details', 'Mi Club: Estilo', '.onboard-card'],
-      ['teams', 'Mi Club: Equipos', '.onboard-team-list'],
       ['members', 'Mi Club: Miembros', '[data-member-row]'],
       ['profile', 'Mi Club: Perfil', '.onboard-profile-card'],
     ]) {
@@ -341,7 +337,7 @@ test('addendum §2/§3: submenu title matrix on every club-selected view; list b
         document.getElementById('app').shadowRoot.querySelector('[data-section-back]').click());
       await page.waitForFunction(() =>
         document.getElementById('app').shadowRoot
-          .querySelector('.onboard-subhead-title strong')?.textContent.trim() === 'Mi Club',
+          .querySelector('[data-section-subhead]') === null,
       { timeout: 5000 });
       const back = await page.evaluate(() => ({
         hash: location.hash,

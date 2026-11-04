@@ -226,7 +226,7 @@ test('§C team edit subscreen: «Mi Club: Equipos» + secondary context, back �
         .querySelector('.onboard-subhead-title strong')?.textContent.trim(),
     }));
     assert.equal(after.modal, false);
-    assert.equal(after.title, 'Mi Club: Equipos', 'Equipos list keeps the parent section title');
+    assert.equal(after.title, undefined, 'Equipos list has no redundant subheader');
     assert.equal(after.hash, '#/onboard/teams', 'back clears ?edit= and stays on the section Home');
     assert.ok(!after.hash.includes('edit='), 'no ?edit= survives the back navigation');
   } finally {
@@ -313,17 +313,13 @@ test('addendum §2/§3: submenu title matrix on every club-selected view; list b
     const page = await newPage(browser);
     await mountAdmin(page);
 
-    // Mi Club landing (bare #/onboard): «Mi Club», no section-back.
-    const landing = await page.evaluate(subheadState);
-    assert.equal(landing.present, true, 'landing renders the section submenu');
-    assert.equal(landing.title, 'Mi Club');
-    assert.equal(landing.hasBack, false, 'landing has no section-back — it IS the section Home');
-    assert.equal(landing.context, null);
+    assert.equal((await page.evaluate(subheadState)).present, false);
+    await page.evaluate(() => { document.getElementById('app').route = 'teams'; });
+    await page.locator('[data-team-row]').first().waitFor();
+    assert.equal((await page.evaluate(subheadState)).present, false);
 
     // Section lists: exact titles + «Volver a Mi Club» → landing.
     for (const [route, title, marker] of [
-      ['club-details', 'Mi Club: Estilo', '.onboard-card'],
-      ['teams', 'Mi Club: Equipos', '.onboard-team-list'],
       ['members', 'Mi Club: Miembros', '[data-member-row]'],
       ['profile', 'Mi Club: Perfil', '.onboard-profile-card'],
     ]) {
@@ -341,7 +337,7 @@ test('addendum §2/§3: submenu title matrix on every club-selected view; list b
         document.getElementById('app').shadowRoot.querySelector('[data-section-back]').click());
       await page.waitForFunction(() =>
         document.getElementById('app').shadowRoot
-          .querySelector('.onboard-subhead-title strong')?.textContent.trim() === 'Mi Club',
+          .querySelector('[data-section-subhead]') === null,
       { timeout: 5000 });
       const back = await page.evaluate(() => ({
         hash: location.hash,
@@ -445,6 +441,32 @@ test('§C provider var --biq-shell-chrome-top wins over the measured-header fall
       return getComputedStyle(el).getPropertyValue('--biq-subhead-top').trim();
     });
     assert.equal(collapsedAttr, '0px', 'attr-only collapse still yields 0px');
+  } finally {
+    await browser.close();
+  }
+});
+
+test('el catálogo solo se confirma al pulsar y un fallo permite reintentar', async () => {
+  const browser = await chromium.launch();
+  try {
+    const page = await newPage(browser);
+    let confirmations = 0;
+    await page.route('**/api/clubs/club1/teams', route =>
+      route.fulfill({ json: { teams: MGMT_TEAMS, setup_pending: true } }));
+    await page.route('**/teams-setup/confirm', route => {
+      confirmations++;
+      return route.fulfill({ status: confirmations === 1 ? 503 : 200, json: {} });
+    });
+    await mountAdmin(page);
+    await page.evaluate(() => { document.getElementById('app').route = 'teams'; });
+    const confirm = page.getByRole('button', { name: 'Confirmar equipos' });
+    await confirm.waitFor();
+    assert.equal(confirmations, 0);
+    await confirm.click();
+    await page.getByRole('alert').filter({ hasText: 'Vuelve a pulsar' }).waitFor();
+    await confirm.click();
+    await confirm.waitFor({ state: 'hidden' });
+    assert.equal(confirmations, 2);
   } finally {
     await browser.close();
   }

@@ -1865,3 +1865,22 @@
 .identity-editor .onboard-input,
 .identity-editor .onboard-btn { font-size: 16px; }
 .identity-editor .onboard-btn { min-height: 44px; }
+
+/* Keep catalog confirmation within reach while browsing a long team list. */
+[data-confirm-team-catalog] {
+  position: fixed;
+  inset-inline-start: 50%;
+  transform: translateX(-50%);
+  bottom: calc(var(--shell-footer-space, env(safe-area-inset-bottom, 0px)) + var(--catalog-shell-margin, 0px) + 8px);
+  white-space: nowrap;
+  z-index: 2;
+}
+
+
+.onboard-section:has(> [data-confirm-team-catalog]) {
+  padding-bottom: 64px;
+}
+
+@media (min-width: 520px) {
+  [data-confirm-team-catalog] { --catalog-shell-margin: 22px; }
+}

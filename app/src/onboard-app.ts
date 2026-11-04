@@ -4076,7 +4076,7 @@ class BiqOnboardApp extends HTMLElement {
   private _paint(html: string): void {
     this._editDomFreeze = true;
     try {
-      const feedbackSurface = this._activeSubscreen() === 'team-edit' ? 'SR02'
+      const feedbackSurface = this._activeSubscreen() === 'team-edit' ? 'TEAM_SETUP'
         : this._subRoute === 'spaces' ? this._teamCreateOpen ? 'BI01' : 'IN02' : !this._org?.club ? 'BI01' : '';
       this.shadow.innerHTML = html + (feedbackSurface ? `<biq-product-feedback module="onboard" surface="${feedbackSurface}"></biq-product-feedback>` : '');
     } finally {

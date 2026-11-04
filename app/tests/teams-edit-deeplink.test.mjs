@@ -218,11 +218,7 @@ test('?edit=<unknown id> and non-management roles stay on the list', async () =>
       el.org = { club: { id: 'club1', name: 'Club Test' }, role: 'coach' };
       el.user = 'coach1';
     });
-    await coachPage.waitForFunction(() => {
-      const sr = document.getElementById('app').shadowRoot;
-      return !!sr.querySelector('.onboard-team-list');
-    }, { timeout: 10000 });
-    await coachPage.waitForTimeout(300);
+    await coachPage.getByText('Sin acceso a la administración de equipos.').waitFor();
     const coachView = await coachPage.evaluate(modalState);
     assert.equal(coachView.modal, false, 'non-management role must not get the edit modal');
     // A coach must never hit the management feed.
@@ -274,7 +270,7 @@ test('metadata feed OK + management feed failed → no editable empty draft, no 
     // row is NOT a roster. The editor must fail closed, not open players:[].
     await page.waitForFunction(() => {
       const el = document.getElementById('app');
-      return el._myTeamsLoaded === true && el._teamsLoading === false;
+      return el._teamsError && !el._teamsLoading;
     }, { timeout: 10000 });
     await page.waitForTimeout(400);
     const view = await page.evaluate(() => {
@@ -314,7 +310,7 @@ test('management row missing players → unavailable, not a phantom empty roster
     });
     await page.waitForFunction(() => {
       const el = document.getElementById('app');
-      return el._myTeamsLoaded === true && el._teamsLoading === false;
+      return el._catalogLoaded && !el._teamsLoading;
     }, { timeout: 10000 });
     await page.waitForTimeout(400);
     const view = await page.evaluate(() => {
@@ -346,7 +342,7 @@ test('delayed management feed → the edit intent waits, then opens the confirme
       el.user = 'admin';
     });
     await page.waitForFunction(() =>
-      document.getElementById('app')._myTeamsLoaded === true,
+      document.getElementById('app')._teamsLoading === true,
     { timeout: 10000 });
     await page.waitForTimeout(400);
     const early = await page.evaluate(() =>

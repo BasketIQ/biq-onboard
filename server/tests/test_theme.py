@@ -208,11 +208,16 @@ def test_enqueue_dev_mode_returns_synthetic_id(monkeypatch):
     assert task_id.startswith("dev-task-")
 
 
-def test_enqueue_production_calls_cloud_tasks(monkeypatch):
+@pytest.mark.parametrize("diagnostics", [False, True])
+def test_enqueue_production_calls_cloud_tasks(monkeypatch, diagnostics):
     """When BIQ_CLOUD_TASKS_QUEUE is set, _enqueue_generation_task
     creates a real Cloud Tasks task via the client library."""
     import json
 
+    monkeypatch.setenv("BIQ_OBSERVABILITY_ENABLED", "1" if diagnostics else "0")
+    from biq_observability import runtime
+    carrier = {"traceparent": "00-" + "b" * 32 + "-" + "c" * 16 + "-01", "x-biq-operation-id": "a" * 32, "authorization": "not-forwarded"}
+    monkeypatch.setattr(runtime, "capture_context", lambda: carrier)
     # Set the env var to enable the production path
     monkeypatch.setenv("BIQ_CLOUD_TASKS_QUEUE", "club-theme-generation")
     monkeypatch.setenv("GCP_PROJECT_ID", "test-project")
@@ -314,6 +319,14 @@ def test_enqueue_production_calls_cloud_tasks(monkeypatch):
     assert "containerOverrides" in body["overrides"]
     env_names = {e["name"] for e in body["overrides"]["containerOverrides"][0]["env"]}
     assert {"CLUB_ID", "SOURCE_URL", "LEASE_ID"} <= env_names
+    overrides = {e["name"]: e["value"] for e in body["overrides"]["containerOverrides"][0]["env"]}
+    if diagnostics:
+        assert overrides["BIQ_TRACEPARENT"] == carrier["traceparent"]
+        assert overrides["BIQ_OPERATION_ID"] == carrier["x-biq-operation-id"]
+    else:
+        assert "BIQ_TRACEPARENT" not in overrides
+        assert "BIQ_OPERATION_ID" not in overrides
+    assert "not-forwarded" not in body_bytes.decode()
 
     # Clean up
     monkeypatch.delenv("BIQ_CLOUD_TASKS_QUEUE", raising=False)

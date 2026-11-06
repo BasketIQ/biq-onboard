@@ -26,7 +26,10 @@ router = APIRouter()
 
 
 def _single_role(primary: str, additional: list[str] | None) -> str:
-    primary = validate_club_role(primary)
+    try:
+        primary = validate_club_role(primary)
+    except ValueError as exc:
+        raise HTTPException(422, "Selecciona Entrenador o Director deportivo.") from exc
     if any(validate_club_role(r) != primary for r in additional or []):
         raise HTTPException(422, "Cada miembro tiene un único rol en el club.")
     return primary

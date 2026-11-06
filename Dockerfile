@@ -11,6 +11,8 @@ RUN npm run build && npm run build:lib
 
 FROM python:3.12-slim
 WORKDIR /srv
+COPY vendor/biq_observability-0.1.0-py3-none-any.whl /opt/biq_observability-0.1.0-py3-none-any.whl
+RUN pip install --no-cache-dir /opt/biq_observability-0.1.0-py3-none-any.whl
 
 # wheelhouse/ is prefetched from the private GAR Python index by deploy.yml
 # (ADR-009). Install biq-core offline first, then the server.

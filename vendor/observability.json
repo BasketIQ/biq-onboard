@@ -1,0 +1,10 @@
+{
+  "package": "biq-observability",
+  "version": "0.1.0",
+  "source": "BasketIQ/biq-core",
+  "source_commit": "a4f1d7dae20e5a66754a4f36164e8d6cc1911159",
+  "tag": "biq-observability-v0.1.0",
+  "wheel": "biq_observability-0.1.0-py3-none-any.whl",
+  "sha256": "53c0380db0f78b3b85d59944765385f2405d0de293060997cf0a1d5d1dd8b1af",
+  "publish_run": "https://github.com/BasketIQ/biq-core/actions/runs/42177497366"
+}

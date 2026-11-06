@@ -294,6 +294,16 @@ def _enqueue_generation_task(
         {"name": "SOURCE_URL", "value": source_url},
         {"name": "LEASE_ID", "value": lease_id},
     ]
+    # Durable correlation only: no credentials or request bodies.
+    if os.environ.get("BIQ_OBSERVABILITY_ENABLED") == "1" or (
+        os.environ.get("BIQ_OBSERVABILITY_ENABLED") != "0"
+        and os.environ.get("K_SERVICE", "").endswith("-staging")
+    ):
+        from biq_observability.runtime import capture_context
+        carrier = capture_context()
+        for key, name in (("traceparent", "BIQ_TRACEPARENT"), ("x-biq-operation-id", "BIQ_OPERATION_ID")):
+            if carrier.get(key):
+                env_vars.append({"name": name, "value": carrier[key]})
     # V4: Manual seed overrides — when set, the JS worker skips website
     # extraction and uses these seeds directly for ramp/gate generation.
     if manual_seed_brand:

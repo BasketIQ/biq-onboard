@@ -1886,7 +1886,7 @@
   [data-confirm-team-catalog] { --catalog-shell-margin: 22px; }
 }
 
-.guided-entry { max-width: 640px; margin: 0 auto; }
+.guided-entry { max-width: 640px; margin: 0 auto; padding-bottom: 100px; }
 .guided-entry h1 { font-size: 26px; line-height: 1.2; }
 .guided-entry h2 { font-size: 20px; margin-top: 24px; }
 .guided-progress { font-size: 14px; color: var(--biq-color-text-muted, #61708b); }
@@ -1904,5 +1904,5 @@
 .guided-role input:checked::after, .guided-choice input:checked::after { content: '✓'; display: block; text-align: center; line-height: 25px; font-size: 22px; color: white; }
 .guided-role input:focus-visible, .guided-choice input:focus-visible { outline: 3px solid #286fe6; outline-offset: 3px; }
 .guided-profile { display: block; width: 100%; height: 160px; object-fit: contain; }
-.guided-footer { position: sticky; bottom: 0; padding: 16px 0; background: var(--biq-color-surface, #f7f8fc); }
+.guided-footer { position: fixed; bottom: calc(var(--shell-footer-space, 0px) + env(safe-area-inset-bottom, 0px)); inset-inline: 16px; max-width: 640px; margin-inline: auto; z-index: 30; padding: 12px 0; background: var(--biq-color-surface, #f7f8fc); }
 .guided-footer button { width: 100%; }

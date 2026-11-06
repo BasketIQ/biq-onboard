@@ -32,11 +32,16 @@ def _single_role(primary: str, additional: list[str] | None) -> str:
     return primary
 
 
-def _replace(club_id: str, user_id: str, role: str, actor: str, fields=None) -> None:
+def _replace(club_id: str, user_id: str, role: str, actor: str, fields=None, *, remove=False) -> None:
+    from google.api_core.exceptions import Aborted
     try:
         replace_member_role(org.get_registry(), org.get_roles(), org.get_audit_log(),
-                            club_id=club_id, user_id=user_id, role=role, actor_id=actor, fields=fields)
+                            club_id=club_id, user_id=user_id, role=role, actor_id=actor, fields=fields, remove=remove)
+    except Aborted as exc:
+        raise HTTPException(503, "Conflicto temporal. Vuelve a intentarlo.") from exc
     except ValueError as exc:
+        if isinstance(exc.__cause__, Aborted):
+            raise HTTPException(503, "Conflicto temporal. Vuelve a intentarlo.") from exc
         raise HTTPException(409, str(exc)) from exc
 
 
@@ -188,7 +193,6 @@ def update_user(club_id: str, user_id: str, payload: UserUpdate, request: Reques
 @router.delete("/clubs/{club_id}/users/{user_id}")
 def delete_user(club_id: str, user_id: str, request: Request) -> dict:
     actor = require_admin_acting(request, club_id)
-    from ..onboarding import _delete_user_safe
 
     registry = org.get_registry()
     existing = registry.get_user(user_id)
@@ -196,8 +200,7 @@ def delete_user(club_id: str, user_id: str, request: Request) -> dict:
         raise HTTPException(status_code=404, detail="user not found")
     if existing.club_id != club_id:
         raise HTTPException(403, "user does not belong to this club")
-    _replace(club_id, user_id, existing.role, actor, {"status": "deactivated"})
-    _delete_user_safe(registry, user_id)
+    _replace(club_id, user_id, existing.role, actor, remove=True)
     return {"ok": True, "user_id": user_id}
 
 

@@ -582,13 +582,15 @@ test('R2-5: hung save of retired editor A never blocks B — route flush and Vol
     await page.waitForFunction(() =>
       !document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]'),
     { timeout: 10000 });
-    // Late release of A: nothing changes for the already-closed B.
+    // Capture after B's final flush: focusout may legitimately enqueue a
+    // serialized B write. The retired A release must not add ANY write.
+    const beforeLateRelease = rosterPuts(log).length;
     releaseA();
     await page.waitForTimeout(400);
     const closed = await page.evaluate(() =>
       !document.getElementById('app').shadowRoot.querySelector('[data-edit-modal]'));
     assert.equal(closed, true);
-    assert.equal(rosterPuts(log).length, 3, 'no stray PUT from the late release');
+    assert.equal(rosterPuts(log).length, beforeLateRelease, 'no stray PUT from the late release');
   } finally {
     await browser.close();
   }

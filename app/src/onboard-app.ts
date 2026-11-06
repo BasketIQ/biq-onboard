@@ -1823,6 +1823,10 @@ class BiqOnboardApp extends HTMLElement {
   }
 
   private async _postActivate(kind: 'personal' | 'club', clubId?: string): Promise<void> {
+    if(this._guidedEntries!==null){
+      const response=await fetch('/api/context/v1/active',{credentials:'include',cache:'no-store'});
+      if(response.ok){const {context}=await response.json();if(context?.owner_scope?.kind===kind && (kind==='personal'||context.owner_scope.club_id===clubId))return;}
+    }
     const res = await this._entryMutation(
       '/api/context/v1/activate',
       clubId ? { kind, club_id: clubId, ...(this._guidedEntries!==null?{session_focus:true}:{}) } : { kind, ...(this._guidedEntries!==null?{session_focus:true}:{}) },
@@ -4828,7 +4832,7 @@ class BiqOnboardApp extends HTMLElement {
       const nameField=this._guidedNeedsName?'<div class="entry-field"><label>¿Cómo quieres que te llamemos?</label><input name="nickname" autocomplete="nickname" maxlength="80" required></div>':'';
       const coachForm = `<form class="entry-form" data-entry-personal-create>${nameField}<div class="entry-field"><label>Nombre del equipo</label><input name="name" maxlength="120" required></div><div class="entry-field"><label>Categoría</label><select name="category_key">${PERSONAL_CATEGORIES.map(c=>`<option value="${c.key}">${c.label}</option>`).join('')}</select></div><div class="entry-field"><label>Género</label><select name="gender"><option value="X">Mixto</option><option value="F">Femenino</option><option value="M">Masculino</option></select></div><button class="onboard-btn onboard-btn-primary" ${busy?'disabled':''}>Crear equipo y entrar</button></form>`;
       const directorForm = `<form class="entry-form" data-entry-club-create>${nameField}<div class="entry-field"><label>Nombre del club</label><input name="name" maxlength="200" required></div><button class="onboard-btn onboard-btn-primary" ${busy?'disabled':''}>Crear club y entrar</button></form>`;
-      return `${this._entryError?`<p class="entry-error" role="alert">${escapeHtml(this._entryError)}</p>`:''}${guidedEntry({entries:this._guidedEntries, role:this._guidedRole, step:this._guidedStep,selection:this._guidedSelection,busy,createClub:createAllowed,coachImage:coachEntryImage,directorImage:directorEntryImage}, {coach:coachForm,director:directorForm}, inviteBlock)}<button class="entry-role entry-logout" data-entry-logout ${busy?'disabled':''}>Salir</button>`;
+      return `${this._entryError?`<p class="entry-error" role="alert">${escapeHtml(this._entryError)}</p>`:''}${guidedEntry({entries:this._guidedEntries, role:this._guidedRole, step:this._guidedStep,selection:this._guidedSelection,busy,createClub:createAllowed,coachImage:coachEntryImage,directorImage:directorEntryImage}, {coach:coachForm,director:directorForm}, this._inviteToken&&!this._invitePreview?'<p class="entry-status" role="status">Comprobando invitación…</p>':inviteBlock)}<button class="entry-role entry-logout" data-entry-logout ${busy?'disabled':''}>Salir</button>`;
     }
     return `
       <div class="entry-step"${this._helpOpen || this._clubPickerOpen ? ' inert' : ''}>
@@ -5154,7 +5158,7 @@ class BiqOnboardApp extends HTMLElement {
         this._inviteToken = '';
         await this._postActivate('club', intent.club_id);
         intent.mutated = true;
-        if(this._guidedEntries !== null && this._intentCurrent(intent))await this._focusWorkMode(intent.kind==='create-club'?'director':'coach');
+        if(this._guidedEntries !== null && this._intentCurrent(intent))await this._focusWorkMode((data?.roles||[]).includes('sports_director')?'director':'coach');
       });
     });
 

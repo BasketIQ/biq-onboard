@@ -1790,7 +1790,7 @@
   align-items: flex-end;
   justify-content: center;
   z-index: 61;
-  padding: 16px 16px calc(16px + env(safe-area-inset-bottom, 0px));
+  padding: 16px 16px calc(16px + var(--shell-footer-space, 0px) + env(safe-area-inset-bottom, 0px));
 }
 
 .entry-picker-dialog {
@@ -1800,7 +1800,7 @@
   padding: 18px;
   width: 100%;
   max-width: 380px;
-  max-height: min(80vh, 560px);
+  max-height: min(calc(100dvh - var(--shell-footer-space, 0px) - 32px - env(safe-area-inset-bottom, 0px)), 560px);
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -1836,6 +1836,7 @@
 }
 
 .entry-picker-list {
+  min-height: 0;
   overflow-y: auto;
   margin: 0 -4px;
   padding: 0 4px;
@@ -1884,3 +1885,24 @@
 @media (min-width: 520px) {
   [data-confirm-team-catalog] { --catalog-shell-margin: 22px; }
 }
+
+.guided-entry { max-width: 640px; margin: 0 auto; }
+.guided-entry h1 { font-size: 26px; line-height: 1.2; }
+.guided-entry h2 { font-size: 20px; margin-top: 24px; }
+.guided-progress { font-size: 14px; color: var(--biq-color-text-muted, #61708b); }
+.guided-roles { display: grid; gap: 16px; }
+.guided-role { position: relative; display: block; border: 2px solid var(--biq-color-border, #dce3ee); border-radius: 20px; padding: 16px; cursor: pointer; }
+.guided-role:has(input:checked) { border-color: var(--biq-color-primary, #d94c00); }
+.guided-role img { display: block; width: 100%; height: 130px; object-fit: contain; }
+.guided-role strong { font-size: 20px; }
+.guided-role input { position: absolute; right: 16px; top: 16px; }
+.guided-role p { margin-bottom: 0; }
+.guided-choice { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 18px 0; border-bottom: 1px solid var(--biq-color-border, #dce3ee); cursor: pointer; }
+.guided-choice small { display: block; color: var(--biq-color-text-muted, #61708b); }
+.guided-role input, .guided-choice input { appearance: none; flex: none; width: 28px; height: 28px; border: 1.5px solid var(--biq-color-border, #a9b7cb); border-radius: 7px; background: var(--biq-color-surface, white); cursor: pointer; }
+.guided-role input:checked, .guided-choice input:checked { background: var(--biq-color-primary, #d94c00); border-color: var(--biq-color-primary, #d94c00); }
+.guided-role input:checked::after, .guided-choice input:checked::after { content: '✓'; display: block; text-align: center; line-height: 25px; font-size: 22px; color: white; }
+.guided-role input:focus-visible, .guided-choice input:focus-visible { outline: 3px solid #286fe6; outline-offset: 3px; }
+.guided-profile { display: block; width: 100%; height: 160px; object-fit: contain; }
+.guided-footer { position: sticky; bottom: 0; padding: 16px 0; background: var(--biq-color-surface, #f7f8fc); }
+.guided-footer button { width: 100%; }

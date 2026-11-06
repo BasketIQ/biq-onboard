@@ -78,6 +78,9 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Create isolated job Python
+        run: bash scripts/ci_python_venv.sh create
+
       - name: Install server dependencies
         run: |
           TOKEN="${{ steps.auth.outputs.access_token }}"
@@ -86,12 +89,20 @@ jobs:
           BIQ_CORE_VERSION=$(grep 'biq-core\[org\]==' server/pyproject.toml | head -1 | sed 's/.*==\([^"]*\).*/\1/')
           python3 -m pip install "biq-core[org]==${BIQ_CORE_VERSION}" \
             --extra-index-url "https://oauth2accesstoken:${TOKEN}@europe-west1-python.pkg.dev/basketiq-platform-prod/basketiq-python/simple/"
+          python3 -m pip install vendor/biq_observability-0.1.0-py3-none-any.whl
           python3 -m pip install -e "./server[firestore,test]"
+      - name: Check isolated dependency consistency
+        run: python3 -m pip check
+
       - name: Run pytest
         run: python3 -m pytest server/tests -q
       - name: CI AI guard (rule 10)
         # -q hides test ids; this run makes the guard's execution visible.
         run: python3 -m pytest -q -rA server/tests/test_ci_ai_guard.py
+
+      - name: Clean isolated job Python
+        if: always()
+        run: bash scripts/ci_python_venv.sh cleanup
 
   staging:
     needs: [test]

@@ -116,7 +116,7 @@ def test_new_user_with_no_club_can_create(client, monkeypatch):
     memberships = [u for u in reg.find_users_by_email("fresh@basketiq.io") if u.club_id]
     assert len(memberships) == 1
     assert memberships[0].club_id == data["club"]["id"]
-    assert memberships[0].role == "administrator"
+    assert memberships[0].role == "sports_director"
 
 
 def test_creator_also_gets_sports_director_role(client, monkeypatch):
@@ -187,7 +187,8 @@ def test_admin_of_existing_club_can_create(client, monkeypatch):
         u for u in reg.find_users_by_email("admin@basketiq.io") if u.club_id
     ]
     assert {m.club_id for m in memberships} == {"club_a", new_id}
-    assert all(m.role == "administrator" for m in memberships)
+    assert next(m for m in memberships if m.club_id == new_id).role == "sports_director"
+    assert next(m for m in memberships if m.club_id == "club_a").role == "administrator"
 
 
 # ---------------------------------------------------------------------------
@@ -288,7 +289,7 @@ def test_s2s_valid_identity_new_user_creates_club(client, monkeypatch):
     memberships = [u for u in reg.find_users_by_email("s2s-new@basketiq.io") if u.club_id]
     assert len(memberships) == 1
     assert memberships[0].club_id == data["club"]["id"]
-    assert memberships[0].role == "administrator"
+    assert memberships[0].role == "sports_director"
 
 
 def test_s2s_non_admin_member_gets_403(client, monkeypatch):
@@ -503,7 +504,8 @@ def test_create_idempotency_key_replay_never_duplicates(client, monkeypatch):
     assert len(_clubs(reg)) == 1, "no duplicate club on replay"
     members = _member_count(reg, "idem@basketiq.io")
     assert len(members) == 1, "no duplicate member on replay"
-    assert len(role_reg.list_assignments_for_scope(f"club:{club_id}")) == 2
+    assert len(role_reg.list_assignments_for_scope(f"club:{club_id}")) == 1
+    assert role_reg.list_assignments_for_scope(f"club:{club_id}")[0].role == "sports_director"
 
 
 # ---------------------------------------------------------------------------

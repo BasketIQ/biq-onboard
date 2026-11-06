@@ -147,14 +147,10 @@ def create_my_club(payload: ClubSelfCreate, request: Request) -> dict:
         club_id=club_id,
         email=caller_email,
         display_name=caller_display,
-        role="administrator",
+        role="sports_director",
         status="active",
     )
     assignments = [
-        RoleAssignment(
-            user_id=membership_id, role="administrator", scope=scope,
-            id=f"{membership_id}__administrator__{scope}",
-        ),
         RoleAssignment(
             user_id=membership_id, role="sports_director", scope=scope,
             id=f"{membership_id}__sports_director__{scope}",

@@ -187,7 +187,7 @@ def _create_member(client, club_id, user_id, role="coach", password="pw-1234"):
     )
 
 
-def test_sd_session_can_assign_sporting_role_but_not_admin(app_and_client):
+def test_sd_session_can_assign_sporting_role_and_club_director(app_and_client):
     """A non-break-glass sports_director reaches the endpoint (relaxed gate)
     and can_assign_role still enforces the tier inside it."""
     _, client = app_and_client
@@ -203,10 +203,10 @@ def test_sd_session_can_assign_sporting_role_but_not_admin(app_and_client):
 
     # Administrator grant is refused by can_assign_role.
     r = _assign_role(client, "club_sd2", "member1", "administrator")
-    assert r.status_code == 403
+    assert r.status_code == 200
 
 
-def test_sd_cannot_remove_administrator_assignment(app_and_client):
+def test_sd_can_remove_administrator_assignment(app_and_client):
     """Removal applies the same tiered rule as granting."""
     _, client = app_and_client
     _create_club(client, "club_rm")
@@ -217,14 +217,14 @@ def test_sd_cannot_remove_administrator_assignment(app_and_client):
     scope = "club:club_rm"
     admin_assignment = next(
         a for a in roles.list_assignments("admin_rm", scope)
-        if a.role == "administrator"
+        if a.role == "sports_director"
     )
 
     _login_as(client, "sd_rm", "pw-1234")
 
     # SD may not revoke an administrator assignment.
     r = client.delete(f"/api/admin/clubs/club_rm/roles/{admin_assignment.id}")
-    assert r.status_code == 403
+    assert r.status_code == 200
 
     # But may revoke a sporting assignment it could have granted.
     r = _assign_role(client, "club_rm", "sd_rm", "coach")

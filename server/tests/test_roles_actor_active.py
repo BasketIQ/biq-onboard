@@ -111,10 +111,10 @@ def test_active_admin_actor_can_assign_and_remove(client):
     assert all(e.actor_id == "actor_admin" for e in audit)
 
 
-def test_active_sports_director_tiering_preserved(client):
+def test_active_sports_director_has_unified_club_role(client):
     _seed_member("actor_sd", CLUB, role="sports_director")
     assert _post(client, "actor_sd", role="coach").status_code == 200
-    assert _post(client, "actor_sd", role="administrator").status_code == 403
+    assert _post(client, "actor_sd", role="administrator").status_code == 200
 
 
 def test_get_roles_and_users_also_gated(client):
@@ -272,7 +272,7 @@ def test_put_delete_denied_for_wrong_club_actor(client):
     ).status_code == 403
 
 
-def test_sd_actor_cannot_put_users_stronger_admin_gate(client):
+def test_sd_actor_can_manage_club_user_identity(client):
     """require_admin_acting keeps its administrator-only capability check —
     an active sports_director is denied even though they pass the
     role-management gate on other routes."""
@@ -281,7 +281,7 @@ def test_sd_actor_cannot_put_users_stronger_admin_gate(client):
         f"/api/admin/clubs/{CLUB}/users/{TARGET}",
         json={"display_name": "x"},
         headers=_s2s("actor_sd2"),
-    ).status_code == 403
+    ).status_code == 200
 
 
 # ─── Standalone mode (no S2S secret) — session path still gated ──────────
@@ -315,3 +315,11 @@ def test_standalone_session_deactivated_member_denied(monkeypatch):
         json={"user_id": "x", "role": "coach"},
     )
     assert r.status_code == 403
+
+
+def test_legacy_role_input_is_written_as_single_club_director(client):
+    response = _post(client, "actor_admin", role="administrator")
+    assert response.status_code == 200
+    assignments = org.get_roles().list_assignments(TARGET, f"club:{CLUB}")
+    assert any(a.role == "sports_director" for a in assignments)
+    assert not any(a.role == "administrator" for a in assignments)

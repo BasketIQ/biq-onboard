@@ -30,7 +30,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, ValidationError
 
 from biq_core.org import Club
-from biq_core.roles import can_assign_role, effective_capabilities
+from biq_core.roles import canonical_club_role, can_assign_role, effective_capabilities
 
 from . import entry_proof, invitations, org
 from .auth import (
@@ -228,6 +228,7 @@ async def invitation_redeem(request: Request) -> dict:
                 return invitations.RedeemPlan(error=(409, "invitation unavailable"))
             if not _issuer_still_grants(state, inv, roles):
                 return invitations.RedeemPlan(error=(409, "invitation unavailable"))
+            roles = list(dict.fromkeys(canonical_club_role(r) for r in roles))
             inv.status = "redeemed"
             inv.redeemed_at = now
             inv.redeemed_account_id = account_id
@@ -388,7 +389,7 @@ async def ops_create_club(request: Request) -> dict:
         id=membership_id,
         club_id=club_id,
         email=email,
-        role="administrator",
+        role="sports_director",
         status="active",
     )
     assignments = [
@@ -396,7 +397,7 @@ async def ops_create_club(request: Request) -> dict:
             user_id=membership_id, role=role, scope=scope,
             id=f"{membership_id}__{role}__{scope}",
         )
-        for role in ("administrator", "sports_director")
+        for role in ("sports_director",)
     ]
     try:
         registry.create_club_with_creator_tx(
@@ -482,9 +483,9 @@ async def issue_invitation(club_id: str, request: Request) -> dict:
         else effective_capabilities(issuer, f"club:{club_id}", org.get_roles())
     )
     if not all(can_assign_role(caps, role) for role in roles):
-        # A Sports Director cannot mint administrator invites — the grant
-        # must never exceed the issuer's live assignable set.
+        # Grants must never exceed the issuer's live assignable set.
         raise HTTPException(status_code=403, detail="proposed role not assignable")
+    roles = list(dict.fromkeys(canonical_club_role(r) for r in roles))
     inv = invitations.Invitation(
         invitation_id=invitations.new_id(),
         club_id=club_id,

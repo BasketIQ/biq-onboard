@@ -301,7 +301,7 @@ interface MemberAssignment {
 }
 
 const ROLE_LABELS: Record<string, string> = {
-  administrator: 'Administrador',
+  administrator: 'Director deportivo',
   sports_director: 'Director deportivo',
   coordinator: 'Coordinador',
   coach: 'Entrenador',
@@ -309,10 +309,10 @@ const ROLE_LABELS: Record<string, string> = {
   super_administrator: 'Super administrador',
 };
 
-// Assignable club-scope roles for administrators (server enforces F9).
-const ASSIGNABLE_ROLES = ['administrator', 'sports_director', 'coordinator', 'coach', 'player'];
-// Sports directors are bounded to sporting roles only (server enforces).
-const SPORTING_ASSIGNABLE_ROLES = ['coordinator', 'coach', 'player'];
+// Unified club director roles; legacy administrator is a compatible alias.
+const canonicalClubRole = (role: string): string => role === 'administrator' ? 'sports_director' : role;
+const ASSIGNABLE_ROLES = ['sports_director', 'coordinator', 'coach', 'player'];
+
 
 function clubTabsForMembershipState(memberships: MembershipInfo[] | undefined): ClubTab[] {
   const ms = memberships || [];
@@ -2173,6 +2173,7 @@ class BiqOnboardApp extends HTMLElement {
     }
     if (nav === 'teams') {
       this._ensureTeamsData(clubId);
+      this.render(); // A warm catalogue starts no request: the tab must still paint.
     } else if (nav === 'profile' && !this._clubSummary && !this._clubSummaryLoading) {
       this.loadClubSummary(clubId);
     } else {
@@ -5366,7 +5367,7 @@ class BiqOnboardApp extends HTMLElement {
           <div class="onboard-picker" role="listbox" aria-label="Elige tu club">
             ${memberships.map((m) => `<button class="onboard-club-row" data-pick-club="${escapeHtml(m.club_id)}" role="option" ${locked ? 'disabled' : ''}>
               <span class="onboard-club-name">${escapeHtml(m.club_name || m.club_id)}</span>
-              <span class="onboard-club-role">${escapeHtml(m.role === 'administrator' ? 'Administrador' : m.role)}</span>
+              <span class="onboard-club-role">${escapeHtml(ROLE_LABELS[m.role] || m.role)}</span>
             </button>`).join('')}
           </div>
         </section>`;
@@ -5828,7 +5829,7 @@ class BiqOnboardApp extends HTMLElement {
     const roleLabels: Record<string, string> = {
       sports_director: 'Director deportivo',
       coach: 'Entrenador',
-      administrator: 'Administrador',
+      administrator: 'Director deportivo',
       super_administrator: 'Super administrador',
     };
 
@@ -5872,27 +5873,21 @@ class BiqOnboardApp extends HTMLElement {
   // ─── Mi Club Phase 4: Miembros tab ─────────────────────────────────────
 
   // Role management surface for a member row. Administrators can edit
-  // identity + all assignable roles; sports directors can only manage
-  // sporting roles on sporting-role members (server enforces the same).
+  // identity + all assignable club roles for both director aliases.
   private _memberCanEdit(member: MemberRow): boolean {
-    const role = this._org?.role || '';
-    if (role === 'administrator' || role === 'super_administrator') return true;
-    if (role === 'sports_director') {
-      return SPORTING_ASSIGNABLE_ROLES.includes(member.role);
-    }
-    return false;
+    return ADMIN_ROLES.includes(this._org?.role || '')
+      && ASSIGNABLE_ROLES.includes(member.role === 'administrator' ? 'sports_director' : member.role);
   }
 
   private _memberAssignableRoles(): string[] {
-    const role = this._org?.role || '';
-    return role === 'sports_director' ? SPORTING_ASSIGNABLE_ROLES : ASSIGNABLE_ROLES;
+    return ASSIGNABLE_ROLES;
   }
 
   private renderMembers(clubId: string): string {
     const members = this._members || [];
     const inv = this._inviteState;
     const myRole = this._org?.role || '';
-    const isAdminTier = myRole === 'administrator' || myRole === 'super_administrator';
+    const isAdminTier = ADMIN_ROLES.includes(myRole);
     const roleOptions = this._memberAssignableRoles();
 
     // Section subscreen (global nav contract §C): member editing replaces
@@ -5935,8 +5930,8 @@ class BiqOnboardApp extends HTMLElement {
   private _renderMemberRow(m: MemberRow, isAdminTier: boolean): string {
     const deactivated = m.status === 'deactivated';
     const canEdit = this._memberCanEdit(m);
-    const secondary = (m.roles || []).filter((r) => r !== m.role);
-    const roleBadges = [m.role, ...secondary]
+    const secondary = [...new Set((m.roles || []).map(canonicalClubRole))].filter(r => r !== canonicalClubRole(m.role));
+    const roleBadges = [...new Set([m.role, ...secondary].map(r => r === 'administrator' ? 'sports_director' : r))]
       .map((r) => `<span class="onboard-role-badge">${escapeHtml(ROLE_LABELS[r] || r)}</span>`)
       .join('');
 
@@ -5977,7 +5972,7 @@ class BiqOnboardApp extends HTMLElement {
   // orange subheader carries «Club – <member context>»; back resolves to
   // the Miembros list — never history.back(), never app Home.
   private _renderMemberEditScreen(m: MemberRow, isAdminTier: boolean, roleOptions: string[]): string {
-    const secondary = (m.roles || []).filter((r) => r !== m.role);
+    const secondary = [...new Set((m.roles || []).map(canonicalClubRole))].filter(r => r !== canonicalClubRole(m.role));
     // Identity fields are admin-only; role chips for everyone who
     // passed _memberCanEdit.
     const identityFields = isAdminTier ? `
@@ -5988,7 +5983,7 @@ class BiqOnboardApp extends HTMLElement {
     const primarySelect = isAdminTier ? `
       <label class="onboard-member-field">Rol principal
         <select class="onboard-input" data-edit-primary="${escapeHtml(m.id)}">
-          ${roleOptions.map((r) => `<option value="${r}" ${r === m.role ? 'selected' : ''}>${escapeHtml(ROLE_LABELS[r] || r)}</option>`).join('')}
+          ${roleOptions.map((r) => `<option value="${r}" ${r === (m.role === 'administrator' ? 'sports_director' : m.role) ? 'selected' : ''}>${escapeHtml(ROLE_LABELS[r] || r)}</option>`).join('')}
         </select>
       </label>` : '';
     const secondaryChips = secondary.map((r) => `
@@ -5996,7 +5991,7 @@ class BiqOnboardApp extends HTMLElement {
         <button class="onboard-chip-x" data-member-role-remove="${escapeHtml(m.id)}" data-role="${escapeHtml(r)}"
           title="Quitar rol">×</button>
       </span>`).join('');
-    const addableRoles = roleOptions.filter((r) => r !== m.role && !secondary.includes(r));
+    const addableRoles = roleOptions.filter((r) => r !== (m.role === 'administrator' ? 'sports_director' : m.role) && !secondary.includes(r));
     const addSelect = addableRoles.length ? `
       <select class="onboard-input onboard-input-sm" data-member-role-add="${escapeHtml(m.id)}">
         <option value="">Añadir rol…</option>
@@ -6114,12 +6109,19 @@ class BiqOnboardApp extends HTMLElement {
         const el = btn as HTMLElement;
         const userId = el.dataset.memberRoleRemove!;
         const role = el.dataset.role!;
-        const assignment = (this._memberAssignments || []).find(
-          (a) => a.user_id === userId && a.role === role && a.club_id === clubId);
-        if (!assignment) { this._membersError = 'Asignación no encontrada'; this.render(); return; }
-        mutate(() => fetch(`/api/clubs/${clubId}/roles/${encodeURIComponent(assignment.id)}`, {
-          method: 'DELETE', credentials: 'include',
-        }));
+        const assignments = (this._memberAssignments || []).filter(
+          (a) => a.user_id === userId && canonicalClubRole(a.role) === canonicalClubRole(role) && a.club_id === clubId);
+        if (!assignments.length) { this._membersError = 'Asignación no encontrada'; this.render(); return; }
+        mutate(async () => {
+          let result: Response;
+          for (const assignment of assignments) {
+            result = await fetch(`/api/clubs/${clubId}/roles/${encodeURIComponent(assignment.id)}`, {
+              method: 'DELETE', credentials: 'include',
+            });
+            if (!result.ok) return result;
+          }
+          return result!;
+        });
       });
     });
 

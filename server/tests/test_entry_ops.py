@@ -492,7 +492,7 @@ class TestR5InvitationHardening:
         )
         assert foreign.status_code == 409
 
-    def test_sports_director_cannot_mint_admin_invite(
+    def test_sports_director_can_invite_club_director(
         self, client: TestClient
     ) -> None:
         """Per-role live check at issue: roles.manage.sporting may propose
@@ -520,7 +520,7 @@ class TestR5InvitationHardening:
             json={"proposed_roles": ["administrator"], "recipient_email": _RECIPIENT},
             headers=headers,
         )
-        assert admin_invite.status_code == 403
+        assert admin_invite.status_code == 201
         coach_invite = client.post(
             "/api/admin/clubs/c1/invitations",
             json={"proposed_roles": ["coach"], "recipient_email": _RECIPIENT},

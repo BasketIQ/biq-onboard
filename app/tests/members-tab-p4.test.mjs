@@ -321,9 +321,9 @@ test('P4: sports_director sees roles/deactivate but no delete or identity edit',
       };
     });
     assert.equal(out.u1Edit, true, 'SD can edit sporting member');
-    assert.equal(out.u1Delete, false, 'SD never sees delete');
-    assert.equal(out.u3Edit, false, 'SD cannot edit administrator');
-    assert.equal(out.u3Status, false, 'SD cannot deactivate administrator');
+    assert.equal(out.u1Delete, true, 'Director can manage club members');
+    assert.equal(out.u3Edit, true, 'Director can edit legacy administrator');
+    assert.equal(out.u3Status, true, 'Director can manage legacy administrator status');
   } finally {
     await browser.close();
   }
@@ -930,9 +930,9 @@ test('P4-r2: administrator → sports_director same club drops edit state synchr
         editingState: document.getElementById('app')._editingMemberId,
       };
     });
-    assert.equal(post.u3Edit, false, 'no edit control on administrator row for SD');
-    assert.equal(post.u3Status, false, 'no status control on administrator row for SD');
-    assert.equal(post.u3Delete, false, 'no delete control for SD');
+    assert.equal(post.u3Edit, true, 'Unified director has edit control');
+    assert.equal(post.u3Status, true, 'Unified director has status control');
+    assert.equal(post.u3Delete, true, 'Unified director has deletion control');
     assert.equal(post.u1Edit, true, 'sporting member still editable for SD (F9)');
     assert.equal(post.editForms, 0, 'no edit form resurrected');
     assert.equal(post.editingState, null, 'editing id stays cleared');
@@ -953,9 +953,9 @@ test('P4-r2: administrator → sports_director same club drops edit state synchr
       el.render();
       return res;
     });
-    assert.equal(guard.u3EditForm, false, 'stale edit id cannot open admin edit form');
+    assert.equal(guard.u3EditForm, true, 'Authorized legacy member remains editable');
     assert.equal(guard.u3RoleRemove, false, 'stale edit id cannot paint role-remove controls');
-    assert.equal(guard.u3Save, false, 'stale edit id cannot paint save control');
+    assert.equal(guard.u3Save, true, 'Authorized director can save');
   } finally {
     await browser.close();
   }
@@ -1069,4 +1069,62 @@ test('P4-r2: canonical scope assignments are accepted and drive role removal', a
   } finally {
     await browser.close();
   }
+});
+
+
+for (const role of ['administrator','sports_director']) {
+  test(`Warm Equipos paints immediately and invitation stays in Miembros (${role})`, async () => {
+    const browser = await chromium.launch();
+    try {
+      const {page} = await newPage(browser);
+      await mount(page,role);
+      await page.waitForSelector('[data-invite-form]');
+      await page.evaluate(() => {
+        const el=document.getElementById('app');
+        el._catalogLoaded=true; el._teamsLoading=false; el._teams=[];
+      });
+      await page.locator('[data-nav="teams"]').click();
+      assert.equal(await page.locator('[data-nav="teams"]').getAttribute('class'),'onboard-nav-item active');
+      assert.equal(await page.locator('[data-invite-form]').count(),0);
+      await page.locator('[data-nav="members"]').click();
+      await page.locator('[data-invite-email]').fill('test@example.invalid');
+      await page.locator('[data-invite-form] button').click();
+      await page.waitForSelector('[data-invite-sent]');
+      assert.equal(await page.locator('[data-nav="members"]').getAttribute('class'),'onboard-nav-item active');
+      await page.locator('[data-member-edit="u3"]').click();
+      const options=await page.locator('[data-edit-primary="u3"] option').evaluateAll(nodes=>nodes.map(n=>n.value));
+      assert.equal(options.includes('administrator'),false);
+      assert.equal(await page.locator('[data-edit-primary="u3"]').inputValue(),'sports_director');
+    } finally {await browser.close();}
+  });
+}
+
+test('Removing unified secondary director removes both legacy assignments', async () => {
+  const browser = await chromium.launch();
+  try {
+    const { page, log } = await newPage(browser);
+    await page.route('**/api/clubs/club1/users', route => route.fulfill({
+      status: 200, contentType: 'application/json', body: JSON.stringify({ users: [
+        { ...MEMBERS.users[0], roles: ['coach', 'administrator', 'sports_director'] },
+      ] }),
+    }));
+    await page.route('**/api/clubs/club1/roles', route => route.fulfill({
+      status: 200, contentType: 'application/json', body: JSON.stringify({ assignments:
+        ['administrator', 'sports_director'].map(role => ({
+          id: `u1__${role}__club:club1`, user_id: 'u1', role, scope: 'club:club1',
+        })),
+      }),
+    }));
+    await mountAt(page, 'sports_director', 'members');
+    await page.locator('[data-member-edit="u1"]').click();
+    const chip = page.locator('[data-member-role-remove="u1"]');
+    assert.equal(await chip.count(), 1);
+    const deleted = page.waitForResponse(response =>
+      response.request().method() === 'DELETE' && response.url().includes('u1__sports_director__'));
+    await chip.click();
+    await deleted;
+    for (const role of ['administrator', 'sports_director']) {
+      assert.ok(log.some(e => e.method === 'DELETE' && e.url.includes(`u1__${role}__`)));
+    }
+  } finally { await browser.close(); }
 });

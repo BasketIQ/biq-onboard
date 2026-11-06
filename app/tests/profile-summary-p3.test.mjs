@@ -132,7 +132,7 @@ test('P3: Perfil shows personal card plus real club summary', async () => {
     // Personal card retained (additive, not replaced).
     assert.equal(vals.name, 'admin');
     assert.equal(vals.clubName, 'Club Test');
-    assert.equal(vals.role, 'Administrador');
+    assert.equal(vals.role, 'Director deportivo');
   } finally {
     await browser.close();
   }

@@ -122,7 +122,7 @@ def test_status_self_change_rejected(app_and_client):
     assert "own status" in r.json()["detail"]
 
 
-def test_status_sd_cannot_deactivate_administrator(app_and_client):
+def test_status_sd_can_deactivate_administrator(app_and_client):
     """F9 tiered: SD's roles.manage.sporting doesn't cover administrator."""
     _, client = app_and_client
     _create_club(client, "club_p4g")
@@ -132,8 +132,8 @@ def test_status_sd_cannot_deactivate_administrator(app_and_client):
     client.post("/api/auth/login", json={"username": "sd", "password": "pw-1234"})
     r = client.patch("/api/admin/clubs/club_p4g/users/boss/status",
                      json={"status": "deactivated"})
-    assert r.status_code == 403
-    assert "insufficient privileges" in r.json()["detail"]
+    assert r.status_code == 200
+    assert org.get_registry().get_user("boss").status == "deactivated"
 
 
 def test_status_sd_can_deactivate_coach(app_and_client):
@@ -247,7 +247,7 @@ def test_explicit_status_endpoint_still_governs(app_and_client):
     assert "reactivate" in [a.action for a in audits]
 
 
-def test_sd_cannot_use_generic_update_path(app_and_client):
+def test_sd_can_use_generic_update_path(app_and_client):
     """Boundary preserved: the generic PUT update stays administrator-
     gated (``roles.manage``/``club.admin``) — a Sports Director holding
     only ``roles.manage.sporting`` gets 403 and therefore can never reach
@@ -263,9 +263,9 @@ def test_sd_cannot_use_generic_update_path(app_and_client):
 
     r = client.put("/api/admin/clubs/club_p4o/users/coach1",
                    json={"display_name": "SD Renamed"})
-    assert r.status_code == 403
+    assert r.status_code == 200
     u = org.get_registry().get_user("coach1")
-    assert u.display_name != "SD Renamed"
+    assert u.display_name == "SD Renamed"
     assert u.status == "deactivated"
 
 

@@ -83,6 +83,13 @@ def create_app() -> FastAPI:
             return FileResponse(file)
         return FileResponse(static_dir / "index.html")
 
+    # Shared diagnostics are inert outside staging; initialized before requests.
+    if os.environ.get("BIQ_OBSERVABILITY_ENABLED") == "1" or (
+        os.environ.get("BIQ_OBSERVABILITY_ENABLED") != "0"
+        and os.environ.get("K_SERVICE", "").endswith("-staging")
+    ):
+        from biq_observability.runtime import instrument_app
+        instrument_app(app)
     return app
 
 

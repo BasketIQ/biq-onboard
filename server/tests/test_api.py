@@ -86,9 +86,9 @@ def test_onboard_club_custom_staff(admin_client):
     assert r.status_code == 200
     data = r.json()
     assert data["users_created"] == 2
-    assert data["roles_assigned"] == 3
+    assert data["roles_assigned"] == 2
     juanjo = next(s for s in data["staff"] if "juanjo" in s["user_id"])
-    assert sorted(juanjo["roles"]) == ["administrator", "sports_director"]
+    assert sorted(juanjo["roles"]) == ["sports_director"]
 
 
 def test_onboard_rejects_unknown_role(admin_client):
@@ -127,7 +127,7 @@ def test_list_staff(admin_client):
     data = r.json()
     assert data["total_members"] == 9
     admin = next(m for m in data["members"] if "admin" in m["user_id"])
-    assert "administrator" in admin["methodology_roles"]
+    assert "sports_director" in admin["methodology_roles"]
     # Staff entries should include the email field (may be None for seed users)
     assert "email" in data["members"][0]
 
@@ -196,11 +196,11 @@ def test_assign_and_remove_role(admin_client):
     # List
     r = admin_client.get("/api/admin/clubs/club_roles/roles")
     assert r.status_code == 200
-    assert r.json()["total"] == 10  # 9 default + 1 new
+    assert r.json()["total"] == 9  # one projection per member
 
-    # Remove
+    # A member must retain its canonical role.
     r = admin_client.delete(f"/api/admin/clubs/club_roles/roles/{aid}")
-    assert r.status_code == 200
+    assert r.status_code == 409
     r = admin_client.get("/api/admin/clubs/club_roles/roles")
     assert r.json()["total"] == 9
 
@@ -214,7 +214,7 @@ def test_assign_role_rejects_unknown(admin_client):
         "/api/admin/clubs/club_unk/roles",
         json={"user_id": "admin_club_unk", "role": "superadmin"},
     )
-    assert r.status_code == 400
+    assert r.status_code == 422
 
 
 # ─── Season ──────────────────────────────────────────────────────────────────

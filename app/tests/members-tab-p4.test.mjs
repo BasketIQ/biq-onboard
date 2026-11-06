@@ -40,7 +40,7 @@ const HARNESS = `<!doctype html>
 const MEMBERS = {
   users: [
     { id: 'u1', display_name: 'Ana Entrenadora', email: 'ana@club.es', role: 'coach', roles: ['coach', 'coordinator'], status: 'active' },
-    { id: 'u2', display_name: 'Luis Jugador', email: 'luis@club.es', role: 'player', roles: ['player'], status: 'deactivated' },
+    { id: 'u2', display_name: 'Luis Jugador', email: 'luis@club.es', role: 'coach', roles: ['coach'], status: 'deactivated' },
     { id: 'u3', display_name: 'Marta Admin', email: 'marta@club.es', role: 'administrator', roles: ['administrator'], status: 'active' },
   ],
 };
@@ -166,8 +166,8 @@ test('P4: member list renders name, email, roles, status', async () => {
     // V2: el email es la única identidad de fila — el nombre nunca pinta.
     assert.ok(txt.u1.includes('ana@club.es'), 'email is the row identity');
     assert.ok(!txt.u1.includes('Ana Entrenadora'), 'display name must not head the row');
-    assert.ok(txt.u1.includes('Entrenador') && txt.u1.includes('Coordinador'));
-    assert.equal(txt.badges, 2, 'primary + secondary role badges');
+    assert.ok(txt.u1.includes('Entrenador') && !txt.u1.includes('Coordinador'));
+    assert.equal(txt.badges, 1, 'one club role');
     assert.ok(txt.u2.includes('Desactivado'), 'deactivated badge shown');
     assert.ok(txt.u2StatusLabel.startsWith('Reactivar '), 'reactivate icon labelled');
     assert.ok(txt.u2StatusLabel.includes('luis@club.es'), 'action label carries member email');
@@ -280,23 +280,8 @@ test('P4: edit mode saves changed identity via PUT; role add/remove hit roles AP
     assert.ok(put, 'PUT sent');
     assert.equal(JSON.parse(put.body).display_name, 'Ana Actualizada');
 
-    // Reopen u1 (members refetched) — remove coordinator chip → DELETE role.
-    await page.waitForFunction(() =>
-      document.getElementById('app').shadowRoot.querySelectorAll('[data-member-row]').length === 3,
-    { timeout: 10000 });
-    await page.evaluate(() =>
-      document.getElementById('app').shadowRoot
-        .querySelector('[data-member-row="u1"] [data-member-edit]').click());
-    await page.waitForFunction(() =>
-      !!document.getElementById('app').shadowRoot.querySelector('[data-member-role-remove="u1"]'),
-    { timeout: 5000 });
-    await page.evaluate(() =>
-      document.getElementById('app').shadowRoot
-        .querySelector('[data-member-role-remove="u1"]').click());
-    await page.waitForFunction(() => true);
-    const roleDel = log.find((e) =>
-      e.method === 'DELETE' && e.url.includes('/api/clubs/club1/roles/u1__coordinator__club%3Aclub1'));
-    assert.ok(roleDel, 'role assignment DELETE sent');
+    assert.equal(await page.locator('[data-member-role-add]').count(), 0);
+    assert.equal(await page.locator('[data-member-role-remove]').count(), 0);
   } finally {
     await browser.close();
   }
@@ -1040,35 +1025,16 @@ test('P4-r2: non-member scope assignments are filtered, never a roster failure',
   }
 });
 
-test('P4-r2: canonical scope assignments are accepted and drive role removal', async () => {
+test('Only two club roles can be selected', async () => {
   const browser = await chromium.launch();
-  const { page, log } = await newPage(browser);
   try {
+    const { page } = await newPage(browser);
     await mountAt(page, 'administrator', 'members');
-    await page.waitForFunction(() =>
-      document.getElementById('app').shadowRoot.querySelectorAll('[data-member-row]').length === 3,
-      { timeout: 10000 });
-    const state = await page.evaluate(() =>
-      document.getElementById('app')._memberAssignments);
-    assert.equal(state.length, 1, 'canonical assignment stored');
-    assert.equal(state[0].club_id, 'club1', 'club_id resolved from scope');
-    // Removal lookup uses the authoritative assignment id.
-    await page.evaluate(() =>
-      document.getElementById('app').shadowRoot
-        .querySelector('[data-member-row="u1"] [data-member-edit]').click());
-    await page.waitForFunction(() =>
-      !!document.getElementById('app').shadowRoot.querySelector('[data-member-role-remove="u1"]'),
-      { timeout: 5000 });
-    await page.evaluate(() =>
-      document.getElementById('app').shadowRoot
-        .querySelector('[data-member-role-remove="u1"]').click());
-    await page.waitForFunction(() => true);
-    assert.ok(log.some((e) =>
-      e.method === 'DELETE' && e.url.includes('/api/clubs/club1/roles/u1__coordinator__club%3Aclub1')),
-      'role removal hits the validated assignment id');
-  } finally {
-    await browser.close();
-  }
+    await page.locator('[data-member-edit="u1"]').click();
+    assert.deepEqual(await page.locator('[data-edit-primary="u1"] option').evaluateAll(nodes => nodes.map(n => n.value)), ['sports_director', 'coach']);
+    assert.equal(await page.locator('[data-member-role-add]').count(), 0);
+    assert.equal(await page.locator('[data-member-role-remove]').count(), 0);
+  } finally { await browser.close(); }
 });
 
 
@@ -1099,32 +1065,39 @@ for (const role of ['administrator','sports_director']) {
   });
 }
 
-test('Removing unified secondary director removes both legacy assignments', async () => {
+test('Role replacement sends one role through member update', async () => {
   const browser = await chromium.launch();
   try {
     const { page, log } = await newPage(browser);
-    await page.route('**/api/clubs/club1/users', route => route.fulfill({
-      status: 200, contentType: 'application/json', body: JSON.stringify({ users: [
-        { ...MEMBERS.users[0], roles: ['coach', 'administrator', 'sports_director'] },
-      ] }),
-    }));
-    await page.route('**/api/clubs/club1/roles', route => route.fulfill({
-      status: 200, contentType: 'application/json', body: JSON.stringify({ assignments:
-        ['administrator', 'sports_director'].map(role => ({
-          id: `u1__${role}__club:club1`, user_id: 'u1', role, scope: 'club:club1',
-        })),
-      }),
-    }));
     await mountAt(page, 'sports_director', 'members');
     await page.locator('[data-member-edit="u1"]').click();
-    const chip = page.locator('[data-member-role-remove="u1"]');
-    assert.equal(await chip.count(), 1);
-    const deleted = page.waitForResponse(response =>
-      response.request().method() === 'DELETE' && response.url().includes('u1__sports_director__'));
-    await chip.click();
-    await deleted;
-    for (const role of ['administrator', 'sports_director']) {
-      assert.ok(log.some(e => e.method === 'DELETE' && e.url.includes(`u1__${role}__`)));
+    await page.locator('[data-edit-primary="u1"]').selectOption('sports_director');
+    const saved = page.waitForResponse(r => r.request().method() === 'PUT' && r.url().endsWith('/users/u1'));
+    await page.locator('[data-member-save="u1"]').click();
+    await saved;
+    const put = log.find(e => e.method === 'PUT' && e.url.endsWith('/users/u1'));
+    assert.deepEqual(JSON.parse(put.body), { role: 'sports_director' });
+    assert.equal(log.filter(e => ['POST','DELETE'].includes(e.method) && e.url.includes('/roles')).length, 0);
+  } finally { await browser.close(); }
+});
+
+test('Single role editor is usable at mobile and desktop widths', async () => {
+  const browser = await chromium.launch();
+  try {
+    const { page } = await newPage(browser);
+    for (const width of [390, 1280]) {
+      await page.setViewportSize({ width, height: 900 });
+      await mountAt(page, 'sports_director', 'members');
+      await page.locator('[data-member-edit="u1"]').click();
+      const select = page.locator('[data-edit-primary="u1"]');
+      assert.equal(await select.isVisible(), true);
+      assert.equal(await select.locator('option').count(), 2);
+      assert.equal(await page.locator('[data-member-role-add]').count(), 0);
+      assert.equal(await page.locator('[data-member-role-remove]').count(), 0);
+      if (process.env.ROLE_EVIDENCE_DIR) {
+        await page.screenshot({ path: join(process.env.ROLE_EVIDENCE_DIR, `member-role-${width}.png`), fullPage: true });
+      }
+      await page.locator('[data-member-cancel]').click();
     }
   } finally { await browser.close(); }
 });

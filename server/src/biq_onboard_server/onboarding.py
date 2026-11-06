@@ -13,15 +13,15 @@ from biq_core.org import Club, Team, User
 from biq_core.org.catalog import build_team_catalog
 from biq_core.org.passwords import hash_password
 from biq_core.roles import RoleAssignment
-from biq_core.roles.models import ROLES
+from biq_core.roles.models import ROLES, validate_club_role
 
 from . import org
 
 _DEFAULT_STAFF = [
-    {"username": "admin", "display_name": "Administrator", "role": "administrator"},
+    {"username": "admin", "display_name": "Director deportivo", "role": "sports_director"},
+    {"username": "coach4", "display_name": "Coach 4", "role": "coach"},
+    {"username": "coach5", "display_name": "Coach 5", "role": "coach"},
     {"username": "director", "display_name": "Sports Director", "role": "sports_director"},
-    {"username": "coord1", "display_name": "Coordinator 1", "role": "coordinator"},
-    {"username": "coord2", "display_name": "Coordinator 2", "role": "coordinator"},
     {"username": "coach1", "display_name": "Coach 1", "role": "coach"},
     {"username": "coach2", "display_name": "Coach 2", "role": "coach"},
     {"username": "coach3", "display_name": "Coach 3", "role": "coach"},
@@ -60,9 +60,9 @@ def _resolve_staff(staff: list[dict] | None) -> list[dict]:
         roles = entry.get("roles", entry.get("role", "coach"))
         if isinstance(roles, str):
             roles = [roles]
-        for r in roles:
-            if r not in ROLES:
-                raise ValueError(f"Unknown role: {r}")
+        roles = list(dict.fromkeys(validate_club_role(r) for r in roles))
+        if len(roles) != 1:
+            raise ValueError("Each club member must have exactly one role")
         resolved.append({**entry, "roles": roles})
     return resolved
 

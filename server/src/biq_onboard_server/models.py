@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from biq_core.org import get_category
-from biq_core.roles import canonical_club_role
+from biq_core.roles import canonical_club_role, validate_club_role
 from pydantic import BaseModel, Field, field_validator
 
 # Team gender values accepted by the API ("" clears the field on update).
@@ -136,12 +136,12 @@ class UserCreate(BaseModel):
     @field_validator("roles")
     @classmethod
     def _canonical_roles(cls, values):
-        return list(dict.fromkeys(canonical_club_role(r) for r in values)) if values is not None else None
+        return list(dict.fromkeys(validate_club_role(r) for r in values)) if values is not None else None
 
     @field_validator("role")
     @classmethod
     def _canonical_role(cls, value):
-        return canonical_club_role(value) if value is not None else value
+        return validate_club_role(value) if value is not None else value
 
     id: str
     club_id: str
@@ -159,12 +159,12 @@ class UserUpdate(BaseModel):
     @field_validator("roles")
     @classmethod
     def _canonical_roles(cls, values):
-        return list(dict.fromkeys(canonical_club_role(r) for r in values)) if values is not None else None
+        return list(dict.fromkeys(validate_club_role(r) for r in values)) if values is not None else None
 
     @field_validator("role")
     @classmethod
     def _canonical_role(cls, value):
-        return canonical_club_role(value) if value is not None else value
+        return validate_club_role(value) if value is not None else value
 
     display_name: str | None = None
     email: str | None = None
@@ -187,7 +187,7 @@ class RoleAssign(BaseModel):
     @field_validator("role")
     @classmethod
     def _canonical_role(cls, value):
-        return canonical_club_role(value) if value is not None else value
+        return validate_club_role(value) if value is not None else value
 
     user_id: str
     role: str

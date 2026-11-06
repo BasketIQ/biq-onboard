@@ -188,11 +188,11 @@ def test_update_preserves_deactivated_status(app_and_client):
     # Authorized admin edits name + role — the intended fields change,
     # but the member must stay deactivated through the registry round-trip.
     r = client.put("/api/admin/clubs/club_p4l/users/m1",
-                   json={"display_name": "Renamed Coach", "role": "coordinator"})
+                   json={"display_name": "Renamed Coach", "role": "sports_director"})
     assert r.status_code == 200
     u = reg.get_user("m1")
     assert u.display_name == "Renamed Coach"
-    assert u.role == "coordinator"
+    assert u.role == "sports_director"
     assert u.status == "deactivated", (
         "generic PUT update implicitly reactivated a deactivated member"
     )

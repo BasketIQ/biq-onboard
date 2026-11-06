@@ -23,7 +23,7 @@ def test_staging_trace_header_and_existing_response_are_preserved(monkeypatch, t
     observed = create_app()
     async def read(app):
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-            return await client.get("/__diagnostic_missing_route__", headers={
+            return await client.get("/health", headers={
                 "traceparent": "00-" + "a" * 32 + "-" + "b" * 16 + "-01",
                 "x-biq-operation-id": "c" * 32,
             })

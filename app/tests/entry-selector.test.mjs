@@ -114,7 +114,7 @@ async function stopServer() {
  * `routeQuery` optionally sets el.route (e.g. 'entry?invite=tok-1').
  * Returns { page, log } — `log` captures every /api/** request.
  */
-async function newEntryPage(browser, { bootstrap = BOOTSTRAP, routeQuery = null, personalTeams = PERSONAL_TEAMS, personalContext = false, org = undefined, personalTeamsFailure = null, personalTeamsDelayMs = 0, personalTeamsHold = null, waitFeed = true } = {}) {
+async function newEntryPage(browser, { bootstrap = BOOTSTRAP, routeQuery = null, personalTeams = PERSONAL_TEAMS, personalContext = false, org = undefined, personalTeamsFailure = null, personalTeamsDelayMs = 0, personalTeamsHold = null, waitFeed = true, workspaces = null } = {}) {
   const page = await browser.newPage();
   const log = [];
   let feedCalls = 0;
@@ -126,6 +126,10 @@ async function newEntryPage(browser, { bootstrap = BOOTSTRAP, routeQuery = null,
       route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(data) });
     try {
       const u = req.url();
+      if(u.includes('/api/context/v1/workspaces'))return workspaces===null?json({},404):json({schema_version:'1.0',entries:workspaces});
+      if(u.includes('/api/auth/profile'))return json({display_name:'Ana'});
+      if(u.endsWith('/api/context/v1/active'))return json({context:{context_id:'ctx',context_epoch:1}});
+      if(u.includes('/api/context/v1/work-mode'))return json({ok:true});
       if (u.includes('/api/context/v1/bootstrap')) return json(bootstrap);
       if (u.includes('/api/context/v1/activate')) return json({ ok: true });
       if (u.includes('/api/context/v1/active/working-teams')) return json({ ok: true });
@@ -186,6 +190,8 @@ async function newEntryPage(browser, { bootstrap = BOOTSTRAP, routeQuery = null,
   if (waitFeed) {
     await page.waitForFunction(() => {
       const el = document.getElementById('app');
+      if(el._bootstrapLoading)return false;
+      if(el._guidedEntries!==null)return !!el.shadowRoot?.querySelector('.guided-entry');
       if (!el.shadowRoot?.querySelector('.entry-step')) return true;
       const s = el._personalTeamsStatus;
       return s === 'ready' || s === 'error' || s === 'uninitialized';
@@ -555,9 +561,11 @@ test('≥3 clubs with no reciente datum: the neutral «Elegir club» access open
     const visible = await page.evaluate(() => {
       const host = document.getElementById('app');
       host.style.setProperty('--shell-footer-space', '64px');
-      const dlg = host.shadowRoot.querySelector('.entry-help-dialog');
-      dlg.scrollTop = dlg.scrollHeight;
-      return dlg.querySelector('.entry-help-note').getBoundingClientRect().bottom <= innerHeight - 64;
+      const dlg = host.shadowRoot.querySelector('.entry-picker-dialog');
+      const list=dlg.querySelector('.entry-picker-list');
+      list.scrollTop=list.scrollHeight;
+      const rows=dlg.querySelectorAll('[data-entry-club-picker-row]');
+      return rows[rows.length-1].getBoundingClientRect().bottom <= innerHeight - 64;
     });
     assert.ok(visible, 'the last line can scroll above the fixed shell footer');
     assert.equal(open.role, 'dialog');
@@ -1769,4 +1777,43 @@ test('hosted Salir without the capability fails closed — feedback, no POST, no
   } finally {
     await browser.close();
   }
+});
+
+
+test('guided new coach uses exclusive checks, continuation and session focus',async()=>{
+ const browser=await chromium.launch();try{
+  const {page,log}=await newEntryPage(browser,{workspaces:[],personalTeams:[],bootstrap:{...BOOTSTRAP,contexts:[]}});
+  const root=page.locator('biq-onboard-app');
+  assert.equal(await root.locator('[data-guided-next]').isDisabled(),true);
+  await root.locator('[data-guided-role="coach"]').check();
+  await root.locator('[data-guided-next]').click();
+  await root.locator('[data-entry-personal-create] input[name="name"]').fill('Equipo de Ana');
+  await root.locator('[data-entry-personal-create] button').click();
+  await page.waitForFunction(()=>document.querySelector('biq-onboard-app')._entryIntent?.emitted);
+  assert.equal(log.filter(x=>x.url.includes('/personal-teams')&&x.method==='POST').length,1);
+  const focus=log.find(x=>x.url.includes('/work-mode'));
+  assert.equal(JSON.parse(focus.postData).mode,'coach');assert.equal(JSON.parse(focus.postData).team_id,'pt-new');
+  assert.equal(log.some(x=>x.url.includes('/active/working-teams')),false);
+ }finally{await browser.close();}
+});
+
+test('guided existing user groups owners and confirms one check',async()=>{
+ const browser=await chromium.launch();try{
+  const entries=[{kind:'personal',name:'Equipos personales',owner_scope:{kind:'personal'},can_direct:false,teams:[{id:'pt-1',name:'Personal A'}]},{kind:'club',name:'Club Norte',owner_scope:{kind:'club',club_id:'c1'},can_direct:true,teams:[{id:'t1',name:'Cadete A'}]}];
+  const {page,log}=await newEntryPage(browser,{workspaces:entries});const root=page.locator('biq-onboard-app');
+  await root.locator('[data-guided-choice="0:pt-1"]').check();await root.locator('[data-guided-choice="1:t1"]').check();
+  assert.equal(await root.locator('[data-guided-choice]:checked').count(),1);
+  await root.locator('[data-guided-confirm]').click();await page.waitForFunction(()=>document.querySelector('biq-onboard-app')._entryIntent?.emitted);
+  assert.equal(JSON.parse(log.find(x=>x.url.includes('/work-mode')).postData).team_id,'t1');
+ }finally{await browser.close();}
+});
+
+test('guided director creation enters club mode without a team',async()=>{
+ const browser=await chromium.launch();try{
+  const {page,log}=await newEntryPage(browser,{workspaces:[],personalTeams:[],bootstrap:{...BOOTSTRAP,contexts:[]}});const root=page.locator('biq-onboard-app');
+  await root.locator('[data-guided-role="director"]').check();await root.locator('[data-guided-next]').click();
+  await root.locator('[data-entry-club-create] input[name="name"]').fill('Club Horizonte');await root.locator('[data-entry-club-create] button').click();
+  await page.waitForFunction(()=>document.querySelector('biq-onboard-app')._entryIntent?.emitted);
+  const body=JSON.parse(log.find(x=>x.url.includes('/work-mode')).postData);assert.equal(body.mode,'director');assert.equal(body.team_id,'');
+ }finally{await browser.close();}
 });

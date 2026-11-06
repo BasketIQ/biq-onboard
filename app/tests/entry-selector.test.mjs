@@ -1817,3 +1817,16 @@ test('guided director creation enters club mode without a team',async()=>{
   const body=JSON.parse(log.find(x=>x.url.includes('/work-mode')).postData);assert.equal(body.mode,'director');assert.equal(body.team_id,'');
  }finally{await browser.close();}
 });
+
+
+test('guided confirmation stays above the shell footer in a long mobile team list',async()=>{
+ const browser=await chromium.launch();try{
+  const teams=Array.from({length:60},(_,i)=>({id:`t${i}`,name:`Equipo ${i}`}));
+  const {page}=await newEntryPage(browser,{workspaces:[{kind:'club',name:'Club Norte',owner_scope:{kind:'club',club_id:'c1'},can_direct:false,teams}]});
+  await page.setViewportSize({width:390,height:900});const root=page.locator('biq-onboard-app');
+  await root.evaluate(el=>el.style.setProperty('--shell-footer-space','64px'));
+  await root.locator('[data-guided-choice="0:t0"]').check();
+  const footer=await root.locator('.guided-footer').boundingBox();assert.ok(footer.y>=0&&footer.y+footer.height<=837);assert.equal(await root.locator('[data-guided-confirm]').isEnabled(),true);
+  const last=root.locator('[data-guided-choice="0:t59"]');await last.scrollIntoViewIfNeeded();const row=await last.boundingBox();const endFooter=await root.locator('.guided-footer').boundingBox();assert.ok(row.y+row.height<=endFooter.y,'last check scrolls clear of confirmation');
+ }finally{await browser.close();}
+});

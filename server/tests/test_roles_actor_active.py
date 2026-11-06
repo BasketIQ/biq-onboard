@@ -105,9 +105,9 @@ def test_active_admin_actor_can_assign_and_remove(client):
     d = client.delete(
         f"/api/admin/clubs/{CLUB}/roles/{aid}", headers=_s2s("actor_admin")
     )
-    assert d.status_code == 200
+    assert d.status_code == 409
     audit = org.get_audit_log().list_for_scope(f"club:{CLUB}")
-    assert {e.action for e in audit} == {"assign", "remove"}
+    assert {e.action for e in audit} == {"replace"}
     assert all(e.actor_id == "actor_admin" for e in audit)
 
 
@@ -209,11 +209,11 @@ def _assignments_of(user_id: str):
 def test_active_admin_can_put_and_delete_user(client):
     r = client.put(
         f"/api/admin/clubs/{CLUB}/users/{TARGET}",
-        json={"role": "coordinator"},
+        json={"role": "coach"},
         headers=_s2s("actor_admin"),
     )
     assert r.status_code == 200
-    assert _assignments_of(TARGET) == [f"{TARGET}__coordinator__club:{CLUB}"]
+    assert _assignments_of(TARGET) == [f"{TARGET}__coach__club:{CLUB}"]
     d = client.delete(
         f"/api/admin/clubs/{CLUB}/users/{TARGET}", headers=_s2s("actor_admin")
     )
@@ -232,7 +232,7 @@ def test_deactivated_admin_cannot_put_or_delete_user(client):
 
     r = client.put(
         f"/api/admin/clubs/{CLUB}/users/{TARGET}",
-        json={"role": "administrator", "roles": ["coordinator"]},
+        json={"role": "administrator", "roles": ["sports_director"]},
         headers=_s2s("actor_gone"),
     )
     assert r.status_code == 403
@@ -267,7 +267,7 @@ def test_put_delete_denied_for_wrong_club_actor(client):
     _seed_member("actor_b2", OTHER_CLUB)
     assert client.put(
         f"/api/admin/clubs/{CLUB}/users/{TARGET}",
-        json={"role": "player"},
+        json={"role": "coach"},
         headers=_s2s("actor_b2"),
     ).status_code == 403
 

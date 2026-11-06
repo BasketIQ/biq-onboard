@@ -60,28 +60,13 @@ def assign_role(club_id: str, payload: RoleAssign, request: Request) -> dict:
                 detail=f"insufficient privileges to assign role: {payload.role}",
             )
 
-    scope = payload.scope or f"club:{club_id}"
-    assignment = RoleAssignment(
-        id=f"{payload.user_id}__{payload.role}__{scope}",
-        user_id=payload.user_id,
-        role=payload.role,
-        scope=scope,
-    )
-    roles.put_assignment(assignment)
-
-    # F9: Audit log.
-    from biq_core.roles import RoleChangeAudit
-
-    _audit_log().record(
-        RoleChangeAudit(
-            action="assign",
-            actor_id=actor,
-            target_user_id=payload.user_id,
-            role=payload.role,
-            scope=scope,
-            assignment_id=assignment.id,
-        )
-    )
+    scope = f"club:{club_id}"
+    if payload.scope is not None and payload.scope != scope:
+        raise HTTPException(403, "scope must match the requested club")
+    from .users import _replace
+    _replace(club_id, payload.user_id, payload.role, actor)
+    assignment = RoleAssignment(id=f"{payload.user_id}__{payload.role}__{scope}",
+                                user_id=payload.user_id, role=payload.role, scope=scope)
 
     return {
         "ok": True,
@@ -135,20 +120,4 @@ def remove_role(club_id: str, assignment_id: str, request: Request) -> dict:
                 detail=f"insufficient privileges to remove role: {removed_assignment.role}",
             )
 
-    roles.remove_assignment(assignment_id)
-
-    # F9: Audit log.
-    from biq_core.roles import RoleChangeAudit
-
-    _audit_log().record(
-        RoleChangeAudit(
-            action="remove",
-            actor_id=actor,
-            target_user_id=removed_assignment.user_id,
-            role=removed_assignment.role,
-            scope=scope,
-            assignment_id=assignment_id,
-        )
-    )
-
-    return {"ok": True, "assignment_id": assignment_id}
+    raise HTTPException(409, "Cambia el rol del miembro; no se puede eliminar su único rol.")

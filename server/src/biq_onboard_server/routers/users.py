@@ -19,7 +19,34 @@ from ..auth import (
 )
 from ..models import PasswordReset, UserCreate, UserUpdate
 
+from biq_core.roles import canonical_club_role, validate_club_role
+from biq_core.roles.membership import replace_member_role
+
 router = APIRouter()
+
+
+def _single_role(primary: str, additional: list[str] | None) -> str:
+    try:
+        primary = validate_club_role(primary)
+    except ValueError as exc:
+        raise HTTPException(422, "Selecciona Entrenador o Director deportivo.") from exc
+    if any(validate_club_role(r) != primary for r in additional or []):
+        raise HTTPException(422, "Cada miembro tiene un único rol en el club.")
+    return primary
+
+
+def _replace(club_id: str, user_id: str, role: str, actor: str, fields=None, *, remove=False) -> None:
+    from google.api_core.exceptions import Aborted
+    try:
+        replace_member_role(org.get_registry(), org.get_roles(), org.get_audit_log(),
+                            club_id=club_id, user_id=user_id, role=role, actor_id=actor, fields=fields, remove=remove)
+    except Aborted as exc:
+        raise HTTPException(503, "Conflicto temporal. Vuelve a intentarlo.") from exc
+    except ValueError as exc:
+        if isinstance(exc.__cause__, Aborted):
+            raise HTTPException(503, "Conflicto temporal. Vuelve a intentarlo.") from exc
+        raise HTTPException(409, str(exc)) from exc
+
 
 
 def _active_roles_by_user(club_id: str) -> dict[str, list[str]]:
@@ -34,71 +61,7 @@ def _active_roles_by_user(club_id: str) -> dict[str, list[str]]:
 
 def _member_roles(member, assigned: dict[str, list[str]]) -> list[str]:
     """Primary ``User.role`` plus active secondary assignment roles."""
-    return sorted({member.role, *assigned.get(member.id, [])})
-
-
-def _sync_secondary_roles(
-    *,
-    club_id: str,
-    user_id: str,
-    primary_role: str,
-    target_roles: list[str],
-    actor: str,
-) -> None:
-    """Sync club-scope assignments to ``primary_role ∪ target_roles``.
-
-    Adds/removes RoleAssignments only — ``User.role`` is untouched. Each
-    mutation is F9-gated (``can_assign_role`` on the actor's capabilities)
-    and recorded in the role-change audit log. The primary role's assignment
-    is always present and never removed by the sync.
-    """
-    from biq_core.roles import RoleAssignment, RoleChangeAudit, can_assign_role, effective_capabilities
-    from biq_core.roles.models import ROLES
-
-    for r in target_roles:
-        if r not in ROLES:
-            raise HTTPException(status_code=400, detail=f"Unknown role: {r}")
-
-    roles = org.get_roles()
-    scope = f"club:{club_id}"
-    target = {primary_role, *target_roles}
-    break_glass = _is_break_glass_admin(actor)
-    caps = effective_capabilities(actor, scope, roles)
-
-    existing = {
-        a.role: a
-        for a in roles.list_assignments(user_id, scope)
-        if a.is_active()
-    }
-    for role in sorted(target - set(existing)):
-        if not break_glass and not can_assign_role(caps, role):
-            raise HTTPException(
-                status_code=403,
-                detail=f"insufficient privileges to assign role: {role}",
-            )
-        assignment = RoleAssignment(
-            id=f"{user_id}__{role}__{scope}",
-            user_id=user_id,
-            role=role,
-            scope=scope,
-        )
-        roles.put_assignment(assignment)
-        org.get_audit_log().record(RoleChangeAudit(
-            action="assign", actor_id=actor, target_user_id=user_id,
-            role=role, scope=scope, assignment_id=assignment.id,
-        ))
-    for role, assignment in sorted(existing.items()):
-        if role not in target:
-            if not break_glass and not can_assign_role(caps, role):
-                raise HTTPException(
-                    status_code=403,
-                    detail=f"insufficient privileges to remove role: {role}",
-                )
-            roles.remove_assignment(assignment.id)
-            org.get_audit_log().record(RoleChangeAudit(
-                action="remove", actor_id=actor, target_user_id=user_id,
-                role=role, scope=scope, assignment_id=assignment.id,
-            ))
+    return [canonical_club_role(member.role)]
 
 
 @router.get("/users")
@@ -146,7 +109,7 @@ def list_all_users(request: Request, email: str | None = None) -> dict:
 
 @router.post("/clubs/{club_id}/users")
 def create_user(club_id: str, payload: UserCreate, request: Request) -> dict:
-    require_admin(request, club_id)
+    require_admin_acting(request, club_id)
     from biq_core.org import User
     from biq_core.org.passwords import hash_password
     from biq_core.roles import RoleAssignment
@@ -155,7 +118,10 @@ def create_user(club_id: str, payload: UserCreate, request: Request) -> dict:
     if payload.role not in ROLES:
         raise HTTPException(status_code=400, detail=f"Unknown role: {payload.role}")
 
+    _single_role(payload.role, payload.roles)
     registry = org.get_registry()
+    if registry.get_user(payload.id) is not None:
+        raise HTTPException(409, "user already exists")
     roles = org.get_roles()
     scope = f"club:{club_id}"
 
@@ -179,13 +145,6 @@ def create_user(club_id: str, payload: UserCreate, request: Request) -> dict:
         scope=scope,
     )
     roles.put_assignment(assignment)
-
-    # F9 multi-role: grant any secondary roles as additional assignments.
-    if payload.roles:
-        _sync_secondary_roles(
-            club_id=club_id, user_id=payload.id, primary_role=payload.role,
-            target_roles=payload.roles, actor=session_user(request),
-        )
 
     return {"ok": True, "user": {"id": user.id, "club_id": club_id}, "role_assigned": payload.role}
 
@@ -218,76 +177,33 @@ def list_users(club_id: str, request: Request) -> dict:
 @router.put("/clubs/{club_id}/users/{user_id}")
 def update_user(club_id: str, user_id: str, payload: UserUpdate, request: Request) -> dict:
     actor = require_admin_acting(request, club_id)
-    from biq_core.org import User
-    from biq_core.roles import RoleAssignment
-    from biq_core.roles.models import ROLES
 
     registry = org.get_registry()
-    roles = org.get_roles()
-    scope = f"club:{club_id}"
 
     existing = registry.get_user(user_id)
     if existing is None:
         raise HTTPException(status_code=404, detail="user not found")
 
-    new_role = payload.role or existing.role
-    if new_role not in ROLES:
-        raise HTTPException(status_code=400, detail=f"Unknown role: {new_role}")
-
-    # Carry fields this endpoint does not edit: a generic PUT update must
-    # never implicitly reactivate a deactivated member (only the audited
-    # PATCH .../status endpoint governs status) nor unlink a bound Apple
-    # identity. Model defaults would silently reset both.
-    user = User(
-        id=user_id,
-        club_id=club_id,
-        role=new_role,
-        display_name=payload.display_name or existing.display_name,
-        email=payload.email or existing.email,
-        default_team_id=payload.default_team_id or existing.default_team_id,
-        password_hash=existing.password_hash,
-        # Forward-compatible: absent on biq-core <0.23 (ignored by the
-        # model), carried automatically once the pinned version models it.
-        apple_sub=getattr(existing, "apple_sub", None),
-        status=existing.status,
-    )
-    registry.upsert_user(user)
-
-    # Sync the RoleAssignment when the role changes
-    if payload.role and payload.role != existing.role:
-        old_assignment_id = f"{user_id}__{existing.role}__{scope}"
-        try:
-            roles.remove_assignment(old_assignment_id)
-        except Exception:
-            pass
-        new_assignment = RoleAssignment(
-            id=f"{user_id}__{new_role}__{scope}",
-            user_id=user_id,
-            role=new_role,
-            scope=scope,
-        )
-        roles.put_assignment(new_assignment)
-
-    # F9 multi-role: sync secondary roles when the caller provides the set.
-    if payload.roles is not None:
-        _sync_secondary_roles(
-            club_id=club_id, user_id=user_id, primary_role=new_role,
-            target_roles=payload.roles, actor=actor,
-        )
+    if existing.club_id != club_id:
+        raise HTTPException(403, "user does not belong to this club")
+    new_role = _single_role(payload.role or existing.role, payload.roles)
+    fields = payload.model_dump(exclude_unset=True, exclude={"role", "roles"})
+    _replace(club_id, user_id, new_role, actor, fields)
 
     return {"ok": True, "user": {"id": user_id}}
 
 
 @router.delete("/clubs/{club_id}/users/{user_id}")
 def delete_user(club_id: str, user_id: str, request: Request) -> dict:
-    require_admin_acting(request, club_id)
-    from ..onboarding import _delete_user_safe
+    actor = require_admin_acting(request, club_id)
 
     registry = org.get_registry()
     existing = registry.get_user(user_id)
     if existing is None:
         raise HTTPException(status_code=404, detail="user not found")
-    _delete_user_safe(registry, user_id)
+    if existing.club_id != club_id:
+        raise HTTPException(403, "user does not belong to this club")
+    _replace(club_id, user_id, existing.role, actor, remove=True)
     return {"ok": True, "user_id": user_id}
 
 
@@ -331,27 +247,7 @@ def set_user_status(club_id: str, user_id: str, payload: UserStatusUpdate,
     if user_id == actor:
         raise HTTPException(status_code=400, detail="cannot change own status")
 
-    from biq_core.org import User
-    from biq_core.roles import RoleChangeAudit
-
-    updated = User(
-        id=user_id,
-        club_id=club_id,
-        role=existing.role,
-        display_name=existing.display_name,
-        email=existing.email,
-        default_team_id=existing.default_team_id,
-        password_hash=existing.password_hash,
-        status=payload.status,
-    )
-    registry.upsert_user(updated)
-    org.get_audit_log().record(RoleChangeAudit(
-        action="deactivate" if payload.status == "deactivated" else "reactivate",
-        actor_id=actor,
-        target_user_id=user_id,
-        role=existing.role,
-        scope=f"club:{club_id}",
-    ))
+    _replace(club_id, user_id, existing.role, actor, {"status": payload.status})
     return {"ok": True, "user_id": user_id, "status": payload.status}
 
 

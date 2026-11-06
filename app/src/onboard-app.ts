@@ -311,7 +311,7 @@ const ROLE_LABELS: Record<string, string> = {
 
 // Unified club director roles; legacy administrator is a compatible alias.
 const canonicalClubRole = (role: string): string => role === 'administrator' ? 'sports_director' : role;
-const ASSIGNABLE_ROLES = ['sports_director', 'coordinator', 'coach', 'player'];
+const ASSIGNABLE_ROLES = ['sports_director', 'coach'];
 
 
 function clubTabsForMembershipState(memberships: MembershipInfo[] | undefined): ClubTab[] {
@@ -5875,7 +5875,8 @@ class BiqOnboardApp extends HTMLElement {
   // Role management surface for a member row. Administrators can edit
   // identity + all assignable club roles for both director aliases.
   private _memberCanEdit(member: MemberRow): boolean {
-    return ADMIN_ROLES.includes(this._org?.role || '')
+    return this._memberAssignments !== null
+      && ADMIN_ROLES.includes(this._org?.role || '')
       && ASSIGNABLE_ROLES.includes(member.role === 'administrator' ? 'sports_director' : member.role);
   }
 
@@ -5930,10 +5931,7 @@ class BiqOnboardApp extends HTMLElement {
   private _renderMemberRow(m: MemberRow, isAdminTier: boolean): string {
     const deactivated = m.status === 'deactivated';
     const canEdit = this._memberCanEdit(m);
-    const secondary = [...new Set((m.roles || []).map(canonicalClubRole))].filter(r => r !== canonicalClubRole(m.role));
-    const roleBadges = [...new Set([m.role, ...secondary].map(r => r === 'administrator' ? 'sports_director' : r))]
-      .map((r) => `<span class="onboard-role-badge">${escapeHtml(ROLE_LABELS[r] || r)}</span>`)
-      .join('');
+    const roleBadges = `<span class="onboard-role-badge">${escapeHtml(ROLE_LABELS[canonicalClubRole(m.role)] || m.role)}</span>`;
 
     const statusBadge = deactivated
       ? '<span class="onboard-status-badge off">Desactivado</span>' : '';
@@ -5972,7 +5970,6 @@ class BiqOnboardApp extends HTMLElement {
   // orange subheader carries «Club – <member context>»; back resolves to
   // the Miembros list — never history.back(), never app Home.
   private _renderMemberEditScreen(m: MemberRow, isAdminTier: boolean, roleOptions: string[]): string {
-    const secondary = [...new Set((m.roles || []).map(canonicalClubRole))].filter(r => r !== canonicalClubRole(m.role));
     // Identity fields are admin-only; role chips for everyone who
     // passed _memberCanEdit.
     const identityFields = isAdminTier ? `
@@ -5981,29 +5978,17 @@ class BiqOnboardApp extends HTMLElement {
       <input class="onboard-input" data-edit-email="${escapeHtml(m.id)}"
         value="${escapeHtml(m.email || '')}" placeholder="Email" type="email" />` : '';
     const primarySelect = isAdminTier ? `
-      <label class="onboard-member-field">Rol principal
+      <label class="onboard-member-field">Rol
         <select class="onboard-input" data-edit-primary="${escapeHtml(m.id)}">
           ${roleOptions.map((r) => `<option value="${r}" ${r === (m.role === 'administrator' ? 'sports_director' : m.role) ? 'selected' : ''}>${escapeHtml(ROLE_LABELS[r] || r)}</option>`).join('')}
         </select>
       </label>` : '';
-    const secondaryChips = secondary.map((r) => `
-      <span class="onboard-role-badge removable">${escapeHtml(ROLE_LABELS[r] || r)}
-        <button class="onboard-chip-x" data-member-role-remove="${escapeHtml(m.id)}" data-role="${escapeHtml(r)}"
-          title="Quitar rol">×</button>
-      </span>`).join('');
-    const addableRoles = roleOptions.filter((r) => r !== (m.role === 'administrator' ? 'sports_director' : m.role) && !secondary.includes(r));
-    const addSelect = addableRoles.length ? `
-      <select class="onboard-input onboard-input-sm" data-member-role-add="${escapeHtml(m.id)}">
-        <option value="">Añadir rol…</option>
-        ${addableRoles.map((r) => `<option value="${r}">${escapeHtml(ROLE_LABELS[r] || r)}</option>`).join('')}
-      </select>` : '';
 
     return `<section class="onboard-section onboard-subscreen" data-member-edit-screen>
       <div class="onboard-subscreen-card" data-member-row="${escapeHtml(m.id)}">
         <div class="onboard-member-edit">
           ${identityFields}
           ${primarySelect}
-          <div class="onboard-member-roles-edit">${secondaryChips}${addSelect}</div>
           <div class="onboard-member-edit-actions">
             <button class="onboard-btn onboard-btn-sm onboard-btn-primary" data-member-save="${escapeHtml(m.id)}">Guardar</button>
             <button class="onboard-btn onboard-btn-sm" data-member-cancel>Cancelar</button>
@@ -6101,41 +6086,6 @@ class BiqOnboardApp extends HTMLElement {
           this._deleteConfirmUserId = userId;
           this.render();
         }
-      });
-    });
-
-    this.shadow.querySelectorAll('[data-member-role-remove]').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const el = btn as HTMLElement;
-        const userId = el.dataset.memberRoleRemove!;
-        const role = el.dataset.role!;
-        const assignments = (this._memberAssignments || []).filter(
-          (a) => a.user_id === userId && canonicalClubRole(a.role) === canonicalClubRole(role) && a.club_id === clubId);
-        if (!assignments.length) { this._membersError = 'Asignación no encontrada'; this.render(); return; }
-        mutate(async () => {
-          let result: Response;
-          for (const assignment of assignments) {
-            result = await fetch(`/api/clubs/${clubId}/roles/${encodeURIComponent(assignment.id)}`, {
-              method: 'DELETE', credentials: 'include',
-            });
-            if (!result.ok) return result;
-          }
-          return result!;
-        });
-      });
-    });
-
-    this.shadow.querySelectorAll('[data-member-role-add]').forEach(sel => {
-      sel.addEventListener('change', () => {
-        const el = sel as HTMLSelectElement;
-        const userId = el.dataset.memberRoleAdd!;
-        const role = el.value;
-        if (!role) return;
-        mutate(() => fetch(`/api/clubs/${clubId}/roles`, {
-          method: 'POST', credentials: 'include',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ user_id: userId, role }),
-        }));
       });
     });
 

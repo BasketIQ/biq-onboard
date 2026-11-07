@@ -365,6 +365,7 @@ interface ContextDescriptor {
   archived_team_ids?: string[];
   working_team_ids: string[];
   active_team_id?: string;
+  work_mode?: 'coach' | 'director';
   status?: string;
 }
 
@@ -419,22 +420,28 @@ interface EntryIntent {
   navTicket?: { id: string; close: () => boolean } | null;
 }
 
+interface EntryWorkFocus {
+  contextId: string;
+  mode: 'coach' | 'director';
+  teamId: string;
+}
+
 // Recovery surfaces after an applied-or-uncertain mutation:
 //   narrowing — activate POST applied but the working-teams PUT failed
 //     (Reintentar equipo retries the PUT only; Entrar con todos emits the
 //     plain activation path). No rollback is claimed.
 //   uncertain — transport failed after the mutation may have been sent
-//     (Comprobar resynchronizes with a bootstrap GET; never an auto-POST).
+//     (Comprobar reads the active focus or refreshes bootstrap).
 //   confirm   — the activated event was emitted but the shell never
 //     confirmed within the bounded window (Reintentar = bootstrap GET).
 type EntryRecovery =
   | { kind: 'narrowing'; team_id: string; message: string }
-  | { kind: 'uncertain'; message: string }
+  | { kind: 'uncertain'; message: string; verify?: () => void }
   | { kind: 'confirm'; message: string };
 
 // The request may have reached the server — never auto-retried.
 class EntryUncertainTransport extends Error {
-  constructor() {
+  constructor(readonly focus?: EntryWorkFocus) {
     super('No sabemos si la entrada se completó');
     this.name = 'EntryUncertainTransport';
   }
@@ -1873,10 +1880,46 @@ class BiqOnboardApp extends HTMLElement {
     const current = await fetch('/api/context/v1/active', {credentials: 'include', cache: 'no-store'});
     if (!current.ok) throw new Error('No se pudo comprobar el contexto.');
     const {context} = await current.json();
-    const response = await this._entryMutation('/api/context/v1/work-mode', {
-      mode, team_id: teamId, expected_context_id: context.context_id, expected_epoch: context.context_epoch,
-    }, 'PUT');
+    const focus = { contextId: context.context_id, mode, teamId };
+    let response: Response;
+    try {
+      response = await this._entryMutation('/api/context/v1/work-mode', {
+        mode, team_id: teamId, expected_context_id: focus.contextId, expected_epoch: context.context_epoch,
+      }, 'PUT');
+    } catch (error) {
+      if (!(error instanceof EntryUncertainTransport)) throw error;
+      if (await this._readWorkFocus(focus)) return;
+      throw new EntryUncertainTransport(focus);
+    }
     if (!response.ok) throw new Error('No se pudo confirmar el modo de trabajo. Reinténtalo.');
+  }
+
+  private async _readWorkFocus(focus: EntryWorkFocus): Promise<boolean | null> {
+    try {
+      const response = await fetch('/api/context/v1/active', {
+        credentials: 'include', cache: 'no-store', signal: AbortSignal.timeout?.(5000),
+      });
+      if (response.status === 409) return false;
+      if (!response.ok) return null;
+      const { context }: { context?: ContextDescriptor } = await response.json();
+      return context?.context_id === focus.contextId && context.work_mode === focus.mode
+        && (context.active_team_id ?? '') === focus.teamId;
+    } catch {
+      return null;
+    }
+  }
+
+  private _verifyWorkFocus(original: EntryIntent, focus: EntryWorkFocus): void {
+    const intent = this._beginEntryIntent(original.kind, {
+      club_id: original.club_id, team_id: original.team_id,
+    });
+    if (!intent) return;
+    this._runEntryIntent(intent, async () => {
+      const confirmed = await this._readWorkFocus(focus);
+      if (!this._intentCurrent(intent) || confirmed) return;
+      if (confirmed === null) throw new EntryUncertainTransport(focus);
+      this._resyncBootstrap();
+    });
   }
 
   private async _putWorkingTeams(teamId: string): Promise<void> {
@@ -1962,7 +2005,12 @@ class BiqOnboardApp extends HTMLElement {
           return;
         }
         if (err instanceof EntryUncertainTransport) {
-          this._entryRecovery = { kind: 'uncertain', message: err.message };
+          const focus = err.focus;
+          this._entryRecovery = {
+            kind: 'uncertain',
+            message: err.message,
+            verify: focus ? () => this._verifyWorkFocus(intent, focus) : undefined,
+          };
           this.render();
           return;
         }
@@ -4853,14 +4901,14 @@ class BiqOnboardApp extends HTMLElement {
         </div>
       </div>` : '';
 
-    if (this._guidedEntries !== null && !this._entryRecovery && !this._helpOpen && !this._clubPickerOpen) {
+    if (this._guidedEntries !== null && this._entryRecovery?.kind !== 'narrowing' && !this._helpOpen && !this._clubPickerOpen) {
       const nameField=this._guidedNeedsName?'<div class="entry-field"><label>¿Cómo quieres que te llamemos?</label><input name="nickname" autocomplete="nickname" maxlength="80" required></div>':'';
       const coachForm = `<form class="entry-form" data-entry-personal-create>${nameField}<div class="entry-field"><label>Nombre del equipo</label><input name="name" maxlength="120" required></div><div class="entry-field"><label>Categoría</label><select name="category_key">${PERSONAL_CATEGORIES.map(c=>`<option value="${c.key}">${c.label}</option>`).join('')}</select></div><div class="entry-field"><label>Género</label><select name="gender"><option value="X">Mixto</option><option value="F">Femenino</option><option value="M">Masculino</option></select></div><button class="onboard-btn onboard-btn-primary" ${busy?'disabled':''}>Crear equipo y entrar</button></form>`;
       const directorForm = `<form class="entry-form" data-entry-club-create>${nameField}<div class="entry-field"><label>Nombre del club</label><input name="name" maxlength="200" required></div><button class="onboard-btn onboard-btn-primary" ${busy?'disabled':''}>Crear club y entrar</button></form>`;
       const invitationError = this._guidedInvitationsFailed
         ? '<p class="entry-error" role="alert">No se pudieron comprobar tus invitaciones. <button class="onboard-btn" type="button" data-guided-retry-invitations>Reintentar</button></p>'
         : '';
-      return `${invitationError}${this._entryError?`<p class="entry-error" role="alert">${escapeHtml(this._entryError)}</p>`:''}${guidedEntry({entries:this._guidedEntries, role:this._guidedRole, step:this._guidedStep,selection:this._guidedSelection,busy,createClub:createAllowed,coachImage:coachEntryImage,directorImage:directorEntryImage,invitations:this._guidedInvitations,otherOptions:this._guidedOtherOptions}, {coach:coachForm,director:directorForm}, this._inviteToken&&!this._invitePreview?'<p class="entry-status" role="status">Comprobando invitación…</p>':inviteBlock)}`;
+      return `${recoveryMarkup}${invitationError}${this._entryError?`<p class="entry-error" role="alert">${escapeHtml(this._entryError)}</p>`:''}${guidedEntry({entries:this._guidedEntries, role:this._guidedRole, step:this._guidedStep,selection:this._guidedSelection,busy,createClub:createAllowed,coachImage:coachEntryImage,directorImage:directorEntryImage,invitations:this._guidedInvitations,otherOptions:this._guidedOtherOptions}, {coach:coachForm,director:directorForm}, this._inviteToken&&!this._invitePreview?'<p class="entry-status" role="status">Comprobando invitación…</p>':inviteBlock)}`;
     }
     return `
       <div class="entry-step"${this._helpOpen || this._clubPickerOpen ? ' inert' : ''}>
@@ -5255,7 +5303,7 @@ class BiqOnboardApp extends HTMLElement {
 
     // Recovery actions (entry-login §4.2): explicit gestures only — the
     // PUT-only narrowing retry, the plain activation path, and the
-    // bootstrap-GET resync. Nothing here re-POSTs an uncertain mutation.
+    // read-only verification. Nothing here replays an uncertain mutation.
     this.shadow.querySelector('[data-entry-retry-team]')?.addEventListener('click', (ev) => {
       this._retryNarrowing((ev.currentTarget as HTMLElement).dataset.entryRetryTeam || '');
     });
@@ -5264,7 +5312,9 @@ class BiqOnboardApp extends HTMLElement {
     });
     this.shadow.querySelectorAll('[data-entry-check]').forEach((btn) => {
       btn.addEventListener('click', () => {
-        this._resyncBootstrap();
+        const verify = this._entryRecovery?.kind === 'uncertain' ? this._entryRecovery.verify : undefined;
+        if (verify) verify();
+        else this._resyncBootstrap();
       });
     });
   }

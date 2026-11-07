@@ -37,6 +37,41 @@ jobs:
           integration_runner_name: ${{ vars.INTEGRATION_RUNNER_NAME }}
           integration2_runner_name: ${{ vars.INTEGRATION2_RUNNER_NAME }}
 
+  frontend:
+    needs: [pick]
+    runs-on: ${{ needs.pick.outputs.runner == 'ubuntu-latest' && fromJSON('["ubuntu-latest"]') || fromJSON(format('["self-hosted","{0}"]', needs.pick.outputs.runner)) }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup self-hosted env
+        uses: ./.github/actions/setup-self-hosted-env
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm ci --ignore-scripts
+        working-directory: app
+      - run: npm run typecheck && npm run build:lib
+        working-directory: app
+
+  staff-browser:
+    needs: [frontend]
+    runs-on: [self-hosted, development]
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup self-hosted env
+        uses: ./.github/actions/setup-self-hosted-env
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm ci --ignore-scripts
+        working-directory: app
+      - run: npm run build:lib
+        working-directory: app
+      - run: npx playwright install chromium
+        working-directory: app
+      - run: node --test tests/personal-staff.test.mjs
+        working-directory: app
+
   server:
     needs: [pick]
     runs-on: ${{ needs.pick.outputs.runner == 'ubuntu-latest' && fromJSON('["ubuntu-latest"]') || fromJSON(format('["self-hosted","{0}"]', needs.pick.outputs.runner)) }}

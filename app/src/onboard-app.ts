@@ -4687,7 +4687,8 @@ class BiqOnboardApp extends HTMLElement {
     // Director 2026-10-24 (bugfix-auth-club-roster, bug 2): «Mi club» is
     // ALWAYS shown — the PD-ENTRY coach-hiding gate is removed; with no
     // clubs the block offers «Crear club».
-    const atTeamCap = personalTeams.length >= 2;
+    const personalTeamCount = this._guidedEntries?.find(entry => entry.kind === 'personal')?.teams.length ?? personalTeams.length;
+    const atTeamCap = personalTeamCount >= 2;
     const teamMeta = (t: PersonalTeamRow) =>
       `${escapeHtml(t.category_label || t.category_key)}${t.gender && t.gender !== 'X' ? ` · ${escapeHtml(t.gender)}` : ''}${t.age_band ? ` · ${escapeHtml(t.age_band)}` : ''}`;
 
@@ -4908,7 +4909,8 @@ class BiqOnboardApp extends HTMLElement {
       const invitationError = this._guidedInvitationsFailed
         ? '<p class="entry-error" role="alert">No se pudieron comprobar tus invitaciones. <button class="onboard-btn" type="button" data-guided-retry-invitations>Reintentar</button></p>'
         : '';
-      return `${recoveryMarkup}${invitationError}${this._entryError?`<p class="entry-error" role="alert">${escapeHtml(this._entryError)}</p>`:''}${guidedEntry({entries:this._guidedEntries, role:this._guidedRole, step:this._guidedStep,selection:this._guidedSelection,busy,createClub:createAllowed,coachImage:coachEntryImage,directorImage:directorEntryImage,invitations:this._guidedInvitations,otherOptions:this._guidedOtherOptions}, {coach:coachForm,director:directorForm}, this._inviteToken&&!this._invitePreview?'<p class="entry-status" role="status">Comprobando invitación…</p>':inviteBlock)}`;
+      const createTeam = actions['personal.team.create']?.allowed === true && !atTeamCap;
+      return `${recoveryMarkup}${invitationError}${this._entryError?`<p class="entry-error" role="alert">${escapeHtml(this._entryError)}</p>`:''}${guidedEntry({entries:this._guidedEntries, role:this._guidedRole, step:this._guidedStep,selection:this._guidedSelection,busy,createTeam,createClub:createAllowed,coachImage:coachEntryImage,directorImage:directorEntryImage,invitations:this._guidedInvitations,otherOptions:this._guidedOtherOptions}, {coach:coachForm,director:directorForm}, this._inviteToken&&!this._invitePreview?'<p class="entry-status" role="status">Comprobando invitación…</p>':inviteBlock)}`;
     }
     return `
       <div class="entry-step"${this._helpOpen || this._clubPickerOpen ? ' inert' : ''}>
@@ -5114,6 +5116,14 @@ class BiqOnboardApp extends HTMLElement {
     }
     this.shadow.querySelectorAll<HTMLInputElement>('[data-guided-role]').forEach(input=>input.addEventListener('change',()=>{this._guidedRole=input.dataset.guidedRole as 'coach'|'director';this.render();}));
     this.shadow.querySelector('[data-guided-next]')?.addEventListener('click',()=>{if(this._guidedRole){this._guidedStep=2;this.render();}});
+    this.shadow.querySelectorAll<HTMLButtonElement>('[data-guided-create]').forEach(button => {
+      button.addEventListener('click', () => {
+        this._guidedRole = button.dataset.guidedCreate === 'director' ? 'director' : 'coach';
+        this._guidedStep = 2;
+        this.render();
+        this.shadow.querySelector<HTMLInputElement>('.guided-entry form input')?.focus();
+      });
+    });
     this.shadow.querySelector('[data-guided-back]')?.addEventListener('click',()=>{this._guidedStep=1;this.render();});
     this.shadow.querySelectorAll<HTMLInputElement>('[data-guided-choice]').forEach(input=>input.addEventListener('change',()=>{this._guidedSelection=input.dataset.guidedChoice||'';this.render();}));
     this.shadow.querySelector('[data-guided-confirm]')?.addEventListener('click',()=>{

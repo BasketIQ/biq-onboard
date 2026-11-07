@@ -1798,18 +1798,28 @@ test('guided new coach uses exclusive checks, continuation and session focus',as
  }finally{await browser.close();}
 });
 
-test('guided existing user groups owners and confirms one check',async()=>{
+test('guided existing user chooses a session profile and can open the creation forms',async()=>{
  const browser=await chromium.launch();try{
   const entries=[{kind:'personal',name:'Equipos personales',owner_scope:{kind:'personal'},can_direct:false,teams:[{id:'pt-1',name:'Personal A'}]},{kind:'club',name:'Club Norte',owner_scope:{kind:'club',club_id:'c1'},can_direct:true,teams:[{id:'t1',name:'Cadete A'}]}];
-  const {page,log}=await newEntryPage(browser,{workspaces:entries});const root=page.locator('biq-onboard-app');
-  const personal=root.getByRole('radiogroup',{name:'Equipos personales',exact:true});
-  const club=root.getByRole('radiogroup',{name:'Club Norte',exact:true});
-  const personalTeam=personal.getByRole('radio',{name:'Personal A · Equipos personales',exact:true});
-  const clubTeam=club.getByRole('radio',{name:'Cadete A · Club Norte',exact:true});
-  assert.equal(await personalTeam.locator('..').locator('small').count(),0);
-  assert.equal(await clubTeam.locator('..').locator('small').count(),0);
-  await personalTeam.check();await clubTeam.check();
+  const bootstrap={...BOOTSTRAP,entry_actions:{...BOOTSTRAP.entry_actions,'personal.team.create':{allowed:true}}};
+  const {page,log}=await newEntryPage(browser,{workspaces:entries,bootstrap});const root=page.locator('biq-onboard-app');
+  await root.getByRole('heading',{name:'Elige tu perfil para esta sesión',exact:true}).waitFor();
+  const coach=root.getByRole('region',{name:'Entrenador',exact:true});
+  const director=root.getByRole('region',{name:'Director Deportivo',exact:true});
+  const personalTeam=coach.getByRole('radio',{name:'Personal A - Equipo personal',exact:true});
+  const clubTeam=coach.getByRole('radio',{name:'Cadete A - Club Norte',exact:true});
+  assert.equal(await director.getByRole('radio',{name:'Club Norte',exact:true}).count(),1);
+  assert.equal(await clubTeam.evaluate(el=>getComputedStyle(el).borderTopWidth),'2px');
+  await personalTeam.check();
+  await director.getByRole('radio',{name:'Club Norte',exact:true}).check();
   assert.equal(await root.locator('[data-guided-choice]:checked').count(),1);
+  await coach.getByRole('button',{name:'+ Crear equipo Personal',exact:true}).click();
+  assert.equal(await root.locator('[data-entry-personal-create]').count(),1);
+  await root.getByRole('button',{name:'Atrás',exact:true}).click();
+  await director.getByRole('button',{name:'+ Crear Club',exact:true}).click();
+  assert.equal(await root.locator('[data-entry-club-create]').count(),1);
+  await root.getByRole('button',{name:'Atrás',exact:true}).click();
+  await clubTeam.check();
   await root.locator('[data-guided-confirm]').click();await page.waitForFunction(()=>document.querySelector('biq-onboard-app')._entryIntent?.emitted);
   assert.equal(JSON.parse(log.find(x=>x.url.includes('/work-mode')).postData).team_id,'t1');
  }finally{await browser.close();}
@@ -1874,7 +1884,7 @@ test('guided existing staff member without a team can enter directly or see othe
     const {page, log} = await newEntryPage(browser, {workspaces});
     const root = page.locator('biq-onboard-app');
     await root.getByRole('button', {name:'Otras opciones'}).click();
-    await root.getByRole('heading', {name:'¿Con qué quieres trabajar?'}).waitFor();
+    await root.getByRole('heading', {name:'Elige tu perfil para esta sesión'}).waitFor();
     assert.equal(await root.getByRole('button', {name:'Salir', exact:true}).count(), 1);
     await root.getByRole('button', {name:'Volver al acceso al club'}).click();
     await root.getByRole('button', {name:'Entrar en Club Invitado como entrenador'}).click();

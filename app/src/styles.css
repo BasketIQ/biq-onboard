@@ -1900,8 +1900,8 @@
 .guided-role input { position: absolute; right: 16px; top: 16px; }
 .guided-role p { margin-bottom: 0; }
 .guided-choice { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 18px 0; border-bottom: 1px solid var(--biq-color-border, #dce3ee); cursor: pointer; }
-.guided-choice small { display: block; color: var(--biq-color-text-muted, #61708b); }
-.guided-role input, .guided-choice input { appearance: none; flex: none; width: 28px; height: 28px; border: 1.5px solid var(--biq-color-border, #a9b7cb); border-radius: 7px; background: var(--biq-color-surface, white); cursor: pointer; }
+.guided-choice-context { color: var(--biq-color-text-muted, #61708b); }
+.guided-role input, .guided-choice input { appearance: none; flex: none; width: 28px; height: 28px; border: 2px solid var(--biq-color-text-muted, #61708b); border-radius: 7px; background: var(--biq-color-surface, white); cursor: pointer; }
 .guided-role input:checked, .guided-choice input:checked { background: var(--biq-color-primary, #d94c00); border-color: var(--biq-color-primary, #d94c00); }
 .guided-role input:checked::after, .guided-choice input:checked::after { content: '✓'; display: block; text-align: center; line-height: 25px; font-size: 22px; color: white; }
 .guided-role input:focus-visible, .guided-choice input:focus-visible { outline: 3px solid #286fe6; outline-offset: 3px; }

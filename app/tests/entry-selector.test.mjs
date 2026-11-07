@@ -1801,7 +1801,13 @@ test('guided existing user groups owners and confirms one check',async()=>{
  const browser=await chromium.launch();try{
   const entries=[{kind:'personal',name:'Equipos personales',owner_scope:{kind:'personal'},can_direct:false,teams:[{id:'pt-1',name:'Personal A'}]},{kind:'club',name:'Club Norte',owner_scope:{kind:'club',club_id:'c1'},can_direct:true,teams:[{id:'t1',name:'Cadete A'}]}];
   const {page,log}=await newEntryPage(browser,{workspaces:entries});const root=page.locator('biq-onboard-app');
-  await root.locator('[data-guided-choice="0:pt-1"]').check();await root.locator('[data-guided-choice="1:t1"]').check();
+  const personal=root.getByRole('radiogroup',{name:'Equipos personales',exact:true});
+  const club=root.getByRole('radiogroup',{name:'Club Norte',exact:true});
+  const personalTeam=personal.getByRole('radio',{name:'Personal A · Equipos personales',exact:true});
+  const clubTeam=club.getByRole('radio',{name:'Cadete A · Club Norte',exact:true});
+  assert.equal(await personalTeam.locator('..').locator('small').count(),0);
+  assert.equal(await clubTeam.locator('..').locator('small').count(),0);
+  await personalTeam.check();await clubTeam.check();
   assert.equal(await root.locator('[data-guided-choice]:checked').count(),1);
   await root.locator('[data-guided-confirm]').click();await page.waitForFunction(()=>document.querySelector('biq-onboard-app')._entryIntent?.emitted);
   assert.equal(JSON.parse(log.find(x=>x.url.includes('/work-mode')).postData).team_id,'t1');

@@ -121,6 +121,9 @@ async function newIntentPage(browser, {
   putSpec = () => 'ok',
   personalTeams = PERSONAL_TEAMS,
   routeQuery = null,
+  guidedWorkspaces = null,
+  activeSpec = () => 'ok',
+  workModeSpec = () => 'ok',
 } = {}) {
   const page = await browser.newPage();
   const log = [];
@@ -143,6 +146,15 @@ async function newIntentPage(browser, {
       if (u.includes('/api/context/v1/bootstrap')) {
         const payload = typeof bootstrap === 'function' ? bootstrap() : bootstrap;
         return json(payload);
+      }
+      if (guidedWorkspaces && u.endsWith('/api/context/v1/workspaces')) {
+        return json({ schema_version: '1.0', entries: guidedWorkspaces });
+      }
+      if (guidedWorkspaces && u.endsWith('/api/context/v1/active')) {
+        return applySpec(activeSpec());
+      }
+      if (guidedWorkspaces && u.endsWith('/api/context/v1/work-mode')) {
+        return applySpec(workModeSpec());
       }
       if (u.includes('/api/context/v1/activate')) {
         activateCalls += 1;
@@ -180,10 +192,10 @@ async function newIntentPage(browser, {
     el.org = { club: null, email: 'e2e@basketiq.io', display_name: 'E2E', memberships: [] };
     el.user = 'e2e-user';
   }, routeQuery);
-  await page.waitForFunction(() => {
+  await page.waitForFunction((guided) => {
     const el = document.getElementById('app');
-    return !!(el.shadowRoot && el.shadowRoot.querySelector('.entry-step'));
-  }, { timeout: 10000 });
+    return !!el.shadowRoot?.querySelector(guided ? '[data-guided-confirm]' : '.entry-step');
+  }, Boolean(guidedWorkspaces), { timeout: 10000 });
   // Personal feed ready — cards present.
   await page.waitForFunction(() => {
     const el = document.getElementById('app');
@@ -339,6 +351,46 @@ test('POST network failure → uncertain transport message, POST count stays 1, 
     await browser.close();
   }
 });
+
+for (const manualCheck of [false, true]) {
+  test(`lost work-mode reply recovers ${manualCheck ? 'from Comprobar' : 'automatically'} without replaying the PUT`, async () => {
+    const browser = await chromium.launch();
+    try {
+      const owner = { kind: 'club', club_id: 'club-1' };
+      const focus = {
+        context_id: 'context-1', context_epoch: 1, owner_scope: owner, active_team_id: null,
+      };
+      let applied = false;
+      let unavailable = manualCheck;
+      const { page, log, events } = await newIntentPage(browser, {
+        guidedWorkspaces: [{ kind: 'club', owner_scope: owner, name: 'Club Prueba', can_direct: true, teams: [] }],
+        activeSpec: () => {
+          if (applied && unavailable) return { network: true };
+          return { status: 200, body: { context: { ...focus, work_mode: applied ? 'director' : null } } };
+        },
+        workModeSpec: () => {
+          applied = true;
+          return { network: true };
+        },
+      });
+      await page.locator('[data-guided-choice="0:director"]').check();
+      await clickShadow(page, '[data-guided-confirm]');
+      if (manualCheck) {
+        await page.locator('[data-entry-check]').waitFor();
+        assert.equal(await page.locator('[data-guided-confirm]').count(), 1);
+        assert.equal(await page.locator('.entry-step').count(), 0, 'guided selector stays visible');
+        assert.equal((await events()).length, 0);
+        unavailable = false;
+        await clickShadow(page, '[data-entry-check]');
+      }
+      await page.waitForFunction(() => window.__activatedEvents.length === 1);
+      assert.deepEqual(await events(), [{ kind: 'club', club_id: 'club-1', team_id: '' }]);
+      assert.equal(log.filter(row => row.method === 'PUT' && row.url.endsWith('/work-mode')).length, 1);
+    } finally {
+      await browser.close();
+    }
+  });
+}
 
 test('account switch while intent A POST is pending → A emits/paints/releases nothing; B keeps busy and completes alone', async () => {
   const browser = await chromium.launch();

@@ -80,7 +80,8 @@ def create_app() -> FastAPI:
     def serve_static(full_path: str = "") -> FileResponse:
         file = (static_dir / full_path).resolve()
         if file.is_relative_to(static_dir) and file.is_file():
-            return FileResponse(file)
+            headers = {"Cache-Control": "no-cache"} if full_path == "embed/biq-onboard.js" else None
+            return FileResponse(file, headers=headers)
         return FileResponse(static_dir / "index.html")
 
     # Shared diagnostics are inert outside staging; initialized before requests.

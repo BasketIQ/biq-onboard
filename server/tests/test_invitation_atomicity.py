@@ -32,7 +32,7 @@ from google.api_core import exceptions as gexc  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 from biq_core.org import FirestoreOrgRegistry  # noqa: E402
-from biq_core.org.models import User  # noqa: E402
+from biq_core.org.models import Club, User  # noqa: E402
 from biq_core.roles import FirestoreRoleRegistry  # noqa: E402
 from biq_core.roles.models import RoleAssignment  # noqa: E402
 from biq_onboard_server import invitations, org  # noqa: E402
@@ -100,7 +100,11 @@ class _FakeQuery:
         self._filters = filters or []
         self._limit = limit
 
-    def where(self, field: str, op: str, value: Any) -> "_FakeQuery":
+    def where(
+        self, field: str = "", op: str = "", value: Any = None, *, filter=None
+    ) -> "_FakeQuery":
+        if filter is not None:
+            field, op, value = filter.field_path, filter.op_string, filter.value
         assert op == "==", "test fake supports equality filters only"
         return _FakeQuery(
             self._client, self._path, self._filters + [(field, value)], self._limit
@@ -384,3 +388,32 @@ class TestStrictRedeemAtomicity:
         assert coordinator_path not in fake._docs, (
             "replay must never regrant a removed role"
         )
+
+
+def test_discovered_invitation_redeems_by_id_with_firestore_stores(fx, monkeypatch):
+    client, fake = fx
+    FirestoreOrgRegistry(fake).upsert_club(Club(id="c1", name="Club Uno"))
+    monkeypatch.setattr("biq_onboard_server.clients.send_invite", lambda *_: {"ok": True})
+    issued = client.post(
+        "/api/admin/clubs/c1/invite",
+        json={"email": _RECIPIENT},
+        headers={**_S2S, "X-BIQ-Acting-User-Id": "admin1"},
+    )
+    assert issued.status_code == 200, issued.text
+
+    path = "/api/ops/invitations"
+    headers = _ops_headers("acc_s6", scope="verified", verified_email=_RECIPIENT)
+    [invitation] = client.get(path, headers=headers).json()["invitations"]
+    assert invitation["club_name"] == "Club Uno"
+    assert _inv_doc(fake, invitation["id"])["status"] == "pending"
+
+    payload = {"invitation_id": invitation["id"]}
+    accepted = client.post(f"{path}/redeem", json=payload, headers=headers)
+    assert accepted.status_code == 200, accepted.text
+    member_id = accepted.json()["membership_subject_id"]
+    assert _inv_doc(fake, invitation["id"])["status"] == "redeemed"
+    assert fake._docs[f"orgs_users/{member_id}"]["status"] == "active"
+    role_path = f"orgs_clubs/club:c1/roles/{member_id}__coach__club:c1"
+    assert fake._docs[role_path]["role"] == "coach"
+    assert client.get(path, headers=headers).json() == {"invitations": []}
+    assert client.post(f"{path}/redeem", json=payload, headers=headers).json() == accepted.json()

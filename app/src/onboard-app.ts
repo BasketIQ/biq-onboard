@@ -15,7 +15,7 @@
  */
 
 import styles from './styles.css?inline';
-import { guidedEntry, type WorkspacesEntry } from './guided-entry';
+import { guidedEntry, type PendingInvitation, type WorkspacesEntry } from './guided-entry';
 import coachEntryImage from './assets/hoopie-entrenador.webp';
 import directorEntryImage from './assets/chispa-directora-deportiva.webp';
 import chispaHeadCompactSvg from './assets/chispa-head-compact-v2.svg?raw';
@@ -599,6 +599,9 @@ class BiqOnboardApp extends HTMLElement {
   // Working-context entry state (BIQ-PERSONAL-CLUB-CONTEXT)
   private _context: ContextDescriptor | null = null;
   private _guidedEntries: WorkspacesEntry[] | null = null;
+  private _guidedInvitations: PendingInvitation[] = [];
+  private _guidedOtherOptions = false;
+  private _guidedInvitationsFailed = false;
   private _guidedRole: 'coach' | 'director' | null = null;
   private _guidedStep = 1;
   private _guidedSelection = '';
@@ -1011,6 +1014,25 @@ class BiqOnboardApp extends HTMLElement {
         if (!current()) return;
         if (payload.schema_version === '1.0' && Array.isArray(payload.entries)) this._guidedEntries = payload.entries;
         if(this._guidedEntries!==null){const profile=await fetch('/api/auth/profile',{credentials:'include',cache:'no-store'});if(!current())return;if(profile.ok){const person=await profile.json();this._guidedNeedsName=!person.display_name;}}
+      }
+      if (this._guidedEntries !== null) {
+        try {
+          const invitations = await fetch('/api/context/v1/invitations', {credentials: 'include', cache: 'no-store'});
+          if (!current()) return;
+          if (invitations.ok) {
+            const payload = await invitations.json();
+            if (!current()) return;
+            const memberClubs = new Set(this._guidedEntries.map(entry => entry.owner_scope.club_id));
+            if (Array.isArray(payload.invitations)) {
+              this._guidedInvitations = payload.invitations.filter((item: PendingInvitation) => !memberClubs.has(item.club_id));
+            }
+          } else if (invitations.status !== 404) {
+            this._guidedInvitationsFailed = true;
+          }
+        } catch {
+          if (!current()) return;
+          this._guidedInvitationsFailed = true;
+        }
       }
       // Mi equipo lists the account's private teams — prefetch only when
       // this session actually holds personal authority. A member-scope
@@ -1717,6 +1739,9 @@ class BiqOnboardApp extends HTMLElement {
     }
     this._bootstrap = null;
     this._guidedEntries = null;
+    this._guidedInvitations = [];
+    this._guidedOtherOptions = false;
+    this._guidedInvitationsFailed = false;
     this._guidedSelection = "";
     this._bootstrapFailed = false;
     this._bootstrapLoading = false;
@@ -4832,7 +4857,10 @@ class BiqOnboardApp extends HTMLElement {
       const nameField=this._guidedNeedsName?'<div class="entry-field"><label>¿Cómo quieres que te llamemos?</label><input name="nickname" autocomplete="nickname" maxlength="80" required></div>':'';
       const coachForm = `<form class="entry-form" data-entry-personal-create>${nameField}<div class="entry-field"><label>Nombre del equipo</label><input name="name" maxlength="120" required></div><div class="entry-field"><label>Categoría</label><select name="category_key">${PERSONAL_CATEGORIES.map(c=>`<option value="${c.key}">${c.label}</option>`).join('')}</select></div><div class="entry-field"><label>Género</label><select name="gender"><option value="X">Mixto</option><option value="F">Femenino</option><option value="M">Masculino</option></select></div><button class="onboard-btn onboard-btn-primary" ${busy?'disabled':''}>Crear equipo y entrar</button></form>`;
       const directorForm = `<form class="entry-form" data-entry-club-create>${nameField}<div class="entry-field"><label>Nombre del club</label><input name="name" maxlength="200" required></div><button class="onboard-btn onboard-btn-primary" ${busy?'disabled':''}>Crear club y entrar</button></form>`;
-      return `${this._entryError?`<p class="entry-error" role="alert">${escapeHtml(this._entryError)}</p>`:''}${guidedEntry({entries:this._guidedEntries, role:this._guidedRole, step:this._guidedStep,selection:this._guidedSelection,busy,createClub:createAllowed,coachImage:coachEntryImage,directorImage:directorEntryImage}, {coach:coachForm,director:directorForm}, this._inviteToken&&!this._invitePreview?'<p class="entry-status" role="status">Comprobando invitación…</p>':inviteBlock)}<button class="entry-role entry-logout" data-entry-logout ${busy?'disabled':''}>Salir</button>`;
+      const invitationError = this._guidedInvitationsFailed
+        ? '<p class="entry-error" role="alert">No se pudieron comprobar tus invitaciones. <button class="onboard-btn" type="button" data-guided-retry-invitations>Reintentar</button></p>'
+        : '';
+      return `${invitationError}${this._entryError?`<p class="entry-error" role="alert">${escapeHtml(this._entryError)}</p>`:''}${guidedEntry({entries:this._guidedEntries, role:this._guidedRole, step:this._guidedStep,selection:this._guidedSelection,busy,createClub:createAllowed,coachImage:coachEntryImage,directorImage:directorEntryImage,invitations:this._guidedInvitations,otherOptions:this._guidedOtherOptions}, {coach:coachForm,director:directorForm}, this._inviteToken&&!this._invitePreview?'<p class="entry-status" role="status">Comprobando invitación…</p>':inviteBlock)}`;
     }
     return `
       <div class="entry-step"${this._helpOpen || this._clubPickerOpen ? ' inert' : ''}>
@@ -4985,6 +5013,45 @@ class BiqOnboardApp extends HTMLElement {
     this.render();
   }
 
+  private _enterGuidedWorkspace(entry: WorkspacesEntry, choice: string): void {
+    const teamId = choice === 'director' || choice === 'waiting' ? '' : choice;
+    const intent = this._beginEntryIntent(entry.kind === 'personal' ? 'personal-team' : 'club', {
+      club_id: entry.owner_scope.club_id, team_id: teamId,
+    });
+    if (!intent) return;
+    this._runEntryIntent(intent, async () => {
+      await this._postActivate(entry.kind, entry.owner_scope.club_id);
+      intent.mutated = true;
+      if (!this._intentCurrent(intent)) return;
+      await this._focusWorkMode(choice === 'director' ? 'director' : 'coach', teamId);
+    });
+  }
+
+  private _redeemEntryInvitation(reference: {token: string} | {invitation_id: string}): void {
+    const intent = this._beginEntryIntent('redeem');
+    if (!intent) return;
+    this._runEntryIntent(intent, async () => {
+      const res = await this._entryMutation('/api/context/v1/invitations/redeem', reference);
+      if (!res.ok) {
+        throw new Error('No se pudo aceptar la invitación. Comprueba que siga vigente y que hayas entrado con el correo invitado.');
+      }
+      const data = await res.json();
+      intent.mutated = true;
+      intent.club_id = data.club_id;
+      if (!this._intentCurrent(intent)) return;
+      if ('token' in reference) {
+        this._invitePreview = null;
+        this._inviteToken = '';
+      } else {
+        this._guidedInvitations = this._guidedInvitations.filter(item => item.id !== reference.invitation_id);
+      }
+      await this._postActivate('club', intent.club_id);
+      if (this._guidedEntries !== null && this._intentCurrent(intent)) {
+        await this._focusWorkMode((data.roles || []).includes('sports_director') ? 'director' : 'coach');
+      }
+    });
+  }
+
   private wireEntryEvents(): void {
     const inviteAllowed =
       this._bootstrap?.entry_actions?.['club.invitation.redeem']?.allowed !== false;
@@ -5007,14 +5074,32 @@ class BiqOnboardApp extends HTMLElement {
       const choice=this._guidedSelection.slice(boundary+1);
       const entry=this._guidedEntries?.[Number(index)];
       if(!entry || !choice)return;
-      const intent=this._beginEntryIntent(entry.kind==='personal'?'personal-team':'club', {club_id:entry.owner_scope.club_id,team_id:['director','waiting'].includes(choice)?'':choice});
-      if(!intent)return;
-      this._runEntryIntent(intent,async()=>{
-        await this._postActivate(entry.kind,entry.owner_scope.club_id);
-        intent.mutated=true;
-        if(!this._intentCurrent(intent))return;
-        await this._focusWorkMode(choice==='director'?'director':'coach',['director','waiting'].includes(choice)?'':choice);
+      this._enterGuidedWorkspace(entry, choice);
+    });
+    this.shadow.querySelectorAll<HTMLButtonElement>('[data-guided-club-access]').forEach(button => {
+      button.addEventListener('click', () => {
+        const entry = this._guidedEntries?.[Number(button.dataset.guidedClubAccess)];
+        if (entry?.kind === 'club') this._enterGuidedWorkspace(entry, 'waiting');
       });
+    });
+    this.shadow.querySelectorAll<HTMLButtonElement>('[data-guided-invitation]').forEach(button => {
+      button.addEventListener('click', () => {
+        const id = button.dataset.guidedInvitation;
+        if (id) this._redeemEntryInvitation({invitation_id: id});
+      });
+    });
+    this.shadow.querySelector('[data-guided-other-options]')?.addEventListener('click', () => {
+      this._guidedOtherOptions = true;
+      this.render();
+      this.shadow.querySelector<HTMLElement>('[data-guided-show-club]')?.focus();
+    });
+    this.shadow.querySelector('[data-guided-show-club]')?.addEventListener('click', () => {
+      this._guidedOtherOptions = false;
+      this.render();
+      this.shadow.querySelector<HTMLElement>('[data-guided-other-options]')?.focus();
+    });
+    this.shadow.querySelector('[data-guided-retry-invitations]')?.addEventListener('click', () => {
+      this._resyncBootstrap();
     });
     this.shadow.querySelectorAll('[data-entry-logout]').forEach((btn) => {
       btn.addEventListener('click', () => {
@@ -5140,26 +5225,7 @@ class BiqOnboardApp extends HTMLElement {
     // Redeem→activate runs inside ONE intent — the redeem POST applying
     // without activation never releases the busy hold nor emits early.
     this.shadow.querySelector('[data-entry-invite-redeem]')?.addEventListener('click', () => {
-      if (!this._inviteToken) return;
-      const token = this._inviteToken;
-      const intent = this._beginEntryIntent('redeem');
-      if (!intent) return;
-      this._runEntryIntent(intent, async () => {
-        const res = await this._entryMutation('/api/context/v1/invitations/redeem', { token });
-        if (!res.ok) {
-          const body = await res.json().catch(() => null);
-          throw new Error(body?.detail || `No se pudo canjear la invitación (${res.status})`);
-        }
-        const data = await res.json().catch(() => null);
-        intent.mutated = true;
-        intent.club_id = data?.club_id || '';
-        if (!this._intentCurrent(intent)) return;
-        this._invitePreview = null;
-        this._inviteToken = '';
-        await this._postActivate('club', intent.club_id);
-        intent.mutated = true;
-        if(this._guidedEntries !== null && this._intentCurrent(intent))await this._focusWorkMode((data?.roles||[]).includes('sports_director')?'director':'coach');
-      });
+      if (this._inviteToken) this._redeemEntryInvitation({token: this._inviteToken});
     });
 
     this.shadow.querySelector('[data-entry-club-create]')?.addEventListener('submit', (ev) => {

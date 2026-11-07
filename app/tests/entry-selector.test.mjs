@@ -114,7 +114,7 @@ async function stopServer() {
  * `routeQuery` optionally sets el.route (e.g. 'entry?invite=tok-1').
  * Returns { page, log } — `log` captures every /api/** request.
  */
-async function newEntryPage(browser, { bootstrap = BOOTSTRAP, routeQuery = null, personalTeams = PERSONAL_TEAMS, personalContext = false, org = undefined, personalTeamsFailure = null, personalTeamsDelayMs = 0, personalTeamsHold = null, waitFeed = true, workspaces = null } = {}) {
+async function newEntryPage(browser, { bootstrap = BOOTSTRAP, routeQuery = null, personalTeams = PERSONAL_TEAMS, personalContext = false, org = undefined, personalTeamsFailure = null, personalTeamsDelayMs = 0, personalTeamsHold = null, waitFeed = true, workspaces = null, invitations = [] } = {}) {
   const page = await browser.newPage();
   const log = [];
   let feedCalls = 0;
@@ -127,6 +127,7 @@ async function newEntryPage(browser, { bootstrap = BOOTSTRAP, routeQuery = null,
     try {
       const u = req.url();
       if(u.includes('/api/context/v1/workspaces'))return workspaces===null?json({},404):json({schema_version:'1.0',entries:workspaces});
+      if(u.endsWith('/api/context/v1/invitations'))return json({invitations});
       if(u.includes('/api/auth/profile'))return json({display_name:'Ana'});
       if(u.endsWith('/api/context/v1/active'))return json({context:{context_id:'ctx',context_epoch:1}});
       if(u.includes('/api/context/v1/work-mode'))return json({ok:true});
@@ -1835,4 +1836,52 @@ test('guided confirmation stays above the shell footer in a long mobile team lis
   const footer=await root.locator('.guided-footer').boundingBox();assert.ok(footer.y>=0&&footer.y+footer.height<=837);assert.equal(await root.locator('[data-guided-confirm]').isEnabled(),true);
   const last=root.locator('[data-guided-choice="0:t59"]');await last.scrollIntoViewIfNeeded();const row=await last.boundingBox();const endFooter=await root.locator('.guided-footer').boundingBox();assert.ok(row.y+row.height<=endFooter.y,'last check scrolls clear of confirmation');
  }finally{await browser.close();}
+});
+
+
+test('guided invitation is available at sign-in and enters the club as coach without a team', async () => {
+  const browser = await chromium.launch();
+  try {
+    const invitations = [{id:'in_0123456789abcdef', club_id:'club-inv', club_name:'Club Invitado'}];
+    const {page, log} = await newEntryPage(browser, {workspaces:[], personalTeams:[], invitations});
+    const root = page.locator('biq-onboard-app');
+    const invite = root.getByRole('button', {name:'Unirme a Club Invitado como entrenador'});
+    await invite.waitFor();
+    await root.getByRole('button', {name:'Otras opciones'}).click();
+    await root.getByRole('heading', {name:'¿Cuál es tu rol?'}).waitFor();
+    const logout = await root.getByRole('button', {name:'Salir', exact:true}).boundingBox();
+    const role = await root.getByRole('heading', {name:'¿Cuál es tu rol?'}).boundingBox();
+    assert.ok(logout.y < role.y && logout.x > role.x);
+    assert.equal(await invite.count(), 0);
+    await root.getByRole('button', {name:'Volver al acceso al club'}).click();
+    await invite.click();
+    await page.waitForFunction(() => document.querySelector('biq-onboard-app')._entryIntent?.emitted);
+    const bodyFor = path => JSON.parse(log.find(item => item.url.endsWith(path)).postData);
+    assert.deepEqual(bodyFor('/invitations/redeem'), {invitation_id:invitations[0].id});
+    assert.equal(bodyFor('/activate').club_id, 'club-inv');
+    assert.equal(bodyFor('/work-mode').mode, 'coach');
+    assert.equal(bodyFor('/work-mode').team_id, '');
+  } finally { await browser.close(); }
+});
+
+test('guided existing staff member without a team can enter directly or see other options', async () => {
+  const browser = await chromium.launch();
+  try {
+    const workspaces = [
+      {kind:'personal', name:'Equipos personales', owner_scope:{kind:'personal'}, can_direct:false, teams:[{id:'p1',name:'Personal A'}]},
+      {kind:'club', name:'Club Invitado', owner_scope:{kind:'club',club_id:'club-inv'}, can_direct:false, teams:[]},
+    ];
+    const {page, log} = await newEntryPage(browser, {workspaces});
+    const root = page.locator('biq-onboard-app');
+    await root.getByRole('button', {name:'Otras opciones'}).click();
+    await root.getByRole('heading', {name:'¿Con qué quieres trabajar?'}).waitFor();
+    assert.equal(await root.getByRole('button', {name:'Salir', exact:true}).count(), 1);
+    await root.getByRole('button', {name:'Volver al acceso al club'}).click();
+    await root.getByRole('button', {name:'Entrar en Club Invitado como entrenador'}).click();
+    await page.waitForFunction(() => document.querySelector('biq-onboard-app')._entryIntent?.emitted);
+    assert.equal(log.some(item => item.url.endsWith('/invitations/redeem')), false);
+    const body = JSON.parse(log.find(item => item.url.endsWith('/work-mode')).postData);
+    assert.equal(body.mode, 'coach');
+    assert.equal(body.team_id, '');
+  } finally { await browser.close(); }
 });

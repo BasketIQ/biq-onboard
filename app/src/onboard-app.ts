@@ -15,6 +15,7 @@
  */
 
 import styles from './styles.css?inline';
+import { guidedEntryCopy } from './guided-entry-copy';
 import { guidedEntry, type PendingInvitation, type WorkspacesEntry } from './guided-entry';
 import coachEntryImage from './assets/hoopie-entrenador.webp';
 import directorEntryImage from './assets/chispa-directora-deportiva.webp';
@@ -578,6 +579,21 @@ const ENTRY_PLUS_SVG =
 // ─── Main component ─────────────────────────────────────────────────────
 
 class BiqOnboardApp extends HTMLElement {
+  i18n?: { locale?: string };
+  private get locale() { return this.i18n?.locale || document.documentElement.lang || 'es-ES'; }
+
+  private readonly onLocaleChanged = () => {
+    const guided = this.shadow?.querySelector('.guided-entry');
+    if (!guided) return;
+    const controls = guided.querySelectorAll<HTMLInputElement | HTMLSelectElement>('form input[name], form select[name]');
+    const draft = new Map(Array.from(controls, control => [control.name, control.value]));
+    this.render();
+    const next = this.shadow.querySelectorAll<HTMLInputElement | HTMLSelectElement>('.guided-entry form input[name], .guided-entry form select[name]');
+    for (const control of next) {
+      const value = draft.get(control.name);
+      if (value !== undefined) control.value = value;
+    }
+  };
   private shadow: ShadowRoot;
   private _org: OrgContext | null = null;
   private _user: string | null = null;
@@ -3834,6 +3850,7 @@ class BiqOnboardApp extends HTMLElement {
 
   // C11: Lifecycle — stop polling on disconnect, resume on reconnect
   disconnectedCallback(): void {
+    window.removeEventListener("biq-locale:changed", this.onLocaleChanged);
     this._stopPolling();
     this._stopSeedingPolling();
     // D20: invalidate in-flight submissions and abort stale responses.
@@ -3867,6 +3884,7 @@ class BiqOnboardApp extends HTMLElement {
   }
 
   connectedCallback(): void {
+    window.addEventListener("biq-locale:changed", this.onLocaleChanged);
     this._beforeUnloadHandler = (e: BeforeUnloadEvent) => {
       const pending = this._editDirty ||
         this._editSaveStatus === 'pending' || this._editSaveStatus === 'saving' ||
@@ -4745,10 +4763,11 @@ class BiqOnboardApp extends HTMLElement {
     // Emailed invites are an explicit join gesture, not part of the club
     // membership universe — they stay reachable regardless of the club
     // block content.
+    const entryCopy = guidedEntryCopy(this.locale);
     const inviteBlock = this._invitePreview ? `
       <div class="entry-invite">
-        <p>Invitación para <strong>${escapeHtml(this._invitePreview.club_name || this._invitePreview.club_id)}</strong></p>
-        <button class="onboard-btn onboard-btn-primary" type="button" data-entry-invite-redeem ${busy ? 'disabled' : ''}>Unirme al club</button>
+        <p>${entryCopy.invitationFor} <strong>${escapeHtml(this._invitePreview.club_name || this._invitePreview.club_id)}</strong></p>
+        <button class="onboard-btn onboard-btn-primary" type="button" data-entry-invite-redeem ${busy ? 'disabled' : ''}>${entryCopy.joinClub}</button>
       </div>` : '';
 
     const clubCard = (
@@ -4903,14 +4922,14 @@ class BiqOnboardApp extends HTMLElement {
       </div>` : '';
 
     if (this._guidedEntries !== null && this._entryRecovery?.kind !== 'narrowing' && !this._helpOpen && !this._clubPickerOpen) {
-      const nameField=this._guidedNeedsName?'<div class="entry-field"><label>¿Cómo quieres que te llamemos?</label><input name="nickname" autocomplete="nickname" maxlength="80" required></div>':'';
-      const coachForm = `<form class="entry-form" data-entry-personal-create>${nameField}<div class="entry-field"><label>Nombre del equipo</label><input name="name" maxlength="120" required></div><div class="entry-field"><label>Categoría</label><select name="category_key">${PERSONAL_CATEGORIES.map(c=>`<option value="${c.key}">${c.label}</option>`).join('')}</select></div><div class="entry-field"><label>Género</label><select name="gender"><option value="X">Mixto</option><option value="F">Femenino</option><option value="M">Masculino</option></select></div><button class="onboard-btn onboard-btn-primary" ${busy?'disabled':''}>Crear equipo y entrar</button></form>`;
-      const directorForm = `<form class="entry-form" data-entry-club-create>${nameField}<div class="entry-field"><label>Nombre del club</label><input name="name" maxlength="200" required></div><button class="onboard-btn onboard-btn-primary" ${busy?'disabled':''}>Crear club y entrar</button></form>`;
+      const nameField=this._guidedNeedsName?`<div class="entry-field"><label>${entryCopy.nickname}</label><input name="nickname" autocomplete="nickname" maxlength="80" required></div>`:'';
+      const coachForm = `<form class="entry-form" data-entry-personal-create>${nameField}<div class="entry-field"><label>${entryCopy.teamName}</label><input name="name" maxlength="120" required></div><div class="entry-field"><label>${entryCopy.category}</label><select name="category_key">${PERSONAL_CATEGORIES.map(c=>`<option value="${c.key}">${c.label}</option>`).join('')}</select></div><div class="entry-field"><label>${entryCopy.gender}</label><select name="gender"><option value="X">${entryCopy.mixed}</option><option value="F">${entryCopy.female}</option><option value="M">${entryCopy.male}</option></select></div><button class="onboard-btn onboard-btn-primary" ${busy?'disabled':''}>${entryCopy.createAndEnterTeam}</button></form>`;
+      const directorForm = `<form class="entry-form" data-entry-club-create>${nameField}<div class="entry-field"><label>${entryCopy.clubName}</label><input name="name" maxlength="200" required></div><button class="onboard-btn onboard-btn-primary" ${busy?'disabled':''}>${entryCopy.createAndEnterClub}</button></form>`;
       const invitationError = this._guidedInvitationsFailed
-        ? '<p class="entry-error" role="alert">No se pudieron comprobar tus invitaciones. <button class="onboard-btn" type="button" data-guided-retry-invitations>Reintentar</button></p>'
+        ? `<p class="entry-error" role="alert">${entryCopy.invitesFailed} <button class="onboard-btn" type="button" data-guided-retry-invitations>${entryCopy.retry}</button></p>`
         : '';
       const createTeam = actions['personal.team.create']?.allowed === true && !atTeamCap;
-      return `${recoveryMarkup}${invitationError}${this._entryError?`<p class="entry-error" role="alert">${escapeHtml(this._entryError)}</p>`:''}${guidedEntry({entries:this._guidedEntries, role:this._guidedRole, step:this._guidedStep,selection:this._guidedSelection,busy,createTeam,createClub:createAllowed,coachImage:coachEntryImage,directorImage:directorEntryImage,invitations:this._guidedInvitations,otherOptions:this._guidedOtherOptions}, {coach:coachForm,director:directorForm}, this._inviteToken&&!this._invitePreview?'<p class="entry-status" role="status">Comprobando invitación…</p>':inviteBlock)}`;
+      return `${recoveryMarkup}${invitationError}${this._entryError?`<p class="entry-error" role="alert">${escapeHtml(this._entryError)}</p>`:''}${guidedEntry({entries:this._guidedEntries, role:this._guidedRole, step:this._guidedStep,selection:this._guidedSelection,busy,createTeam,createClub:createAllowed,coachImage:coachEntryImage,directorImage:directorEntryImage,invitations:this._guidedInvitations,otherOptions:this._guidedOtherOptions}, {coach:coachForm,director:directorForm}, this._inviteToken&&!this._invitePreview?`<p class="entry-status" role="status">${entryCopy.checkingInvite}</p>`:inviteBlock, this.locale)}`;
     }
     return `
       <div class="entry-step"${this._helpOpen || this._clubPickerOpen ? ' inert' : ''}>

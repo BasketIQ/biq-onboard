@@ -1789,6 +1789,13 @@ test('guided new coach uses exclusive checks, continuation and session focus',as
   await root.locator('[data-guided-role="coach"]').check();
   await root.locator('[data-guided-next]').click();
   await root.locator('[data-entry-personal-create] input[name="name"]').fill('Equipo de Ana');
+  await page.evaluate(() => {
+    document.documentElement.lang = 'en';
+    window.dispatchEvent(new CustomEvent('biq-locale:changed', { detail: { locale: 'en' } }));
+  });
+  await root.getByRole('heading', { name: 'Set up your first team' }).waitFor();
+  assert.equal(await root.locator('[data-entry-personal-create] input[name="name"]').inputValue(), 'Equipo de Ana');
+  assert.equal(await root.getByRole('button', { name: 'Create and enter team' }).count(), 1);
   await root.locator('[data-entry-personal-create] button').click();
   await page.waitForFunction(()=>document.querySelector('biq-onboard-app')._entryIntent?.emitted);
   assert.equal(log.filter(x=>x.url.includes('/personal-teams')&&x.method==='POST').length,1);

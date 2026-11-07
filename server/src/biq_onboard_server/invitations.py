@@ -47,6 +47,7 @@ class Invitation:
     redeemed_at: str = ""
     redeemed_account_id: str = ""
     membership_subject_id: str = ""
+    discoverable: bool = False
 
     def is_live(self, now_iso: str) -> bool:
         return self.status == "pending" and (not self.expires_at or self.expires_at > now_iso)
@@ -90,6 +91,7 @@ def _from_dict(inv_id: str, data: dict[str, Any]) -> Invitation:
         redeemed_at=str(data.get("redeemed_at", "")),
         redeemed_account_id=str(data.get("redeemed_account_id", "")),
         membership_subject_id=str(data.get("membership_subject_id", "")),
+        discoverable=bool(data.get("discoverable", False)),
     )
 
 
@@ -115,6 +117,14 @@ class MemoryInvitationStore:
                 if doc.get("token_digest") == digest:
                     return _from_dict(inv_id, doc)
             return None
+
+    def list_for_recipient(self, email: str) -> list[Invitation]:
+        with self._lock:
+            return [
+                _from_dict(inv_id, doc)
+                for inv_id, doc in self._docs.items()
+                if doc.get("recipient_email") == email
+            ]
 
     def transact(
         self, invitation_id: str, fn: Callable[[Invitation | None], Invitation | None]
@@ -158,6 +168,14 @@ class FirestoreInvitationStore:
         for snap in snaps:
             return _from_dict(snap.id, snap.to_dict())
         return None
+
+    def list_for_recipient(self, email: str) -> list[Invitation]:
+        from google.cloud.firestore_v1.base_query import FieldFilter
+
+        query = self._client.collection(COLLECTION).where(
+            filter=FieldFilter("recipient_email", "==", email)
+        )
+        return [_from_dict(snap.id, snap.to_dict()) for snap in query.stream()]
 
     def transact(
         self, invitation_id: str, fn: Callable[[Invitation | None], Invitation | None]

@@ -173,8 +173,34 @@ async def invitation_preview(request: Request) -> dict:
     return _public_invitation(inv)
 
 
+def _verified_recipient(claims: dict) -> str:
+    if claims.get("scope") == "verified":
+        return str(claims.get("vemail") or "").strip().lower()
+    return ""
+
+
+@router.get("/api/ops/invitations")
+def pending_invitations(request: Request) -> dict:
+    _require_s2s(request)
+    recipient = _verified_recipient(_proof_claims(request))
+    if not recipient:
+        return {"invitations": []}
+    try:
+        pending = invitations.get_invitation_store().list_for_recipient(recipient)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="invitation store unavailable") from exc
+    by_club: dict[str, dict] = {}
+    now = _now_iso()
+    for inv in sorted(pending, key=lambda item: item.created_at, reverse=True):
+        if not inv.discoverable or not inv.is_live(now) or inv.club_id in by_club:
+            continue
+        by_club[inv.club_id] = {"id": inv.invitation_id, **_public_invitation(inv)}
+    return {"invitations": list(by_club.values())}
+
+
 class RedeemBody(BaseModel):
     token: str = Field(default="", max_length=512)
+    invitation_id: str = Field(default="", pattern=r"^(in_[0-9a-f]{16})?$")
 
 
 @router.post("/api/ops/invitations/redeem")
@@ -184,23 +210,17 @@ async def invitation_redeem(request: Request) -> dict:
     _require_s2s(request)
     claims = _proof_claims(request)
     body = _model(RedeemBody, await _json_object(request))
-    if not body.token.strip():
-        raise HTTPException(status_code=400, detail="token required")
+    token = body.token.strip()
+    if bool(token) == bool(body.invitation_id):
+        raise HTTPException(status_code=400, detail="one invitation reference required")
     account_id = claims["sub"]
-    # Verified mailbox carried by the proof — checked inside the fence
-    # against the authoritative invitation record.
-    proven = (
-        str(claims.get("vemail") or "").strip().lower()
-        if claims.get("scope") == "verified"
-        else ""
-    )
+    proven = _verified_recipient(claims)
     store = invitations.get_invitation_store()
-    found = store.get_by_digest(invitations.token_digest(body.token.strip()))
+    found = store.get(body.invitation_id) if body.invitation_id else store.get_by_digest(
+        invitations.token_digest(token)
+    )
     if found is None:
         raise HTTPException(status_code=404, detail="invitation not found")
-    # Deterministic membership id: concurrent claims upsert the same row,
-    # the transaction fence picks exactly one winner — no duplicate members.
-    membership_id = f"f1f2m_{hashlib.sha256(found.invitation_id.encode()).hexdigest()[:12]}"
 
     from biq_core.org import User
     from biq_core.roles import RoleAssignment
@@ -209,6 +229,11 @@ async def invitation_redeem(request: Request) -> dict:
         inv = state.invitation
         if inv is None:
             return invitations.RedeemPlan(error=(404, "invitation not found"))
+        recipient = inv.recipient_email.strip().lower()
+        if body.invitation_id and (not inv.discoverable or not recipient or proven != recipient):
+            return invitations.RedeemPlan(error=(404, "invitation not found"))
+        membership_key = f"{inv.club_id}:{recipient}" if inv.discoverable else inv.invitation_id
+        membership_id = f"f1f2m_{hashlib.sha256(membership_key.encode()).hexdigest()[:12]}"
         now = _now_iso()
         if inv.is_live(now):
             # Verified recipient binding (R5/B1, OB60-1): every invitation
@@ -217,7 +242,6 @@ async def invitation_redeem(request: Request) -> dict:
             # claimant's cryptographically-proven mailbox. Evaluated inside
             # the fence so out-of-band edits can't slip between a preflight
             # read and the claim.
-            recipient = (inv.recipient_email or "").strip().lower()
             if not recipient or proven != recipient:
                 return invitations.RedeemPlan(error=(403, "invitation unavailable"))
             # Stored roles must be a strict subset of the assignable set —
@@ -229,6 +253,17 @@ async def invitation_redeem(request: Request) -> dict:
             if not _issuer_still_grants(state, inv, roles):
                 return invitations.RedeemPlan(error=(409, "invitation unavailable"))
             roles = list(dict.fromkeys(canonical_club_role(r) for r in roles))
+            existing = state.get_user(membership_id) if inv.discoverable else None
+            if existing is not None:
+                if (
+                    existing.get("status") != "active"
+                    or existing.get("club_id") != inv.club_id
+                    or existing.get("email") != recipient
+                ):
+                    return invitations.RedeemPlan(error=(409, "invitation unavailable"))
+                # A repeat invitation does not change an existing member or
+                # restore roles removed by the club.
+                roles = []
             inv.status = "redeemed"
             inv.redeemed_at = now
             inv.redeemed_account_id = account_id
@@ -244,7 +279,7 @@ async def invitation_redeem(request: Request) -> dict:
                 display_name="",
                 role=roles[0],
                 status="active",
-            )
+            ) if existing is None else None
             assignments = [
                 RoleAssignment(
                     user_id=membership_id,
@@ -468,6 +503,10 @@ async def issue_invitation(club_id: str, request: Request) -> dict:
     unauthorized caller's malformed payload fails on auth, not schema."""
     issuer = require_roles_admin_acting(request, club_id)
     body = _model(IssueBody, await _json_object(request))
+    return _issue_invitation(club_id, issuer, body)
+
+
+def _issue_invitation(club_id: str, issuer: str, body: IssueBody, *, discoverable: bool = False) -> dict:
     # Recipient-bound policy (OB60-1): an invitation without a verified
     # target mailbox is an open-bearer grant — refuse it at issue rather
     # than letting token possession mint membership.
@@ -495,6 +534,7 @@ async def issue_invitation(club_id: str, request: Request) -> dict:
         issuer_membership_id=issuer,
         expires_at=_bounded_expiry(body.expires_at),
         created_at=_now_iso(),
+        discoverable=discoverable,
     )
     token = invitations.new_token()
     inv.token_digest = invitations.token_digest(token)

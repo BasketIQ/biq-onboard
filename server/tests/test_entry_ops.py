@@ -875,3 +875,38 @@ class TestOB60AuthBeforeBody:
         inv = invitations.get_invitation_store().get(issued["invitation_id"])
         assert inv.status == "pending"
         assert inv.redeemed_account_id == ""
+
+
+def test_member_invitation_is_discoverable_and_redeemable_only_by_verified_recipient(
+    client: TestClient, monkeypatch
+) -> None:
+    monkeypatch.setattr("biq_onboard_server.clients.send_invite", lambda *_: {"ok": True})
+    issuer_headers = {**_S2S, "X-BIQ-Acting-User-Id": "admin1"}
+    for _ in range(2):
+        issued = client.post(
+            "/api/admin/clubs/c1/invite", json={"email": _RECIPIENT}, headers=issuer_headers
+        )
+        assert issued.status_code == 200, issued.text
+
+    path = "/api/ops/invitations"
+    recipient_headers = _verified_headers()
+    outsider = _verified_headers("acc_other", "outsider@example.com")
+    assert client.get(path, headers=outsider).json() == {"invitations": []}
+    assert client.get(path, headers=_ops_headers()).json() == {"invitations": []}
+
+    members = []
+    for _ in range(2):
+        [invitation] = client.get(path, headers=recipient_headers).json()["invitations"]
+        assert invitation["club_name"] == "Club Uno"
+        assert "token" not in invitation
+        reference = {"invitation_id": invitation["id"]}
+        for forbidden in (outsider, _ops_headers()):
+            assert client.post(f"{path}/redeem", json=reference, headers=forbidden).status_code == 404
+        accepted = client.post(f"{path}/redeem", json=reference, headers=recipient_headers)
+        assert accepted.status_code == 200, accepted.text
+        members.append(accepted.json()["membership_subject_id"])
+
+    assert members[0] == members[1]
+    member = org.get_registry().get_user(members[0])
+    assert member is not None and member.role == "coach" and member.status == "active"
+    assert client.get(path, headers=recipient_headers).json() == {"invitations": []}

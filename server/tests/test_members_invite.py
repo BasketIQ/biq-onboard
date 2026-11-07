@@ -15,13 +15,15 @@ os.environ["BIQ_ROLES_STORE"] = "memory"
 import pytest
 from fastapi.testclient import TestClient
 
-from biq_onboard_server import org
+from biq_onboard_server import invitations, org
 from biq_onboard_server.app import create_app
 from biq_onboard_server.clients import UpstreamServiceError
 
 
 @pytest.fixture
-def app_and_client():
+def app_and_client(monkeypatch):
+    monkeypatch.setenv("BIQ_INVITATION_STORE", "memory")
+    invitations.reset_invitation_store()
     org.reset_for_tests()
     app = create_app()
     client = TestClient(app)

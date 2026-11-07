@@ -155,7 +155,7 @@ class FirestoreInvitationStore:
         self._ref(inv.invitation_id).set(_to_dict(inv))
 
     def get(self, invitation_id: str) -> Invitation | None:
-        doc = self._snap_dict(self._ref(inv.invitation_id).get())
+        doc = self._snap_dict(self._ref(invitation_id).get())
         return _from_dict(invitation_id, doc) if doc else None
 
     def get_by_digest(self, digest: str) -> Invitation | None:

@@ -5240,7 +5240,7 @@ class BiqOnboardApp extends HTMLElement {
         );
         if (!res.ok) {
           const body = await res.json().catch(() => null);
-          throw new Error(body?.detail || `No se pudo crear el equipo (${res.status})`);
+          throw new Error(body?.detail || guidedEntryCopy(this.locale).createTeamFailed(res.status));
         }
         const data = await res.json().catch(() => null);
         intent.mutated = true;
@@ -5364,39 +5364,39 @@ class BiqOnboardApp extends HTMLElement {
           <div class="entry-field"><label>${entryCopy.category}</label>
             <select name="category_key">${PERSONAL_CATEGORIES.map((c) => `<option value="${c.key}"${c.key === t.category_key ? ' selected' : ''}>${c.label}</option>`).join('')}</select></div>
           <div class="entry-field"><label>${entryCopy.gender}</label>
-            <select name="gender">${['X', 'F', 'M'].map((g) => `<option value="${g}"${g === t.gender ? ' selected' : ''}>${g === 'X' ? 'Mixto' : g === 'F' ? 'Femenino' : 'Masculino'}</option>`).join('')}</select></div>
-          <button class="onboard-btn onboard-btn-primary" type="submit" ${this._entryBusy ? 'disabled' : ''}>Guardar</button>
-          <button class="onboard-btn" type="button" data-personal-team-edit-cancel ${this._entryBusy ? 'disabled' : ''}>Cancelar</button>
+            <select name="gender">${['X', 'F', 'M'].map((g) => `<option value="${g}"${g === t.gender ? ' selected' : ''}>${g === 'X' ? entryCopy.mixed : g === 'F' ? entryCopy.female : entryCopy.male}</option>`).join('')}</select></div>
+          <button class="onboard-btn onboard-btn-primary" type="submit" ${this._entryBusy ? 'disabled' : ''}>${guidedEntryCopy(this.locale).save}</button>
+          <button class="onboard-btn" type="button" data-personal-team-edit-cancel ${this._entryBusy ? 'disabled' : ''}>${guidedEntryCopy(this.locale).cancel}</button>
         </form>
       </li>` : `
       <li class="entry-team"><strong>${escapeHtml(t.name)}</strong>
         <span>${escapeHtml(t.category_label || t.category_key)}${t.gender && t.gender !== 'X' ? ` · ${escapeHtml(t.gender)}` : ''}${t.age_band ? ` · ${escapeHtml(t.age_band)}` : ''}</span>
-        <button class="onboard-btn" data-personal-team-roster-open="${escapeHtml(t.team_id)}" ${this._entryBusy ? 'disabled' : ''}>Plantilla</button>
-        <button class="onboard-btn" data-personal-team-edit-open="${escapeHtml(t.team_id)}" ${this._entryBusy ? 'disabled' : ''}>Editar</button>
-        <button class="onboard-btn entry-team-delete" data-personal-team-delete="${escapeHtml(t.team_id)}" ${this._entryBusy ? 'disabled' : ''}>Eliminar</button>
+        <button class="onboard-btn" data-personal-team-roster-open="${escapeHtml(t.team_id)}" ${this._entryBusy ? 'disabled' : ''}>${entryCopy.roster}</button>
+        <button class="onboard-btn" data-personal-team-edit-open="${escapeHtml(t.team_id)}" ${this._entryBusy ? 'disabled' : ''}>${entryCopy.edit}</button>
+        <button class="onboard-btn entry-team-delete" data-personal-team-delete="${escapeHtml(t.team_id)}" ${this._entryBusy ? 'disabled' : ''}>${guidedEntryCopy(this.locale).delete}</button>
       </li>`;
     return `
       <div class="entry-step">
-        <h2 class="entry-title">Mi espacio personal</h2>
-        <button class="onboard-btn" data-personal-switch-space>Cambiar de espacio</button>
+        <h2 class="entry-title">${entryCopy.myPersonalSpace}</h2>
+        <button class="onboard-btn" data-personal-switch-space>${entryCopy.switchSpace}</button>
         ${this._entryError ? `<p class="entry-error" role="alert">${escapeHtml(this._entryError)}</p>` : ''}
         ${this._personalTeamsStatus === 'loading' || this._personalTeamsStatus === 'uninitialized'
-          ? `<p class="entry-loading">Cargando equipos…</p>`
+          ? `<p class="entry-loading">${entryCopy.loadingTeams}</p>`
           : this._personalTeamsStatus === 'error'
             ? `<p class="entry-error" role="alert">${escapeHtml(this._personalTeamsError || entryCopy.loadTeamsFailed)}
                 <button class="onboard-btn" type="button" data-personal-teams-retry ${this._entryBusy ? 'disabled' : ''}>${guidedEntryCopy(this.locale).retry}</button></p>`
             : teams.length
               ? `<ul class="entry-teams">${teams.map(teamRow).join('')}</ul>`
-              : '<p class="entry-p">Todavía no tienes equipos personales.</p>'}
+              : `<p class="entry-p">${entryCopy.noPersonalTeams}</p>`}
         ${archived.length ? `
-          <h3 class="entry-h">Archivados</h3>
+          <h3 class="entry-h">${entryCopy.archived}</h3>
           <ul class="entry-teams">${archived.map((t) => `
             <li class="entry-team"><strong>${escapeHtml(t.name)}</strong>
               <span>${escapeHtml(t.category_label || t.category_key)}</span>
-              <button class="onboard-btn" data-personal-team-restore="${escapeHtml(t.team_id)}" ${this._entryBusy || atCap ? 'disabled' : ''}>Restaurar</button>
+              <button class="onboard-btn" data-personal-team-restore="${escapeHtml(t.team_id)}" ${this._entryBusy || atCap ? 'disabled' : ''}>${entryCopy.restore}</button>
             </li>`).join('')}</ul>` : ''}
         ${atCap
-          ? '<p class="entry-note">Puedes tener hasta 2 equipos personales. Elimina uno para crear otro.</p>'
+          ? `<p class="entry-note">${entryCopy.personalTeamCap}</p>`
           : `<form class="entry-form" data-entry-personal-create>
           <div class="entry-field"><label>${entryCopy.teamName}</label>
             <input type="text" name="name" maxlength="120" required /></div>
@@ -5404,7 +5404,7 @@ class BiqOnboardApp extends HTMLElement {
             <select name="category_key">${PERSONAL_CATEGORIES.map((c) => `<option value="${c.key}">${c.label}</option>`).join('')}</select></div>
           <div class="entry-field"><label>${entryCopy.gender}</label>
             <select name="gender"><option value="X">${entryCopy.mixed}</option><option value="F">${entryCopy.female}</option><option value="M">${entryCopy.male}</option></select></div>
-          <button class="onboard-btn onboard-btn-primary" type="submit" ${this._entryBusy ? 'disabled' : ''}>Crear equipo</button>
+          <button class="onboard-btn onboard-btn-primary" type="submit" ${this._entryBusy ? 'disabled' : ''}>${entryCopy.createTeam}</button>
         </form>`}
       </div>`;
   }
@@ -5442,7 +5442,7 @@ class BiqOnboardApp extends HTMLElement {
         });
         if (!res.ok) {
           const body = await res.json().catch(() => null);
-          throw new Error(body?.detail || `No se pudo crear el equipo (${res.status})`);
+          throw new Error(body?.detail || guidedEntryCopy(this.locale).createTeamFailed(res.status));
         }
         this._personalTeams = null;
         this.loadPersonalTeams();
@@ -5458,7 +5458,7 @@ class BiqOnboardApp extends HTMLElement {
     this.shadow.querySelectorAll('[data-personal-team-delete]').forEach((btn) => {
       btn.addEventListener('click', async () => {
         const teamId = (btn as HTMLElement).dataset.personalTeamDelete || '';
-        if (!teamId || !window.confirm('¿Eliminar este equipo? Podrás crear otro después.')) return;
+        if (!teamId || !window.confirm(guidedEntryCopy(this.locale).confirmDeletePersonalTeam)) return;
         this._entryBusy = true;
         this._entryError = null;
         this.render();
@@ -5469,7 +5469,7 @@ class BiqOnboardApp extends HTMLElement {
           });
           if (!res.ok) {
             const body = await res.json().catch(() => null);
-            throw new Error(body?.detail || `No se pudo eliminar el equipo (${res.status})`);
+            throw new Error(body?.detail || guidedEntryCopy(this.locale).deleteTeamFailed(res.status));
           }
           this._personalTeams = null;
           this.loadPersonalTeams();
@@ -5529,7 +5529,7 @@ class BiqOnboardApp extends HTMLElement {
         });
         if (!res.ok) {
           const body = await res.json().catch(() => null);
-          throw new Error(body?.detail || `No se pudo guardar el equipo (${res.status})`);
+          throw new Error(body?.detail || guidedEntryCopy(this.locale).saveTeamFailed(res.status));
         }
         this._editingPersonalTeamId = null;
         this._personalTeams = null;
@@ -5556,7 +5556,7 @@ class BiqOnboardApp extends HTMLElement {
           });
           if (!res.ok) {
             const body = await res.json().catch(() => null);
-            throw new Error(body?.detail || `No se pudo restaurar el equipo (${res.status})`);
+            throw new Error(body?.detail || guidedEntryCopy(this.locale).restoreTeamFailed(res.status));
           }
           this._personalTeams = null;
           this.loadPersonalTeams();
@@ -5888,8 +5888,8 @@ class BiqOnboardApp extends HTMLElement {
           <p>¿Seguro que quieres eliminar definitivamente el equipo <strong>${escapeHtml(teamName)}</strong>?</p>
           <p class="onboard-card-desc">Esta acción no se puede deshacer.</p>
           <div class="onboard-team-actions">
-            <button class="onboard-btn onboard-btn-danger" data-confirm-delete-team="${escapeHtml(this._deleteConfirmTeamId)}">Eliminar</button>
-            <button class="onboard-btn onboard-btn-secondary" data-cancel-delete>Cancelar</button>
+            <button class="onboard-btn onboard-btn-danger" data-confirm-delete-team="${escapeHtml(this._deleteConfirmTeamId)}">${guidedEntryCopy(this.locale).delete}</button>
+            <button class="onboard-btn onboard-btn-secondary" data-cancel-delete>${guidedEntryCopy(this.locale).cancel}</button>
           </div>
         </div>
       </div>`;
@@ -6043,7 +6043,7 @@ class BiqOnboardApp extends HTMLElement {
       ${list}
       <div class="onboard-team-actions">
         <button class="onboard-btn onboard-btn-sm" data-add-new-player type="button">Nueva jugadora</button>
-        <button class="onboard-btn onboard-btn-sm onboard-btn-quiet" data-cancel-link type="button">Cancelar</button>
+        <button class="onboard-btn onboard-btn-sm onboard-btn-quiet" data-cancel-link type="button">${guidedEntryCopy(this.locale).cancel}</button>
       </div>
     </div>`;
   }
@@ -6216,8 +6216,8 @@ class BiqOnboardApp extends HTMLElement {
           ${identityFields}
           ${primarySelect}
           <div class="onboard-member-edit-actions">
-            <button class="onboard-btn onboard-btn-sm onboard-btn-primary" data-member-save="${escapeHtml(m.id)}">Guardar</button>
-            <button class="onboard-btn onboard-btn-sm" data-member-cancel>Cancelar</button>
+            <button class="onboard-btn onboard-btn-sm onboard-btn-primary" data-member-save="${escapeHtml(m.id)}">${guidedEntryCopy(this.locale).save}</button>
+            <button class="onboard-btn onboard-btn-sm" data-member-cancel>${guidedEntryCopy(this.locale).cancel}</button>
           </div>
         </div>
       </div>

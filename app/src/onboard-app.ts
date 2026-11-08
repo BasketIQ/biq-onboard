@@ -4378,7 +4378,7 @@ class BiqOnboardApp extends HTMLElement {
             ${jobCopy.action && !isPolling ? `<p class="onboard-card-action">${escapeHtml(jobCopy.action)}</p>` : ''}
             ${isPolling && !this._isStale ? '<div class="onboard-loading">Procesando…</div>' : ''}
             ${isPolling && this._isStale ? '<div class="onboard-error">El proceso está tardando demasiado. Puedes reintentar.</div>' : ''}
-            ${canRetry ? `<button class="onboard-btn onboard-btn-primary" data-retry-btn ${this._loading ? 'disabled' : ''}>Reintentar</button>` : ''}
+            ${canRetry ? `<button class="onboard-btn onboard-btn-primary" data-retry-btn ${this._loading ? 'disabled' : ''}>${guidedEntryCopy(this.locale).retry}</button>` : ''}
           </div>
         ` : ''}
 
@@ -4663,7 +4663,7 @@ class BiqOnboardApp extends HTMLElement {
         window.location.replace('/');
         return;
       }
-      this._stepMessage = 'Solicitud enviada. Un administrador del club revisará tu acceso.';
+      this._stepMessage = guidedEntryCopy(this.locale).requestSent;
       this._stepError = null;
       this.render();
       return;
@@ -4689,15 +4689,16 @@ class BiqOnboardApp extends HTMLElement {
     const createAllowed = actions['club.create']?.allowed === true;
     const busy = this._entryBusy;
     const busyAccess = this._intentAccess();
+    const entryCopy = guidedEntryCopy(this.locale);
     const busyNote = (scope: 'personal' | 'club') =>
       busy && busyAccess === scope
-        ? '<p class="entry-status" role="status">Entrando…</p>'
+        ? `<p class="entry-status" role="status">${entryCopy.entering}</p>`
         : '';
 
     const activeLabel = active
       ? active.owner_scope.kind === 'personal'
-        ? 'Espacio personal'
-        : `Club ${(clubs.find((c) => c.owner_scope.club_id === active.owner_scope.club_id) as ContextCandidate | undefined)?.name || active.owner_scope.club_id}`
+        ? entryCopy.personalSpace
+        : `${entryCopy.clubPrefix} ${(clubs.find((c) => c.owner_scope.club_id === active.owner_scope.club_id) as ContextCandidate | undefined)?.name || active.owner_scope.club_id}`
       : '';
 
     const personalTeams = (this._personalTeams || []).filter((t) => !t.archived);
@@ -4705,7 +4706,6 @@ class BiqOnboardApp extends HTMLElement {
     // Director 2026-10-24 (bugfix-auth-club-roster, bug 2): «Mi club» is
     // ALWAYS shown — the PD-ENTRY coach-hiding gate is removed; with no
     // clubs the block offers «Crear club».
-    const entryCopy = guidedEntryCopy(this.locale);
     const personalTeamCount = this._guidedEntries?.find(entry => entry.kind === 'personal')?.teams.length ?? personalTeams.length;
     const atTeamCap = personalTeamCount >= 2;
     const teamMeta = (t: PersonalTeamRow) =>
@@ -4723,17 +4723,17 @@ class BiqOnboardApp extends HTMLElement {
         <p class="entry-block-copy">${entryCopy.coachModeCopy}</p>
         ${busyNote('personal')}
         ${!this._personalReadAllowed() ? `
-          <p class="entry-note">El espacio personal requiere una sesión verificada. Cierra sesión y entra con tu cuenta para usarlo.</p>` : `
+          <p class="entry-note">${entryCopy.personalSessionRequired}</p>` : `
           ${this._personalTeamsStatus === 'loading' || this._personalTeamsStatus === 'uninitialized'
-            ? '<p class="entry-loading">Cargando equipos…</p>'
+            ? `<p class="entry-loading">${entryCopy.loadingTeams}</p>`
             : this._personalTeamsStatus === 'error'
-              ? `<p class="entry-error" role="alert">${escapeHtml(this._personalTeamsError || 'No se pudieron cargar los equipos')}
-                  <button class="onboard-btn" type="button" data-personal-teams-retry ${busy ? 'disabled' : ''}>Reintentar</button></p>`
+              ? `<p class="entry-error" role="alert">${escapeHtml(this._personalTeamsError || entryCopy.loadTeamsFailed)}
+                  <button class="onboard-btn" type="button" data-personal-teams-retry ${busy ? 'disabled' : ''}>${guidedEntryCopy(this.locale).retry}</button></p>`
               : ''}
           ${personalTeams.length ? `
             <ul class="entry-cards">
               ${personalTeams.map((t) => `
-                <li><button class="entry-card" type="button" data-entry-personal-enter-team="${escapeHtml(t.team_id)}" ${busy ? 'disabled' : ''} aria-label="Entrar en ${escapeHtml(t.name)}">
+                <li><button class="entry-card" type="button" data-entry-personal-enter-team="${escapeHtml(t.team_id)}" ${busy ? 'disabled' : ''} aria-label="${escapeHtml(entryCopy.enterName(t.name))}">
                   <span class="entry-card-icon">${ENTRY_TEAM_ICON_SVG}</span>
                   <span class="entry-card-copy">
                     <span class="entry-card-title">${escapeHtml(t.name)}</span>
@@ -4744,20 +4744,20 @@ class BiqOnboardApp extends HTMLElement {
             </ul>` : ''}
           ${atTeamCap
             ? ''
-            : `<button class="entry-create" type="button" data-entry-team-create-toggle ${busy ? 'disabled' : ''}>${ENTRY_PLUS_SVG}<span>Crear equipo</span></button>
+            : `<button class="entry-create" type="button" data-entry-team-create-toggle ${busy ? 'disabled' : ''}>${ENTRY_PLUS_SVG}<span>${entryCopy.createTeam}</span></button>
               ${this._teamCreateOpen ? `
                 <form class="entry-form" data-entry-personal-create>
-                  <div class="entry-field"><label>Nombre del equipo</label>
+                  <div class="entry-field"><label>${entryCopy.teamName}</label>
                     <input type="text" name="name" maxlength="120" required /></div>
-                  <div class="entry-field"><label>Categoría</label>
+                  <div class="entry-field"><label>${entryCopy.category}</label>
                     <select name="category_key">${PERSONAL_CATEGORIES.map((c) => `<option value="${c.key}">${c.label}</option>`).join('')}</select></div>
-                  <div class="entry-field"><label>Género</label>
-                    <select name="gender"><option value="X">Mixto</option><option value="F">Femenino</option><option value="M">Masculino</option></select></div>
-                  <button class="onboard-btn onboard-btn-primary" type="submit" ${busy ? 'disabled' : ''}>Crear y entrar</button>
+                  <div class="entry-field"><label>${entryCopy.gender}</label>
+                    <select name="gender"><option value="X">${entryCopy.mixed}</option><option value="F">${entryCopy.female}</option><option value="M">${entryCopy.male}</option></select></div>
+                  <button class="onboard-btn onboard-btn-primary" type="submit" ${busy ? 'disabled' : ''}>${entryCopy.createAndEnter}</button>
                 </form>` : ''}`}
           ${!personalTeams.length && archivedTeams.length ? `
-            <p class="entry-note">Tus equipos están archivados — entra para restaurarlos desde «Mis equipos», o crea uno nuevo.</p>
-            <button class="onboard-btn" type="button" data-entry-personal-enter ${busy ? 'disabled' : ''}>Entrar</button>` : ''}
+            <p class="entry-note">${entryCopy.archivedTeamsNote}</p>
+            <button class="onboard-btn" type="button" data-entry-personal-enter ${busy ? 'disabled' : ''}>${entryCopy.enter}</button>` : ''}
         `}
       </section>`;
 
@@ -4778,17 +4778,17 @@ class BiqOnboardApp extends HTMLElement {
       const clubId = c.owner_scope.club_id || '';
       const clubName = c.name || clubId;
       const myRole = (this._org?.memberships || []).find((m) => m.club_id === clubId)?.role;
-      const roleLabel = myRole ? ROLE_LABELS[myRole] || myRole : '';
+      const roleLabel = myRole ? (entryCopy.roleLabels as Record<string,string>)[myRole] || myRole : '';
       const rowAttrs = opts.pickerRow
         ? ` data-entry-club-picker-row="${escapeHtml(normEntryText(clubName))}"`
         : '';
       return `
-        <li${rowAttrs}${opts.hidden ? ' hidden' : ''}><button class="entry-card" type="button" data-entry-club-activate="${escapeHtml(clubId)}" ${busy ? 'disabled' : ''} aria-label="Entrar en ${escapeHtml(clubName)}">
+        <li${rowAttrs}${opts.hidden ? ' hidden' : ''}><button class="entry-card" type="button" data-entry-club-activate="${escapeHtml(clubId)}" ${busy ? 'disabled' : ''} aria-label="${escapeHtml(entryCopy.enterClubName(clubName))}">
           <span class="entry-card-icon entry-card-icon-club">${ENTRY_CLUB_ICON_SVG}</span>
           <span class="entry-card-copy">
             <span class="entry-card-title">${escapeHtml(clubName)}</span>
             ${meta ? `<span class="entry-card-meta">${escapeHtml(meta)}</span>` : ''}
-            ${roleLabel ? `<span class="entry-card-meta">Entrar como ${escapeHtml(roleLabel)}</span>` : ''}
+            ${roleLabel ? `<span class="entry-card-meta">${escapeHtml(entryCopy.enterAs(roleLabel))}</span>` : ''}
           </span>
           <span class="entry-card-arrow">${ENTRY_ARROW_SVG}</span>
         </button></li>`;
@@ -4818,11 +4818,11 @@ class BiqOnboardApp extends HTMLElement {
       <div class="entry-picker-backdrop" data-entry-club-picker-backdrop>
         <div class="entry-picker-dialog" role="dialog" aria-modal="true" aria-labelledby="entry-picker-title">
           <div class="entry-picker-head">
-            <h2 class="entry-picker-title" id="entry-picker-title">Elegir club</h2>
-            <button class="entry-help-close" type="button" data-entry-club-picker-close aria-label="Cerrar">${ENTRY_CLOSE_SVG}</button>
+            <h2 class="entry-picker-title" id="entry-picker-title">${entryCopy.chooseClub}</h2>
+            <button class="entry-help-close" type="button" data-entry-club-picker-close aria-label="${entryCopy.close}">${ENTRY_CLOSE_SVG}</button>
           </div>
           <div class="entry-picker-search">
-            <input type="search" data-entry-club-picker-search value="${escapeHtml(this._clubPickerQuery)}" placeholder="Buscar club" aria-label="Buscar club" ${busy ? 'disabled' : ''} />
+            <input type="search" data-entry-club-picker-search value="${escapeHtml(this._clubPickerQuery)}" placeholder="${entryCopy.searchClub}" aria-label="${entryCopy.searchClub}" ${busy ? 'disabled' : ''} />
           </div>
           <ul class="entry-cards entry-picker-list" data-entry-club-picker-list>
             ${clubs.map((c) => clubCard(c, '', {
@@ -4840,21 +4840,21 @@ class BiqOnboardApp extends HTMLElement {
       ? clubs.length <= 2
         ? `<ul class="entry-cards">${clubs.map((c) => clubCard(c)).join('')}</ul>`
         : recentClub
-          ? `<ul class="entry-cards">${clubCard(recentClub, 'Club reciente')}</ul>
-            <button class="entry-create" type="button" data-entry-club-picker-open ${busy ? 'disabled' : ''} aria-haspopup="dialog">${ENTRY_CLUB_ICON_SVG}<span>Elegir club</span><span class="entry-create-count">${clubs.length} clubes</span></button>`
+          ? `<ul class="entry-cards">${clubCard(recentClub, entryCopy.recentClub)}</ul>
+            <button class="entry-create" type="button" data-entry-club-picker-open ${busy ? 'disabled' : ''} aria-haspopup="dialog">${ENTRY_CLUB_ICON_SVG}<span>${entryCopy.chooseClub}</span><span class="entry-create-count">${entryCopy.clubsCount(clubs.length)}</span></button>`
           : // No valid «reciente» datum: the picker IS the main access —
             // a full card, never an arbitrary club (PD-CLUBS).
             `<ul class="entry-cards">
-              <li><button class="entry-card" type="button" data-entry-club-picker-open ${busy ? 'disabled' : ''} aria-haspopup="dialog" aria-label="Elegir entre tus ${clubs.length} clubes">
+              <li><button class="entry-card" type="button" data-entry-club-picker-open ${busy ? 'disabled' : ''} aria-haspopup="dialog" aria-label="${escapeHtml(entryCopy.chooseAmongClubs(clubs.length))}">
                 <span class="entry-card-icon entry-card-icon-club">${ENTRY_CLUB_ICON_SVG}</span>
                 <span class="entry-card-copy">
-                  <span class="entry-card-title">Elegir club</span>
-                  <span class="entry-card-meta">${clubs.length} clubes</span>
+                  <span class="entry-card-title">${entryCopy.chooseClub}</span>
+                  <span class="entry-card-meta">${entryCopy.clubsCount(clubs.length)}</span>
                 </span>
                 <span class="entry-card-arrow">${ENTRY_ARROW_SVG}</span>
               </button></li>
             </ul>`
-      : `<p class="entry-empty">No tienes clubes todavía.</p>`;
+      : `<p class="entry-empty">${entryCopy.noClubs}</p>`;
 
     const clubBlock = `
       <section class="entry-block" aria-labelledby="entry-club-heading">
@@ -4865,12 +4865,12 @@ class BiqOnboardApp extends HTMLElement {
         ${busyNote('club')}
         ${clubAccess}
         ${createAllowed ? `
-          <button class="entry-create" type="button" data-entry-club-create-toggle ${busy ? 'disabled' : ''}>${ENTRY_PLUS_SVG}<span>Crear club</span></button>
+          <button class="entry-create" type="button" data-entry-club-create-toggle ${busy ? 'disabled' : ''}>${ENTRY_PLUS_SVG}<span>${entryCopy.createClubShort}</span></button>
           ${this._clubCreateOpen ? `
             <form class="entry-form" data-entry-club-create>
-              <div class="entry-field"><label>Nombre del club</label>
+              <div class="entry-field"><label>${entryCopy.clubName}</label>
                 <input type="text" name="name" maxlength="200" required /></div>
-              <button class="onboard-btn onboard-btn-primary" type="submit" ${busy ? 'disabled' : ''}>Crear</button>
+              <button class="onboard-btn onboard-btn-primary" type="submit" ${busy ? 'disabled' : ''}>${entryCopy.create}</button>
             </form>` : ''}
         ` : ''}
       </section>`;
@@ -4881,12 +4881,12 @@ class BiqOnboardApp extends HTMLElement {
         <p class="entry-recovery-msg">${escapeHtml(recovery.message)}</p>
         <div class="entry-recovery-actions">
           ${recovery.kind === 'narrowing' ? `
-            <button class="onboard-btn onboard-btn-primary" type="button" data-entry-retry-team="${escapeHtml(recovery.team_id)}">Reintentar equipo</button>
-            <button class="onboard-btn" type="button" data-entry-enter-all>Entrar con todos los equipos</button>` : ''}
+            <button class="onboard-btn onboard-btn-primary" type="button" data-entry-retry-team="${escapeHtml(recovery.team_id)}">${entryCopy.retryTeam}</button>
+            <button class="onboard-btn" type="button" data-entry-enter-all>${entryCopy.enterAllTeams}</button>` : ''}
           ${recovery.kind === 'uncertain' ? `
-            <button class="onboard-btn" type="button" data-entry-check>Comprobar</button>` : ''}
+            <button class="onboard-btn" type="button" data-entry-check>${entryCopy.check}</button>` : ''}
           ${recovery.kind === 'confirm' ? `
-            <button class="onboard-btn" type="button" data-entry-check>Reintentar</button>` : ''}
+            <button class="onboard-btn" type="button" data-entry-check>${guidedEntryCopy(this.locale).retry}</button>` : ''}
         </div>
       </div>` : '';
 
@@ -4895,29 +4895,29 @@ class BiqOnboardApp extends HTMLElement {
         <div class="entry-help-dialog" role="dialog" aria-modal="true" aria-labelledby="entry-help-title">
           <div class="entry-help-head">
             <img class="entry-help-chispa" src="${CHISPA_HEAD_COMPACT_URI}" alt="" aria-hidden="true">
-            <h2 class="entry-help-title" id="entry-help-title">Cada forma de entrenar, su lugar</h2>
-            <button class="entry-help-close" type="button" data-entry-help-close aria-label="Cerrar">${ENTRY_CLOSE_SVG}</button>
+            <h2 class="entry-help-title" id="entry-help-title">${entryCopy.helpTitle}</h2>
+            <button class="entry-help-close" type="button" data-entry-help-close aria-label="${entryCopy.close}">${ENTRY_CLOSE_SVG}</button>
           </div>
-          <p>No necesitas cambiar de cuenta. Puedes tener tu equipo y formar parte de un club.</p>
+          <p>${entryCopy.helpIntro}</p>
           <section class="entry-help-section">
-            <h3>Mi equipo</h3>
-            <p>Para el entrenador que lleva uno o dos equipos y quiere organizar su día a día.</p>
+            <h3>${entryCopy.myTeam}</h3>
+            <p>${entryCopy.helpTeamBody}</p>
             <ul>
-              <li>Planifica la temporada y prepara las sesiones.</li>
-              <li>Organiza la plantilla y el calendario de partidos.</li>
-              <li>Trabaja con tus equipos desde un mismo acceso.</li>
+              <li>${entryCopy.helpTeamSeason}</li>
+              <li>${entryCopy.helpTeamRoster}</li>
+              <li>${entryCopy.helpTeamAccess}</li>
             </ul>
           </section>
           <section class="entry-help-section">
-            <h3>Mi club</h3>
-            <p>Para coordinar la actividad deportiva de un club, según los permisos de tu cuenta.</p>
+            <h3>${entryCopy.myClub}</h3>
+            <p>${entryCopy.helpClubBody}</p>
             <ul>
-              <li>Gestiona los equipos y las personas del staff.</li>
-              <li>Define la metodología común del club.</li>
-              <li>Acompaña la planificación de los entrenadores.</li>
+              <li>${entryCopy.helpClubStaff}</li>
+              <li>${entryCopy.helpClubMethodology}</li>
+              <li>${entryCopy.helpClubPlanning}</li>
             </ul>
           </section>
-          <p class="entry-help-note">Puedes volver a esta pantalla para entrar en otro equipo o club.</p>
+          <p class="entry-help-note">${entryCopy.helpReturn}</p>
         </div>
       </div>` : '';
 
@@ -4926,15 +4926,15 @@ class BiqOnboardApp extends HTMLElement {
       const coachForm = `<form class="entry-form" data-entry-personal-create>${nameField}<div class="entry-field"><label>${entryCopy.teamName}</label><input name="name" maxlength="120" required></div><div class="entry-field"><label>${entryCopy.category}</label><select name="category_key">${PERSONAL_CATEGORIES.map(c=>`<option value="${c.key}">${c.label}</option>`).join('')}</select></div><div class="entry-field"><label>${entryCopy.gender}</label><select name="gender"><option value="X">${entryCopy.mixed}</option><option value="F">${entryCopy.female}</option><option value="M">${entryCopy.male}</option></select></div><button class="onboard-btn onboard-btn-primary" ${busy?'disabled':''}>${entryCopy.createAndEnterTeam}</button></form>`;
       const directorForm = `<form class="entry-form" data-entry-club-create>${nameField}<div class="entry-field"><label>${entryCopy.clubName}</label><input name="name" maxlength="200" required></div><button class="onboard-btn onboard-btn-primary" ${busy?'disabled':''}>${entryCopy.createAndEnterClub}</button></form>`;
       const invitationError = this._guidedInvitationsFailed
-        ? `<p class="entry-error" role="alert">${entryCopy.invitesFailed} <button class="onboard-btn" type="button" data-guided-retry-invitations>${entryCopy.retry}</button></p>`
+        ? `<p class="entry-error" role="alert">${entryCopy.invitesFailed} <button class="onboard-btn" type="button" data-guided-retry-invitations>${guidedEntryCopy(this.locale).retry}</button></p>`
         : '';
       const createTeam = actions['personal.team.create']?.allowed === true && !atTeamCap;
       return `${recoveryMarkup}${invitationError}${this._entryError?`<p class="entry-error" role="alert">${escapeHtml(this._entryError)}</p>`:''}${guidedEntry({entries:this._guidedEntries, role:this._guidedRole, step:this._guidedStep,selection:this._guidedSelection,busy,createTeam,createClub:createAllowed,coachImage:coachEntryImage,directorImage:directorEntryImage,invitations:this._guidedInvitations,otherOptions:this._guidedOtherOptions}, {coach:coachForm,director:directorForm}, this._inviteToken&&!this._invitePreview?`<p class="entry-status" role="status">${entryCopy.checkingInvite}</p>`:inviteBlock, this.locale)}`;
     }
     return `
       <div class="entry-step"${this._helpOpen || this._clubPickerOpen ? ' inert' : ''}>
-        <h1 class="sr-only">Entrar en BasketIQ</h1>
-        ${activeLabel ? `<p class="entry-active">Trabajando en <strong>${escapeHtml(activeLabel)}</strong></p>` : ''}
+        <h1 class="sr-only">${entryCopy.enterBasketIQ}</h1>
+        ${activeLabel ? `<p class="entry-active">${entryCopy.workingIn} <strong>${escapeHtml(activeLabel)}</strong></p>` : ''}
         ${this._entryError ? `<p class="entry-error" role="alert">${escapeHtml(this._entryError)}</p>` : ''}
         ${recoveryMarkup}
         ${inviteBlock}
@@ -5351,6 +5351,7 @@ class BiqOnboardApp extends HTMLElement {
   // Personal workspace panel (Mi espacio) when the active context is
   // private — teams list + create + switch affordance.
   private renderPersonalPanel(): string {
+    const entryCopy = guidedEntryCopy(this.locale);
     const all = this._personalTeams || [];
     const teams = all.filter((t) => !t.archived);
     const archived = all.filter((t) => t.archived);
@@ -5358,11 +5359,11 @@ class BiqOnboardApp extends HTMLElement {
     const teamRow = (t: PersonalTeamRow) => this._editingPersonalTeamId === t.team_id ? `
       <li class="entry-team">
         <form class="entry-form" data-personal-team-edit="${escapeHtml(t.team_id)}" data-revision="${t.team_revision}">
-          <div class="entry-field"><label>Nombre del equipo</label>
+          <div class="entry-field"><label>${entryCopy.teamName}</label>
             <input type="text" name="name" maxlength="120" required value="${escapeHtml(t.name)}" /></div>
-          <div class="entry-field"><label>Categoría</label>
+          <div class="entry-field"><label>${entryCopy.category}</label>
             <select name="category_key">${PERSONAL_CATEGORIES.map((c) => `<option value="${c.key}"${c.key === t.category_key ? ' selected' : ''}>${c.label}</option>`).join('')}</select></div>
-          <div class="entry-field"><label>Género</label>
+          <div class="entry-field"><label>${entryCopy.gender}</label>
             <select name="gender">${['X', 'F', 'M'].map((g) => `<option value="${g}"${g === t.gender ? ' selected' : ''}>${g === 'X' ? 'Mixto' : g === 'F' ? 'Femenino' : 'Masculino'}</option>`).join('')}</select></div>
           <button class="onboard-btn onboard-btn-primary" type="submit" ${this._entryBusy ? 'disabled' : ''}>Guardar</button>
           <button class="onboard-btn" type="button" data-personal-team-edit-cancel ${this._entryBusy ? 'disabled' : ''}>Cancelar</button>
@@ -5382,8 +5383,8 @@ class BiqOnboardApp extends HTMLElement {
         ${this._personalTeamsStatus === 'loading' || this._personalTeamsStatus === 'uninitialized'
           ? `<p class="entry-loading">Cargando equipos…</p>`
           : this._personalTeamsStatus === 'error'
-            ? `<p class="entry-error" role="alert">${escapeHtml(this._personalTeamsError || 'No se pudieron cargar los equipos')}
-                <button class="onboard-btn" type="button" data-personal-teams-retry ${this._entryBusy ? 'disabled' : ''}>Reintentar</button></p>`
+            ? `<p class="entry-error" role="alert">${escapeHtml(this._personalTeamsError || entryCopy.loadTeamsFailed)}
+                <button class="onboard-btn" type="button" data-personal-teams-retry ${this._entryBusy ? 'disabled' : ''}>${guidedEntryCopy(this.locale).retry}</button></p>`
             : teams.length
               ? `<ul class="entry-teams">${teams.map(teamRow).join('')}</ul>`
               : '<p class="entry-p">Todavía no tienes equipos personales.</p>'}
@@ -5397,12 +5398,12 @@ class BiqOnboardApp extends HTMLElement {
         ${atCap
           ? '<p class="entry-note">Puedes tener hasta 2 equipos personales. Elimina uno para crear otro.</p>'
           : `<form class="entry-form" data-entry-personal-create>
-          <div class="entry-field"><label>Nombre del equipo</label>
+          <div class="entry-field"><label>${entryCopy.teamName}</label>
             <input type="text" name="name" maxlength="120" required /></div>
-          <div class="entry-field"><label>Categoría</label>
+          <div class="entry-field"><label>${entryCopy.category}</label>
             <select name="category_key">${PERSONAL_CATEGORIES.map((c) => `<option value="${c.key}">${c.label}</option>`).join('')}</select></div>
-          <div class="entry-field"><label>Género</label>
-            <select name="gender"><option value="X">Mixto</option><option value="F">Femenino</option><option value="M">Masculino</option></select></div>
+          <div class="entry-field"><label>${entryCopy.gender}</label>
+            <select name="gender"><option value="X">${entryCopy.mixed}</option><option value="F">${entryCopy.female}</option><option value="M">${entryCopy.male}</option></select></div>
           <button class="onboard-btn onboard-btn-primary" type="submit" ${this._entryBusy ? 'disabled' : ''}>Crear equipo</button>
         </form>`}
       </div>`;
@@ -6125,7 +6126,7 @@ class BiqOnboardApp extends HTMLElement {
 
     let body: string;
     if (this._membersError) {
-      body = `<p class="onboard-error" data-members-error>No se pudo cargar la lista de miembros (${escapeHtml(this._membersError)}).</p><button class="onboard-btn onboard-btn-sm" data-members-retry type="button">Reintentar</button>`;
+      body = `<p class="onboard-error" data-members-error>No se pudo cargar la lista de miembros (${escapeHtml(this._membersError)}).</p><button class="onboard-btn onboard-btn-sm" data-members-retry type="button">${guidedEntryCopy(this.locale).retry}</button>`;
     } else if (this._members === null) {
       // Roster unknown: never fetched or load still in flight — never show
       // the empty message until a successful 200 confirms an empty array.

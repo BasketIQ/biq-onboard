@@ -46,6 +46,13 @@ const ES = {
   joinClub: "Unirme al club",
   joinAsCoach: (club: string) => `Unirme a ${club} como entrenador`,
   enterAsCoach: (club: string) => `Entrar en ${club} como entrenador`,
+  myTeam: "Mi equipo",
+  myClub: "Mi club",
+  coachModeCopy: "Modo entrenador. Usa BasketSpark para llevar a tu equipo a su mejor nivel esta temporada.",
+  directorModeCopy: "Modo Director Deportivo. Diseña la estrategia deportiva de tu club de baloncesto y usa BasketSpark para alcanzar el mejor nivel con todos los equipos.",
+  chispaHelpLabel: "Chispa: ayuda sobre Mi equipo y Mi club",
+  teamOrClub: "¿Mi equipo o mi club?",
+  chispaChooseHelp: "Chispa te ayuda a elegir.",
 };
 
 const EN: typeof ES = {
@@ -96,6 +103,13 @@ const EN: typeof ES = {
   joinClub: "Join the club",
   joinAsCoach: club => `Join ${club} as coach`,
   enterAsCoach: club => `Enter ${club} as coach`,
+  myTeam: "My team",
+  myClub: "My club",
+  coachModeCopy: "Coach mode. Use BasketSpark to help your team reach its best level this season.",
+  directorModeCopy: "Sports director mode. Design the sporting strategy for your basketball club and use BasketSpark to help every team reach its best level.",
+  chispaHelpLabel: "Chispa: help with My team and My club",
+  teamOrClub: "My team or my club?",
+  chispaChooseHelp: "Chispa helps you choose.",
 };
 
 const catalogues: Record<string, typeof ES> = { es: ES, en: EN };

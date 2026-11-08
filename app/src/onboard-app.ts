@@ -4705,6 +4705,7 @@ class BiqOnboardApp extends HTMLElement {
     // Director 2026-10-24 (bugfix-auth-club-roster, bug 2): «Mi club» is
     // ALWAYS shown — the PD-ENTRY coach-hiding gate is removed; with no
     // clubs the block offers «Crear club».
+    const entryCopy = guidedEntryCopy(this.locale);
     const personalTeamCount = this._guidedEntries?.find(entry => entry.kind === 'personal')?.teams.length ?? personalTeams.length;
     const atTeamCap = personalTeamCount >= 2;
     const teamMeta = (t: PersonalTeamRow) =>
@@ -4716,10 +4717,10 @@ class BiqOnboardApp extends HTMLElement {
     const teamBlock = `
       <section class="entry-block" aria-labelledby="entry-team-heading">
         <div class="entry-block-head">
-          <h2 class="entry-block-title" id="entry-team-heading">Mi equipo</h2>
-          <button class="entry-role entry-logout" type="button" data-entry-logout ${busy ? 'disabled' : ''}>Salir</button>
+          <h2 class="entry-block-title" id="entry-team-heading">${entryCopy.myTeam}</h2>
+          <button class="entry-role entry-logout" type="button" data-entry-logout ${busy ? 'disabled' : ''}>${entryCopy.signOut}</button>
         </div>
-        <p class="entry-block-copy">Modo entrenador. Usa BasketSpark para llevar a tu equipo a su mejor nivel esta temporada.</p>
+        <p class="entry-block-copy">${entryCopy.coachModeCopy}</p>
         ${busyNote('personal')}
         ${!this._personalReadAllowed() ? `
           <p class="entry-note">El espacio personal requiere una sesión verificada. Cierra sesión y entra con tu cuenta para usarlo.</p>` : `
@@ -4763,7 +4764,6 @@ class BiqOnboardApp extends HTMLElement {
     // Emailed invites are an explicit join gesture, not part of the club
     // membership universe — they stay reachable regardless of the club
     // block content.
-    const entryCopy = guidedEntryCopy(this.locale);
     const inviteBlock = this._invitePreview ? `
       <div class="entry-invite">
         <p>${entryCopy.invitationFor} <strong>${escapeHtml(this._invitePreview.club_name || this._invitePreview.club_id)}</strong></p>
@@ -4859,9 +4859,9 @@ class BiqOnboardApp extends HTMLElement {
     const clubBlock = `
       <section class="entry-block" aria-labelledby="entry-club-heading">
         <div class="entry-block-head">
-          <h2 class="entry-block-title" id="entry-club-heading">Mi club</h2>
+          <h2 class="entry-block-title" id="entry-club-heading">${entryCopy.myClub}</h2>
         </div>
-        <p class="entry-block-copy">Modo Director Deportivo. Diseña la estrategia deportiva de tu club de baloncesto y usa BasketSpark para alcanzar el mejor nivel con todos los equipos.</p>
+        <p class="entry-block-copy">${entryCopy.directorModeCopy}</p>
         ${busyNote('club')}
         ${clubAccess}
         ${createAllowed ? `
@@ -4941,9 +4941,9 @@ class BiqOnboardApp extends HTMLElement {
         ${teamBlock}
         ${clubBlock}
         <div class="entry-utility">
-          <button class="entry-chispa" type="button" data-entry-help aria-haspopup="dialog" aria-label="Chispa: ayuda sobre Mi equipo y Mi club">
+          <button class="entry-chispa" type="button" data-entry-help aria-haspopup="dialog" aria-label="${entryCopy.chispaHelpLabel}">
             <img class="entry-chispa-icon" src="${CHISPA_HEAD_COMPACT_URI}" alt="" aria-hidden="true">
-            <span class="entry-chispa-copy"><strong>¿Mi equipo o mi club?</strong><small>Chispa te ayuda a elegir.</small></span>
+            <span class="entry-chispa-copy"><strong>${entryCopy.teamOrClub}</strong><small>${entryCopy.chispaChooseHelp}</small></span>
           </button>
         </div>
       </div>

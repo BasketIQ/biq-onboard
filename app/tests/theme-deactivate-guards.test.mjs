@@ -40,7 +40,7 @@ test('default identity button calls non-destructive deactivation', () => {
 
 test('website input is disabled when polling', () => {
   assert.ok(
-    SRC.includes("data-website-input value=\"${escapeHtml(website)}\" placeholder=\"https://www.miclub.com\" ${this._loading || (isPolling && !this._isStale) ? 'disabled' : ''}"),
+    SRC.includes("data-website-input value=\"${escapeHtml(website)}\" placeholder=\"${this.oc.websitePlaceholder}\" ${this._loading || (isPolling && !this._isStale) ? 'disabled' : ''}"),
     'data-website-input should be disabled during polling'
   );
 });

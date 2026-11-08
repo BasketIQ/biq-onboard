@@ -16,6 +16,7 @@
 
 import styles from './styles.css?inline';
 import { guidedEntryCopy } from './guided-entry-copy';
+import { onboardCopy, type OnboardCopy } from './onboard-copy';
 import { guidedEntry, type PendingInvitation, type WorkspacesEntry } from './guided-entry';
 import coachEntryImage from './assets/hoopie-entrenador.webp';
 import directorEntryImage from './assets/chispa-directora-deportiva.webp';
@@ -103,59 +104,10 @@ interface ThemeJob {
 }
 
 // B14: themeJob state matrix — presentation + action per canonical state
-const THEME_JOB_COPY: Record<string, { title: string; description: string; action?: string }> = {
-  pending: {
-    title: 'Personalización en cola',
-    description: 'Tu estilo se generará automáticamente en unos segundos.',
-  },
-  running: {
-    title: 'Analizando la web del club',
-    description: 'Extrayendo colores y generando el estilo.',
-  },
-  succeeded: {
-    title: 'Propuesta disponible',
-    description: 'Revisa los colores y el escudo antes de aplicar la identidad.',
-    action: 'adjust/regenerate/revert',
-  },
-  uncertain: {
-    title: 'Revisión necesaria',
-    description: 'La web parece legítima pero no tenemos suficiente confianza para aplicar los colores automáticamente.',
-    action: 'Sí, usarlo / cambiar URL',
-  },
-  rejected_not_a_club: {
-    title: 'No parece un club',
-    description: 'La URL indicada no corresponde a un club de baloncesto.',
-    action: 'Corregir URL / estilo manual',
-  },
-  unsupported_source: {
-    title: 'Fuente no soportada',
-    description: 'No podemos extraer colores de este tipo de página.',
-    action: 'Añadir web / estilo manual',
-  },
-  unreachable: {
-    title: 'No se pudo acceder',
-    description: 'La web del club no respondió después de varios intentos.',
-    action: 'Reintentar / cambiar URL',
-  },
-  failed: {
-    title: 'Error técnico',
-    description: 'Se produjo un error al generar el estilo.',
-    action: 'Reintentar / estilo manual',
-  },
-  reverted: {
-    title: 'Estilo BasketIQ por defecto',
-    description: 'El estilo se ha revertido al BasketIQ por defecto.',
-    action: 'Generar de nuevo',
-  },
-};
+// lives in onboard-copy.ts (themeJob) so it follows the active locale.
 
 // F12: Canonical category taxonomy (mirrors shell.js CATEGORY_ORDER)
 const CATEGORY_ORDER = ['babybasket', 'prebenjamin', 'benjamin', 'alevin', 'infantil', 'cadete', 'junior', 'senior', 'veteranos'];
-const CATEGORY_LABELS: Record<string, string> = {
-  babybasket: 'Babybasket', prebenjamin: 'Prebenjamín', benjamin: 'Benjamín',
-  alevin: 'Alevín', infantil: 'Infantil', cadete: 'Cadete',
-  junior: 'Junior', senior: 'Senior', veteranos: 'Veteranos',
-};
 
 // Competition level dropdown — the same 7-option list the retired A-04
 // questionnaire used (biq-methodology, removed in d8b33e6). Stored value is
@@ -169,9 +121,6 @@ const COMPETITIVE_LEVEL_OPTIONS: { value: string; label: string }[] = [
   { value: 'autonomic', label: 'Autonómico' },
   { value: 'national', label: 'Nacional' },
 ];
-const COMPETITIVE_LEVEL_LABELS: Record<string, string> = Object.fromEntries(
-  COMPETITIVE_LEVEL_OPTIONS.map((o) => [o.value, o.label]),
-);
 
 // F12: Inline SVG icons (stroke currentColor, same style as biq-methodology / STT).
 const ICON_EDIT = '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 20h9" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>';
@@ -193,15 +142,15 @@ const escapeHtml = (s: string): string =>
 // Options markup for the competitive_level <select>: placeholder for the
 // unset state; a stored value outside the canonical list (legacy free text)
 // is preserved as an extra selected option rather than silently dropped.
-function competitiveLevelOptionsHtml(current: string): string {
+function competitiveLevelOptionsHtml(current: string, copy: OnboardCopy = onboardCopy()): string {
   const opts = COMPETITIVE_LEVEL_OPTIONS.map(
-    (o) => `<option value="${o.value}"${current === o.value ? ' selected' : ''}>${o.label}</option>`,
+    (o) => `<option value="${o.value}"${current === o.value ? ' selected' : ''}>${copy.levels[o.value] ?? o.label}</option>`,
   );
   const known = COMPETITIVE_LEVEL_OPTIONS.some((o) => o.value === current);
   if (current && !known) {
     opts.push(`<option value="${escapeHtml(current)}" selected>${escapeHtml(current)}</option>`);
   }
-  return `<option value=""${!current ? ' selected' : ''}>Selecciona…</option>${opts.join('')}`;
+  return `<option value=""${!current ? ' selected' : ''}>${copy.select}</option>${opts.join('')}`;
 }
 
 // F-CL-3 (PD-5): Categoría/Género select options for the club team editor.
@@ -210,14 +159,14 @@ function competitiveLevelOptionsHtml(current: string): string {
 // stored value outside the list is preserved as an extra selected option
 // — the same rule competitiveLevelOptionsHtml applies to legacy levels.
 // "" maps to «Selecciona…» and clears the field on save.
-function categoryOptionsHtml(current: string): string {
+function categoryOptionsHtml(current: string, copy: OnboardCopy = onboardCopy()): string {
   const opts = PERSONAL_CATEGORIES.map(
-    (c) => `<option value="${c.key}"${current === c.key ? ' selected' : ''}>${c.label}</option>`,
+    (c) => `<option value="${c.key}"${current === c.key ? ' selected' : ''}>${copy.categories[c.key] ?? c.label}</option>`,
   );
   if (current && !PERSONAL_CATEGORIES.some((c) => c.key === current)) {
     opts.push(`<option value="${escapeHtml(current)}" selected>${escapeHtml(current)}</option>`);
   }
-  return `<option value=""${!current ? ' selected' : ''}>Selecciona…</option>${opts.join('')}`;
+  return `<option value=""${!current ? ' selected' : ''}>${copy.select}</option>${opts.join('')}`;
 }
 
 const TEAM_GENDER_OPTIONS = [
@@ -226,14 +175,14 @@ const TEAM_GENDER_OPTIONS = [
   { value: 'X', label: 'Mixto' },
 ] as const;
 
-function genderOptionsHtml(current: string): string {
+function genderOptionsHtml(current: string, copy: OnboardCopy = onboardCopy()): string {
   const opts = TEAM_GENDER_OPTIONS.map(
-    (o) => `<option value="${o.value}"${current === o.value ? ' selected' : ''}>${o.label}</option>`,
+    (o) => `<option value="${o.value}"${current === o.value ? ' selected' : ''}>${copy.genders[o.value] ?? o.label}</option>`,
   );
   if (current && !TEAM_GENDER_OPTIONS.some((o) => o.value === current)) {
     opts.push(`<option value="${escapeHtml(current)}" selected>${escapeHtml(current)}</option>`);
   }
-  return `<option value=""${!current ? ' selected' : ''}>Selecciona…</option>${opts.join('')}`;
+  return `<option value=""${!current ? ' selected' : ''}>${copy.select}</option>${opts.join('')}`;
 }
 
 // Roles that may create clubs (ADDENDUM-07 §6.3 — mirrors the server rule;
@@ -304,27 +253,18 @@ interface MemberAssignment {
   club_id: string;
 }
 
-const ROLE_LABELS: Record<string, string> = {
-  administrator: 'Director deportivo',
-  sports_director: 'Director deportivo',
-  coordinator: 'Coordinador',
-  coach: 'Entrenador',
-  player: 'Jugador',
-  super_administrator: 'Super administrador',
-};
-
 // Unified club director roles; legacy administrator is a compatible alias.
 const canonicalClubRole = (role: string): string => role === 'administrator' ? 'sports_director' : role;
 const ASSIGNABLE_ROLES = ['sports_director', 'coach'];
 
 
-function clubTabsForMembershipState(memberships: MembershipInfo[] | undefined): ClubTab[] {
+function clubTabsForMembershipState(memberships: MembershipInfo[] | undefined, copy: OnboardCopy = onboardCopy()): ClubTab[] {
   const ms = memberships || [];
   const showCreate = canCreateClub(ms);
   const tabs: ClubTab[] = [
-    ...(ms.length ? [{ id: 'memberships', label: 'Mis clubes' }] : []),
-    { id: 'join', label: 'Unirme a un club' },
-    ...(showCreate ? [{ id: 'create', label: 'Crear un club' }] : []),
+    ...(ms.length ? [{ id: 'memberships', label: copy.myClubsTab }] : []),
+    { id: 'join', label: copy.joinClubTab },
+    ...(showCreate ? [{ id: 'create', label: copy.createClubTab }] : []),
   ];
   return tabs;
 }
@@ -581,6 +521,7 @@ const ENTRY_PLUS_SVG =
 class BiqOnboardApp extends HTMLElement {
   i18n?: { locale?: string };
   private get locale() { return this.i18n?.locale || document.documentElement.lang || 'es-ES'; }
+  private get oc(): OnboardCopy { return onboardCopy(this.locale); }
 
   private readonly onLocaleChanged = () => {
     const guided = this.shadow?.querySelector('.guided-entry');
@@ -1195,21 +1136,21 @@ class BiqOnboardApp extends HTMLElement {
           for (const p of t.players as unknown[]) {
             const row = p as Record<string, unknown> | null;
             if (!row || typeof row.name !== 'string') {
-              return { kind: 'unavailable', message: 'Respuesta de plantilla inválida' };
+              return { kind: 'unavailable', message: this.oc.invalidRosterResponse };
             }
             const n = row.number;
             if (
               n !== null && n !== undefined &&
               (typeof n !== 'number' || !Number.isInteger(n) || n < 0 || n > 99)
             ) {
-              return { kind: 'unavailable', message: 'Respuesta de plantilla inválida' };
+              return { kind: 'unavailable', message: this.oc.invalidRosterResponse };
             }
             const pid = row.player_id;
             if (
               pid !== null && pid !== undefined &&
               (typeof pid !== 'string' || !/^pl_[0-9a-f]{16}$/.test(pid))
             ) {
-              return { kind: 'unavailable', message: 'Respuesta de plantilla inválida' };
+              return { kind: 'unavailable', message: this.oc.invalidRosterResponse };
             }
             players.push({ name: row.name, number: n ?? null, player_id: pid ?? null });
           }
@@ -1230,7 +1171,7 @@ class BiqOnboardApp extends HTMLElement {
         if (t || this._teamsError) {
           // Known team, unconfirmed roster — the management feed failed
           // or returned a metadata row. Unavailable, not empty.
-          return { kind: 'unavailable', message: 'No se pudo cargar la plantilla' };
+          return { kind: 'unavailable', message: this.oc.loadRosterFailed };
         }
         return { kind: 'not-found' };
       },
@@ -1244,7 +1185,7 @@ class BiqOnboardApp extends HTMLElement {
             body: JSON.stringify(draft),
           });
         } catch {
-          return { kind: 'unavailable', message: 'No se pudo guardar el equipo' };
+          return { kind: 'unavailable', message: this.oc.saveTeamFailed };
         }
         if (res.status === 403) return { kind: 'denied' };
         if (res.status === 404) return { kind: 'not-found' };
@@ -1257,27 +1198,27 @@ class BiqOnboardApp extends HTMLElement {
         const team = (data as Record<string, unknown> | null)?.team as
           Record<string, unknown> | null | undefined;
         if (!team || typeof team.name !== 'string' || !Array.isArray(team.players)) {
-          return { kind: 'unavailable', message: 'Respuesta inválida tras guardar' };
+          return { kind: 'unavailable', message: this.oc.invalidSaveResponse };
         }
         const players: RosterPlayer[] = [];
         for (const p of team.players as unknown[]) {
           const row = p as Record<string, unknown> | null;
           if (!row || typeof row.name !== 'string') {
-            return { kind: 'unavailable', message: 'Respuesta inválida tras guardar' };
+            return { kind: 'unavailable', message: this.oc.invalidSaveResponse };
           }
           const n = row.number;
           if (
             n !== null && n !== undefined &&
             (typeof n !== 'number' || !Number.isInteger(n) || n < 0 || n > 99)
           ) {
-            return { kind: 'unavailable', message: 'Respuesta inválida tras guardar' };
+            return { kind: 'unavailable', message: this.oc.invalidSaveResponse };
           }
           const pid = row.player_id;
           if (
             pid !== null && pid !== undefined &&
             (typeof pid !== 'string' || !/^pl_[0-9a-f]{16}$/.test(pid))
           ) {
-            return { kind: 'unavailable', message: 'Respuesta inválida tras guardar' };
+            return { kind: 'unavailable', message: this.oc.invalidSaveResponse };
           }
           players.push({ name: row.name, number: n ?? null, player_id: pid ?? null });
         }
@@ -1389,17 +1330,17 @@ class BiqOnboardApp extends HTMLElement {
             cache: 'no-store',
           });
         } catch {
-          return { kind: 'unavailable', message: 'No se pudo cargar la plantilla' };
+          return { kind: 'unavailable', message: this.oc.loadRosterFailed };
         }
         if (res.status === 403) return { kind: 'denied' };
         if (res.status === 404) return { kind: 'not-found' };
         if (!res.ok) {
-          return { kind: 'unavailable', message: `No se pudo cargar la plantilla (${res.status})` };
+          return { kind: 'unavailable', message: this.oc.loadRosterFailedStatus(res.status) };
         }
         const model = toModel(await res.json().catch(() => null), teamId);
         return model
           ? { kind: 'ok', model }
-          : { kind: 'unavailable', message: 'Respuesta de plantilla inválida' };
+          : { kind: 'unavailable', message: this.oc.invalidRosterResponse };
       },
       save: async (teamId, draft, version) => {
         let res: Response;
@@ -1428,18 +1369,18 @@ class BiqOnboardApp extends HTMLElement {
             }),
           });
         } catch {
-          return { kind: 'unavailable', message: 'No se pudo guardar la plantilla' };
+          return { kind: 'unavailable', message: this.oc.saveRosterFailed };
         }
         if (res.status === 409) return { kind: 'conflict' };
         if (res.status === 403) return { kind: 'denied' };
         if (res.status === 404) return { kind: 'not-found' };
         if (!res.ok) {
-          return { kind: 'unavailable', message: `No se pudo guardar la plantilla (${res.status})` };
+          return { kind: 'unavailable', message: this.oc.saveRosterFailedStatus(res.status) };
         }
         const model = toModel(await res.json().catch(() => null), teamId);
         return model
           ? { kind: 'saved', model }
-          : { kind: 'unavailable', message: 'Respuesta de plantilla inválida' };
+          : { kind: 'unavailable', message: this.oc.invalidRosterResponse };
       },
     };
   }
@@ -1647,14 +1588,14 @@ class BiqOnboardApp extends HTMLElement {
         this._personalTeams = null;
         this._personalTeamsStatus = 'error';
         this._personalTeamsError = res.ok
-          ? 'Respuesta de equipos inválida'
-          : `No se pudieron cargar los equipos (${res.status})`;
+          ? this.oc.invalidTeamsResponse
+          : this.oc.loadTeamsFailedStatus(res.status);
       }
     } catch (err) {
       if (!isCurrent()) return;
       this._personalTeams = null;
       this._personalTeamsStatus = 'error';
-      this._personalTeamsError = 'No se pudieron cargar los equipos';
+      this._personalTeamsError = this.oc.loadTeamsFailed;
     } finally {
       if (isCurrent()) {
         if (this._personalTeamsAbort === controller) this._personalTeamsAbort = null;
@@ -1881,7 +1822,7 @@ class BiqOnboardApp extends HTMLElement {
     );
     if (!res.ok) {
       const body = await res.json().catch(() => null);
-      throw new Error(body?.detail || `No se pudo activar el contexto (${res.status})`);
+      throw new Error(body?.detail || this.oc.activateContextFailed(res.status));
     }
   }
 
@@ -1889,12 +1830,12 @@ class BiqOnboardApp extends HTMLElement {
     const name=String(fd.get('nickname')||'').trim();
     if(!this._guidedNeedsName||!name)return;
     const response=await fetch('/api/auth/profile',{method:'PATCH',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({display_name:name})});
-    if(!response.ok)throw new Error('No se pudo guardar tu nombre. Reinténtalo.');
+    if(!response.ok)throw new Error(this.oc.saveNameFailed);
     this._guidedNeedsName=false;
   }
   private async _focusWorkMode(mode: 'coach' | 'director', teamId = ''): Promise<void> {
     const current = await fetch('/api/context/v1/active', {credentials: 'include', cache: 'no-store'});
-    if (!current.ok) throw new Error('No se pudo comprobar el contexto.');
+    if (!current.ok) throw new Error(this.oc.checkContextFailed);
     const {context} = await current.json();
     const focus = { contextId: context.context_id, mode, teamId };
     let response: Response;
@@ -1907,7 +1848,7 @@ class BiqOnboardApp extends HTMLElement {
       if (await this._readWorkFocus(focus)) return;
       throw new EntryUncertainTransport(focus);
     }
-    if (!response.ok) throw new Error('No se pudo confirmar el modo de trabajo. Reinténtalo.');
+    if (!response.ok) throw new Error(this.oc.confirmWorkModeFailed);
   }
 
   private async _readWorkFocus(focus: EntryWorkFocus): Promise<boolean | null> {
@@ -1949,7 +1890,7 @@ class BiqOnboardApp extends HTMLElement {
       const body = await res.json().catch(() => null);
       throw new EntryNarrowingFailure(
         teamId,
-        body?.detail || `No se pudo seleccionar el equipo (${res.status})`,
+        body?.detail || this.oc.selectTeamFailed(res.status),
       );
     }
   }
@@ -1993,7 +1934,7 @@ class BiqOnboardApp extends HTMLElement {
         ceded?.close();
       } catch { /* ticket ya cerrado o carcasa ausente */ }
       this._finishEntryIntent(intent);
-      this._entryRecovery = { kind: 'confirm', message: 'No se pudo confirmar la entrada' };
+      this._entryRecovery = { kind: 'confirm', message: this.oc.entryNotConfirmed };
       this.render();
     }, this._entryConfirmMs);
   }
@@ -2024,7 +1965,7 @@ class BiqOnboardApp extends HTMLElement {
           const focus = err.focus;
           this._entryRecovery = {
             kind: 'uncertain',
-            message: err.message,
+            message: this.oc.entryUncertain,
             verify: focus ? () => this._verifyWorkFocus(intent, focus) : undefined,
           };
           this.render();
@@ -2033,7 +1974,7 @@ class BiqOnboardApp extends HTMLElement {
         // A chain that already mutated (create→activate, redeem→activate)
         // resynchronizes so the projection reflects what was applied.
         if (intent.mutated) this._resyncBootstrap();
-        this._entryError = (err as Error).message || 'No se pudo completar la entrada';
+        this._entryError = (err as Error).message || this.oc.entryFailed;
         this.render();
       }
     })();
@@ -2356,14 +2297,14 @@ class BiqOnboardApp extends HTMLElement {
       if (!usersRes.ok) throw new Error(`HTTP ${usersRes.status}`);
       const data = await usersRes.json();
       const users = Array.isArray(data?.users) ? data.users : Array.isArray(data) ? data : null;
-      if (!users) throw new Error('Respuesta de miembros inválida');
+      if (!users) throw new Error(this.oc.invalidMembersResponse);
       // Roles are part of the contract: a failed or malformed response is
       // "unavailable", never an empty assignment list — otherwise the roster
       // would expose edit/remove controls from non-authoritative state.
       if (!rolesRes.ok) throw new Error(`HTTP ${rolesRes.status}`);
       const rolesData = await rolesRes.json();
       if (!Array.isArray(rolesData?.assignments)) {
-        throw new Error('Respuesta de roles inválida');
+        throw new Error(this.oc.invalidRolesResponse);
       }
       // Every assignment must carry the upstream scope contract
       // (scope === "club:<requested club>") and must not conflict with an
@@ -2384,7 +2325,7 @@ class BiqOnboardApp extends HTMLElement {
           && typeof a.id === 'string' && a.id.length > 0
           && typeof a.user_id === 'string' && a.user_id.length > 0
           && typeof a.role === 'string' && a.role.length > 0;
-        if (!valid) throw new Error('Respuesta de roles inválida');
+        if (!valid) throw new Error(this.oc.invalidRolesResponse);
         return {
           id: a.id as string,
           user_id: a.user_id as string,
@@ -2557,8 +2498,8 @@ class BiqOnboardApp extends HTMLElement {
       const message = res.kind === 'unavailable'
         ? res.message
         : res.kind === 'denied'
-          ? 'No tienes permiso para editar este equipo.'
-          : 'Equipo no encontrado.';
+          ? this.oc.noEditPermission
+          : this.oc.teamNotFound;
       if (this._isPersonalContext()) this._entryError = message;
       else this._teamsError = message;
     }
@@ -2567,12 +2508,7 @@ class BiqOnboardApp extends HTMLElement {
 
   // ─── UX v2: autosave del editor de equipo ──────────────────────────────
   private _editSaveStatusLabel(): string {
-    const labels: Record<string, string> = {
-      idle: '', pending: 'Cambios pendientes', saving: 'Guardando…',
-      saved: 'Guardado', error: 'No se pudo guardar',
-      conflict: 'El equipo cambió en otro lugar',
-    };
-    return labels[this._editSaveStatus] || '';
+    return this.oc.saveStatus[this._editSaveStatus] || '';
   }
 
   // El draft que sale al servidor: valida el SNAPSHOT COMPLETO — ninguna
@@ -2595,7 +2531,7 @@ class BiqOnboardApp extends HTMLElement {
       }
     | { ok: false; message: string } {
     const name = this._editNameDraft.trim();
-    if (!name) return { ok: false, message: 'El nombre es obligatorio.' };
+    if (!name) return { ok: false, message: this.oc.nameRequired };
     const competitive_level = this._editLevelDraft.trim();
     const players: { name: string; number: number | null; player_id: string | null }[] = [];
     for (const p of this._rosterDraft) {
@@ -2603,17 +2539,17 @@ class BiqOnboardApp extends HTMLElement {
       if (!pname) {
         // Fila nueva totalmente vacía — edición incompleta, espera.
         if (!p.existing && !p.number.trim() && !p.birth_date.trim()) {
-          return { ok: false, message: 'Completa o quita la fila nueva del jugador.' };
+          return { ok: false, message: this.oc.completeNewRow };
         }
         // Fila persistida o con dorsal pero sin nombre — conserva al
         // jugador guardado; la baja es solo por su acción explícita.
-        return { ok: false, message: 'Cada jugador necesita un nombre — quita la fila para darlo de baja.' };
+        return { ok: false, message: this.oc.playerNeedsName };
       }
       const numStr = p.number.trim();
       const num = numStr === '' ? null
         : /^-?\d+$/.test(numStr) ? Number.parseInt(numStr, 10) : Number.NaN;
       if (num !== null && (!Number.isInteger(num) || num < 0 || num > 99)) {
-        return { ok: false, message: 'El dorsal debe ser un número entero entre 0 y 99.' };
+        return { ok: false, message: this.oc.invalidShirtNumber };
       }
       players.push({ name: pname, number: num, player_id: p.player_id ?? null });
     }
@@ -2798,8 +2734,7 @@ class BiqOnboardApp extends HTMLElement {
         this._editDirty = birthFailures > 0;
         if (birthFailures > 0) {
           this._editSaveStatus = 'error';
-          this._editSaveMessage =
-            'La plantilla se guardó; no se pudieron guardar las fechas de nacimiento. Reintentar las vuelve a enviar.';
+          this._editSaveMessage = this.oc.birthDatesNotSaved;
         } else {
           this._editSaveStatus = 'saved';
           this._editSaveMessage = null;
@@ -2818,15 +2753,15 @@ class BiqOnboardApp extends HTMLElement {
     // PUT — incluidos autosave, flush y Volver (pasan por la misma cadena).
     this._editNeedsReconcile = true;
     this._editSaveMessage = res.kind === 'conflict'
-      ? 'El equipo cambió fuera de este editor. Reintenta para comparar con la versión actual.'
+      ? this.oc.changedElsewhere
       : res.kind === 'denied'
-        ? 'No tienes permiso para guardar este equipo.'
+        ? this.oc.noSavePermission
         : res.kind === 'not-found'
-          ? 'El equipo ya no existe.'
+          ? this.oc.teamGone
           // Resultado incierto (transporte, 5xx, respuesta inválida): la
           // escritura pudo aplicarse en el servidor — nunca se reenvía a
           // ciegas; Reintentar primero reconcilia con una lectura.
-          : `${res.message} Reintentar comprueba el estado actual antes de reenviar.`;
+          : this.oc.uncertainSave(res.message);
     this._updateEditStatusDom();
   }
 
@@ -2909,9 +2844,9 @@ class BiqOnboardApp extends HTMLElement {
     if (res.kind !== 'ok') {
       this._editSaveStatus = 'error';
       this._editSaveMessage = res.kind === 'denied'
-        ? 'No tienes permiso para editar este equipo.'
+        ? this.oc.noEditPermission
         : res.kind === 'not-found'
-          ? 'El equipo ya no existe.'
+          ? this.oc.teamGone
           : res.message;
       this._updateEditStatusDom();
       return 'failed';
@@ -2972,11 +2907,11 @@ class BiqOnboardApp extends HTMLElement {
       key: 'name' | 'category' | 'gender' | 'competitive_level' | 'players';
       label: string;
     }> = [
-      { key: 'name', label: 'el nombre' },
-      { key: 'category', label: 'la categoría' },
-      { key: 'gender', label: 'el género' },
-      { key: 'competitive_level', label: 'el nivel' },
-      { key: 'players', label: 'la plantilla' },
+      { key: 'name', label: this.oc.conflictFields.name },
+      { key: 'category', label: this.oc.conflictFields.category },
+      { key: 'gender', label: this.oc.conflictFields.gender },
+      { key: 'competitive_level', label: this.oc.conflictFields.competitive_level },
+      { key: 'players', label: this.oc.conflictFields.players },
     ];
     const conflicts: string[] = [];
     const serverWins: typeof fields[number]['key'][] = [];
@@ -3000,12 +2935,10 @@ class BiqOnboardApp extends HTMLElement {
       this._editNeedsReconcile = true;
       this._editConflictServer = server;
       const rosterSummary = serverObj.players.length
-        ? ` Plantilla actual: ${serverObj.players.map((p) => p.number !== null ? `${p.name} (${p.number})` : p.name).join(', ')}.`
-        : ' Plantilla actual: sin jugadores.';
+        ? this.oc.currentRoster(serverObj.players.map((p) => p.number !== null ? `${p.name} (${p.number})` : p.name).join(', '))
+        : this.oc.currentRosterEmpty;
       this._editSaveStatus = 'conflict';
-      this._editSaveMessage =
-        `Otro cambio modificó ${conflicts.join(' y ')}.${rosterSummary} ` +
-        'Elige «Mantener mis cambios» o «Cargar versión actual».';
+      this._editSaveMessage = this.oc.conflictMessage(conflicts, rosterSummary);
       this._updateEditStatusDom();
       return 'conflict';
     }
@@ -3049,7 +2982,7 @@ class BiqOnboardApp extends HTMLElement {
       }
     }
     if (serverWins.length) {
-      this._editSaveMessage = 'Se incorporaron los cambios hechos en otro lugar.';
+      this._editSaveMessage = this.oc.mergedElsewhere;
     }
     this._editSaveStatus = 'pending';
     this._updateEditStatusDom();
@@ -3069,10 +3002,10 @@ class BiqOnboardApp extends HTMLElement {
     const off = readOnly ? ' disabled' : '';
     return `
       <div class="onboard-roster-row" data-roster-row>
-        <input type="text" class="onboard-input onboard-input-sm" data-player-name="${i}" placeholder="Nombre y apellidos" aria-label="Nombre y apellidos del jugador" value="${escapeHtml(p.name)}"${off} />
-        <input type="text" class="onboard-input onboard-input-sm onboard-player-num" data-player-number="${i}" placeholder="Nº" aria-label="Dorsal" inputmode="numeric" maxlength="2" value="${escapeHtml(p.number)}"${off} />
-        ${showBirth ? `<input type="date" class="onboard-input onboard-input-sm onboard-player-birth" data-player-birth="${i}" aria-label="Fecha de nacimiento" value="${escapeHtml(p.birth_date)}"${off} />` : ''}
-        ${readOnly ? '' : `<button class="onboard-icon-btn onboard-icon-btn-danger" data-remove-player="${i}" type="button" title="Quitar jugador" aria-label="Quitar jugador"${off}>${ICON_TRASH}</button>`}
+        <input type="text" class="onboard-input onboard-input-sm" data-player-name="${i}" placeholder="${this.oc.playerName}" aria-label="${this.oc.playerNameAria}" value="${escapeHtml(p.name)}"${off} />
+        <input type="text" class="onboard-input onboard-input-sm onboard-player-num" data-player-number="${i}" placeholder="${this.oc.numberShort}" aria-label="${this.oc.shirtNumber}" inputmode="numeric" maxlength="2" value="${escapeHtml(p.number)}"${off} />
+        ${showBirth ? `<input type="date" class="onboard-input onboard-input-sm onboard-player-birth" data-player-birth="${i}" aria-label="${this.oc.birthDate}" value="${escapeHtml(p.birth_date)}"${off} />` : ''}
+        ${readOnly ? '' : `<button class="onboard-icon-btn onboard-icon-btn-danger" data-remove-player="${i}" type="button" title="${this.oc.removePlayer}" aria-label="${this.oc.removePlayer}"${off}>${ICON_TRASH}</button>`}
       </div>`;
   }
 
@@ -3092,7 +3025,7 @@ class BiqOnboardApp extends HTMLElement {
     this._editDomFreeze = true;
     try {
       holder.innerHTML = rowsHtml ||
-        '<p class="onboard-card-desc onboard-roster-empty">Sin jugadores todavía — añade el primero con «Añadir jugador».</p>';
+        `<p class="onboard-card-desc onboard-roster-empty">${this.oc.noPlayersYet}</p>`;
     } finally {
       this._editDomFreeze = false;
     }
@@ -3679,11 +3612,11 @@ class BiqOnboardApp extends HTMLElement {
     const sub = this._activeSubscreen();
     if (sub === 'team-edit') {
       const team = this._teams.find((t) => t.id === this._editingTeamId);
-      return { title: 'Mi Club: Equipos', context: team?.name || '', backLabel: 'Volver a Equipos' };
+      return { title: this.oc.myClubTitle(this.oc.navTeams), context: team?.name || '', backLabel: this.oc.backTo(this.oc.navTeams) };
     }
     if (sub === 'member-edit') {
       const member = (this._members || []).find((m) => m.id === this._editingMemberId);
-      return { title: 'Mi Club: Miembros', context: member?.display_name || member?.email || member?.id || '', backLabel: 'Volver a Miembros' };
+      return { title: this.oc.myClubTitle(this.oc.navMembers), context: member?.display_name || member?.email || member?.id || '', backLabel: this.oc.backTo(this.oc.navMembers) };
     }
     const view = this._subRoute === '' ? 'landing'
       : section === 'teams' ? 'teams'
@@ -3691,13 +3624,13 @@ class BiqOnboardApp extends HTMLElement {
       : section === 'profile' ? 'profile'
       : 'club-details';
     const title = {
-      landing: 'Mi Club',
-      'club-details': 'Mi Club: Identidad',
-      teams: 'Mi Club: Equipos',
-      members: 'Mi Club: Miembros',
-      profile: 'Mi Club: Perfil',
+      landing: this.oc.myClub,
+      'club-details': this.oc.myClubTitle(this.oc.navIdentity),
+      teams: this.oc.myClubTitle(this.oc.navTeams),
+      members: this.oc.myClubTitle(this.oc.navMembers),
+      profile: this.oc.myClubTitle(this.oc.navProfile),
     }[view]!;
-    return { title, context: '', backLabel: view === 'landing' ? null : 'Volver a Mi Club' };
+    return { title, context: '', backLabel: view === 'landing' ? null : this.oc.backTo(this.oc.myClub) };
   }
 
   // Section back semantics (addendum §3): editors return to their section
@@ -4235,7 +4168,7 @@ class BiqOnboardApp extends HTMLElement {
       if (!this._bootstrapFailed) {
         if (!this._bootstrapLoading) this.loadBootstrap();
         this._paint(`<style>${styles}</style>
-          <div class="onboard-app onboard-clubstep"><p class="entry-loading">Cargando…</p></div>`);
+          <div class="onboard-app onboard-clubstep"><p class="entry-loading">${this.oc.loading}</p></div>`);
         return;
       }
       // Sin autoridad de contexto no hay selector — la vista legacy sigue.
@@ -4265,7 +4198,7 @@ class BiqOnboardApp extends HTMLElement {
     if (!club) {
       if (this._bootstrapLoading) {
         this._paint(`<style>${styles}</style>
-          <div class="onboard-app onboard-clubstep"><p class="entry-loading">Cargando…</p></div>`);
+          <div class="onboard-app onboard-clubstep"><p class="entry-loading">${this.oc.loading}</p></div>`);
         return;
       }
       if (this._bootstrap && !this._bootstrapFailed) {
@@ -4283,7 +4216,7 @@ class BiqOnboardApp extends HTMLElement {
       if (!this._bootstrapFailed) {
         this.loadBootstrap();
         this._paint(`<style>${styles}</style>
-          <div class="onboard-app onboard-clubstep"><p class="entry-loading">Cargando…</p></div>`);
+          <div class="onboard-app onboard-clubstep"><p class="entry-loading">${this.oc.loading}</p></div>`);
         return;
       }
       // ADDENDUM-07 §6 — paso de club: sin club resuelto este módulo ES el
@@ -4316,11 +4249,11 @@ class BiqOnboardApp extends HTMLElement {
       <div class="onboard-app">
         ${(section === 'club-details' || section === 'teams') && !inSubscreen ? '' : this._renderSectionSubhead(this._subheadSpec(section, canManageMembers))}
         ${inSubscreen ? '' : `<nav class="onboard-nav">
-          <button class="onboard-nav-item ${section === 'club-details' ? 'active' : ''}" data-nav="club-details">Identidad</button>
-          ${this._canManageTeams() ? `<button class="onboard-nav-item ${section === 'teams' ? 'active' : ''}" data-nav="teams">Equipos</button>` : ''}
-          ${canManageMembers ? `<button class="onboard-nav-item ${section === 'members' ? 'active' : ''}" data-nav="members">Miembros</button>` : ''}
-          <button class="onboard-nav-item ${section === 'profile' ? 'active' : ''}" data-nav="profile">Perfil</button>
-          <button class="onboard-nav-item" data-nav="spaces">Espacios</button>
+          <button class="onboard-nav-item ${section === 'club-details' ? 'active' : ''}" data-nav="club-details">${this.oc.navIdentity}</button>
+          ${this._canManageTeams() ? `<button class="onboard-nav-item ${section === 'teams' ? 'active' : ''}" data-nav="teams">${this.oc.navTeams}</button>` : ''}
+          ${canManageMembers ? `<button class="onboard-nav-item ${section === 'members' ? 'active' : ''}" data-nav="members">${this.oc.navMembers}</button>` : ''}
+          <button class="onboard-nav-item ${section === 'profile' ? 'active' : ''}" data-nav="profile">${this.oc.navProfile}</button>
+          <button class="onboard-nav-item" data-nav="spaces">${this.oc.navSpaces}</button>
         </nav>`}
         ${content}
       </div>`);
@@ -4344,7 +4277,7 @@ class BiqOnboardApp extends HTMLElement {
     const job = this._themeJob;
     // B14: themeJob state matrix
     const jobStatus = job?.status || '';
-    const jobCopy = jobStatus ? THEME_JOB_COPY[jobStatus] : null;
+    const jobCopy = jobStatus ? this.oc.themeJob[jobStatus] ?? null : null;
     const isPolling = jobStatus === 'pending' || jobStatus === 'running';
     // F5: Allow retry when the job is in a terminal failed state OR when
     // the staleness timeout has fired (job stuck pending/running without
@@ -4356,17 +4289,17 @@ class BiqOnboardApp extends HTMLElement {
 
     return `
       <section class="onboard-section identity-editor">
-        <h2 class="onboard-section-title">${escapeHtml(club.name || 'Mi club')}</h2>
+        <h2 class="onboard-section-title">${escapeHtml(club.name || this.oc.myClubFallback)}</h2>
 
         ${this._error ? `<div class="onboard-error">${escapeHtml(this._error)}</div>` : ''}
 
         <div class="onboard-card">
-          <h3 class="onboard-card-title">Identidad visual</h3>
-          <p class="onboard-card-desc">Obtén una propuesta desde la web de tu club o elige tus colores. Revísala antes de aplicarla.</p>
+          <h3 class="onboard-card-title">${this.oc.visualIdentity}</h3>
+          <p class="onboard-card-desc">${this.oc.visualIdentityHelp}</p>
           <div class="onboard-form-row">
-            <input type="url" class="onboard-input" data-website-input value="${escapeHtml(website)}" placeholder="https://www.miclub.com" ${this._loading || (isPolling && !this._isStale) ? 'disabled' : ''} />
+            <input type="url" class="onboard-input" data-website-input value="${escapeHtml(website)}" placeholder="${this.oc.websitePlaceholder}" ${this._loading || (isPolling && !this._isStale) ? 'disabled' : ''} />
             <button class="onboard-btn onboard-btn-primary" data-generate-btn ${this._loading || (isPolling && !this._isStale) ? 'disabled' : ''}>
-              ${isPolling && !this._isStale ? 'Procesando…' : this._loading ? 'Generando…' : 'Proponer identidad'}
+              ${isPolling && !this._isStale ? this.oc.processing : this._loading ? this.oc.generating : this.oc.proposeIdentity}
             </button>
           </div>
         </div>
@@ -4376,15 +4309,15 @@ class BiqOnboardApp extends HTMLElement {
             <h3 class="onboard-card-title">${escapeHtml(jobCopy.title)}</h3>
             <p class="onboard-card-desc">${escapeHtml(jobCopy.description)}</p>
             ${jobCopy.action && !isPolling ? `<p class="onboard-card-action">${escapeHtml(jobCopy.action)}</p>` : ''}
-            ${isPolling && !this._isStale ? '<div class="onboard-loading">Procesando…</div>' : ''}
-            ${isPolling && this._isStale ? '<div class="onboard-error">El proceso está tardando demasiado. Puedes reintentar.</div>' : ''}
+            ${isPolling && !this._isStale ? `<div class="onboard-loading">${this.oc.processing}</div>` : ''}
+            ${isPolling && this._isStale ? `<div class="onboard-error">${this.oc.processTooSlow}</div>` : ''}
             ${canRetry ? `<button class="onboard-btn onboard-btn-primary" data-retry-btn ${this._loading ? 'disabled' : ''}>${guidedEntryCopy(this.locale).retry}</button>` : ''}
           </div>
         ` : ''}
 
-        ${this._loading && !theme && !jobCopy ? '<div class="onboard-loading">Cargando…</div>' : ''}
+        ${this._loading && !theme && !jobCopy ? `<div class="onboard-loading">${this.oc.loading}</div>` : ''}
 
-        ${ADMIN_ROLES.includes(this._org?.role || '') ? `${this.renderLogoSection(theme)}${this.renderIdentityEditor(club.id)}${theme ? this.renderActivationToggle(theme, isPolling) : ''}` : '<p class="onboard-card-desc">La identidad del club la gestiona un administrador.</p>'}
+        ${ADMIN_ROLES.includes(this._org?.role || '') ? `${this.renderLogoSection(theme)}${this.renderIdentityEditor(club.id)}${theme ? this.renderActivationToggle(theme, isPolling) : ''}` : `<p class="onboard-card-desc">${this.oc.identityManagedByAdmin}</p>`}
       </section>`;
   }
 
@@ -4400,9 +4333,9 @@ class BiqOnboardApp extends HTMLElement {
       const tint = hex(t?.['--biq-color-brand-tint'], bg);
       const onTint = hex(t?.['--biq-color-on-brand-tint'], fg);
       const logo = mode === 'light' ? this._theme?.logo?.onLight : this._theme?.logo?.onDark || this._theme?.logo?.onLight;
-      return `<div class="identity-preview" style="background:${bg};color:${fg}"><span>${mode === 'light' ? 'Claro' : 'Oscuro'}</span><div class="identity-preview-header" style="background:${header};color:${text}">${logo ? `<img src="${escapeHtml(logo)}" alt="Escudo en vista previa">` : ''}${escapeHtml(this._org?.club?.name || 'Tu club')}</div><p>Planifica la próxima jugada.</p><p class="identity-preview-selection" style="background:${tint};color:${onTint}">Objetivo seleccionado</p><button type="button" tabindex="-1" aria-disabled="true">Añadir</button></div>`;
+      return `<div class="identity-preview" style="background:${bg};color:${fg}"><span>${mode === 'light' ? this.oc.light : this.oc.dark}</span><div class="identity-preview-header" style="background:${header};color:${text}">${logo ? `<img src="${escapeHtml(logo)}" alt="${this.oc.crestPreview}">` : ''}${escapeHtml(this._org?.club?.name || this.oc.yourClubFallback)}</div><p>${this.oc.previewPlan}</p><p class="identity-preview-selection" style="background:${tint};color:${onTint}">${this.oc.previewSelection}</p><button type="button" tabindex="-1" aria-disabled="true">${this.oc.previewAdd}</button></div>`;
     }).join('');
-    return `<div class="onboard-card"><h3 class="onboard-card-title">Colores del club</h3><p class="onboard-card-desc">Elige principal y secundario. El fondo y el texto se adaptan a cada modo; las acciones conservan el naranja de BasketSpark.</p><div class="identity-colours"><label>Principal <input aria-label="Color principal" type="color" data-identity-brand value="${colours.brand}"></label><label>Secundario <input aria-label="Color secundario" type="color" data-identity-alt value="${colours.alt}"></label></div><div class="identity-variants">${[['standard', 'Preparar vista previa'], ['contrast', 'Más contraste'], ['soft', 'Más suave']].map(([id, label]) => `<button class="onboard-btn ${id === 'standard' ? 'onboard-btn-primary' : 'onboard-btn-secondary'}" data-identity-variant="${id}" ${this._loading ? 'disabled' : ''}>${label}</button>`).join('')}</div><p class="onboard-card-desc" role="status">${this._theme?.tokens ? 'Vista previa de la última propuesta calculada. Prepara una nueva vista previa para comprobar tus cambios.' : 'Prepara una propuesta para comprobar los colores antes de aplicar.'}</p><div class="identity-previews">${previews}</div></div>`;
+    return `<div class="onboard-card"><h3 class="onboard-card-title">${this.oc.clubColours}</h3><p class="onboard-card-desc">${this.oc.clubColoursHelp}</p><div class="identity-colours"><label>${this.oc.primary} <input aria-label="${this.oc.primaryColour}" type="color" data-identity-brand value="${colours.brand}"></label><label>${this.oc.secondary} <input aria-label="${this.oc.secondaryColour}" type="color" data-identity-alt value="${colours.alt}"></label></div><div class="identity-variants">${[['standard', this.oc.preparePreview], ['contrast', this.oc.moreContrast], ['soft', this.oc.softer]].map(([id, label]) => `<button class="onboard-btn ${id === 'standard' ? 'onboard-btn-primary' : 'onboard-btn-secondary'}" data-identity-variant="${id}" ${this._loading ? 'disabled' : ''}>${label}</button>`).join('')}</div><p class="onboard-card-desc" role="status">${this._theme?.tokens ? this.oc.previewLatest : this.oc.previewPrepare}</p><div class="identity-previews">${previews}</div></div>`;
   }
 
   private renderActivationToggle(theme: ClubTheme, isPolling: boolean = false): string {
@@ -4410,7 +4343,7 @@ class BiqOnboardApp extends HTMLElement {
     const edited = this._identityColours[this._org?.club?.id || ''];
     const dirty = edited && (edited.brand.toLowerCase() !== theme.seed?.brand?.toLowerCase() || edited.alt.toLowerCase() !== theme.seed?.brandAlt?.toLowerCase());
     const ready = theme.gate?.passed === true && !isPolling && !this._loading && !dirty;
-    return `<div class="onboard-card"><h3 class="onboard-card-title">${active ? 'Identidad aplicada' : 'Tu propuesta'}</h3><p class="onboard-card-desc">${active ? 'Visible para los miembros del club.' : 'Comprueba el escudo y las vistas clara y oscura antes de aplicar. La identidad actual se conserva hasta entonces.'}</p><button class="onboard-btn onboard-btn-primary" data-identity-apply ${!ready || active ? 'disabled' : ''}>Aplicar identidad</button>${active ? `<button class="onboard-btn" data-identity-default ${this._loading || isPolling ? 'disabled' : ''}>Usar identidad BasketSpark</button>` : ''}${this._themeJob?.previousTheme ? `<button class="onboard-btn" data-identity-restore ${this._loading || isPolling ? 'disabled' : ''}>Restaurar identidad anterior</button>` : ''}${dirty ? '<p role="status">Hay cambios de color pendientes de preparar.</p>' : ''}${theme.gate?.passed === false ? '<p role="status">Prepara la vista previa para validar el contraste antes de aplicar.</p>' : ''}</div>`;
+    return `<div class="onboard-card"><h3 class="onboard-card-title">${active ? this.oc.identityApplied : this.oc.yourProposal}</h3><p class="onboard-card-desc">${active ? this.oc.visibleToMembers : this.oc.checkBeforeApply}</p><button class="onboard-btn onboard-btn-primary" data-identity-apply ${!ready || active ? 'disabled' : ''}>${this.oc.applyIdentity}</button>${active ? `<button class="onboard-btn" data-identity-default ${this._loading || isPolling ? 'disabled' : ''}>${this.oc.useDefaultIdentity}</button>` : ''}${this._themeJob?.previousTheme ? `<button class="onboard-btn" data-identity-restore ${this._loading || isPolling ? 'disabled' : ''}>${this.oc.restorePreviousIdentity}</button>` : ''}${dirty ? `<p role="status">${this.oc.pendingColourChanges}</p>` : ''}${theme.gate?.passed === false ? `<p role="status">${this.oc.preparePreviewContrast}</p>` : ''}</div>`;
   }
 
   private renderLogoSection(theme: ClubTheme | null): string {
@@ -4419,29 +4352,29 @@ class BiqOnboardApp extends HTMLElement {
     const awaitingRights = logo && !logo.rightsConfirmedAt;
     return `
       <div class="onboard-card">
-        <h3 class="onboard-card-title">Logo del club</h3>
-        ${logoSrc ? `<img class="onboard-logo-preview" src="${escapeHtml(logoSrc)}" alt="Logo" />` : '<p class="onboard-card-desc">No se encontró logo automáticamente.</p>'}
+        <h3 class="onboard-card-title">${this.oc.clubLogo}</h3>
+        ${logoSrc ? `<img class="onboard-logo-preview" src="${escapeHtml(logoSrc)}" alt="${this.oc.logoAlt}" />` : `<p class="onboard-card-desc">${this.oc.noLogoFound}</p>`}
         <div class="onboard-logo-input-group">
           <input type="url" class="onboard-logo-input" data-logo-url-input placeholder="https://www.club.com/logo.png" />
-          <button class="onboard-btn onboard-btn-primary" data-logo-url-btn ${this._loading ? 'disabled' : ''}>Actualizar logo</button>
+          <button class="onboard-btn onboard-btn-primary" data-logo-url-btn ${this._loading ? 'disabled' : ''}>${this.oc.updateLogo}</button>
         </div>
         <div class="onboard-logo-upload-group">
           <label class="onboard-file-label">
             <input type="file" accept="image/*" data-logo-file-input ${this._loading ? 'disabled' : ''} />
-            <span class="onboard-btn">Subir archivo</span>
+            <span class="onboard-btn">${this.oc.uploadFile}</span>
           </label>
         </div>
         ${logoSrc && awaitingRights ? `
           <div class="onboard-rights">
-            <p class="onboard-rights-text">Para mostrar el logo necesitas confirmar que el club tiene derecho a usarlo.</p>
+            <p class="onboard-rights-text">${this.oc.logoRightsNeeded}</p>
             <label class="onboard-rights-label">
               <input type="checkbox" data-rights-checkbox />
-              <span>Confirmo que el club puede usar este logo</span>
+              <span>${this.oc.logoRightsConfirm}</span>
             </label>
-            <button class="onboard-btn onboard-btn-primary" data-affirm-rights-btn disabled>Confirmar</button>
+            <button class="onboard-btn onboard-btn-primary" data-affirm-rights-btn disabled>${this.oc.confirm}</button>
           </div>
         ` : (logoSrc ? `
-          <p class="onboard-rights-confirmed">Derechos de uso confirmados.</p>
+          <p class="onboard-rights-confirmed">${this.oc.logoRightsConfirmed}</p>
         ` : '')}
       </div>`;
   }
@@ -4461,7 +4394,7 @@ class BiqOnboardApp extends HTMLElement {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ club_id: clubId }),
       });
-      if (!res.ok) throw new Error('No se pudo seleccionar el club');
+      if (!res.ok) throw new Error(this.oc.selectClubFailed);
       // ADDENDUM-07 §6 C2 — persist last-entered club for multi-membership
       // auto-enter on the next login. Best-effort: failure doesn't block.
       try {
@@ -4493,7 +4426,7 @@ class BiqOnboardApp extends HTMLElement {
     const clubId = this._clubForm.joinId.trim();
     // Synchronous validation BEFORE locking — invalid fields stay editable.
     if (!clubId) {
-      this._stepError = { scope: 'join', message: 'Introduce el ID del club.' };
+      this._stepError = { scope: 'join', message: this.oc.enterClubId };
       this.render();
       return;
     }
@@ -4516,7 +4449,7 @@ class BiqOnboardApp extends HTMLElement {
       });
       await this.handleStepResponse(res, 'join', seq);
     } catch (err) {
-      this._recoverSubmission('join', (err as Error).message || 'No se pudo enviar la solicitud', seq);
+      this._recoverSubmission('join', (err as Error).message || this.oc.requestFailed, seq);
     }
   }
 
@@ -4525,7 +4458,7 @@ class BiqOnboardApp extends HTMLElement {
     const name = this._clubForm.createName.trim();
     // Synchronous validation BEFORE locking — invalid fields stay editable.
     if (name.length < 2) {
-      this._stepError = { scope: 'create', message: 'El nombre del club es obligatorio (mínimo 2 caracteres).' };
+      this._stepError = { scope: 'create', message: this.oc.clubNameRequired };
       this.render();
       return;
     }
@@ -4533,7 +4466,7 @@ class BiqOnboardApp extends HTMLElement {
     if (this._clubForm.createWebsite.trim()) {
       const normalised = normaliseWebsiteUrl(this._clubForm.createWebsite);
       if (normalised === null) {
-        this._stepError = { scope: 'create', message: 'La web del club debe usar https://' };
+        this._stepError = { scope: 'create', message: this.oc.clubWebsiteHttps };
         this.render();
         return;
       }
@@ -4565,7 +4498,7 @@ class BiqOnboardApp extends HTMLElement {
         signal: this._clubSubmitAbort?.signal,
       });
     } catch (err) {
-      this._recoverSubmission('create', (err as Error).message || 'No se pudo crear el club', seq);
+      this._recoverSubmission('create', (err as Error).message || this.oc.createClubFailed, seq);
       return;
     }
     if (this._clubSubmitSeq !== seq) return; // stale response guard
@@ -4603,7 +4536,7 @@ class BiqOnboardApp extends HTMLElement {
           }
           this._stepError = {
             scope: 'create',
-            message: 'El club se ha creado, pero no se pudo iniciar sesión automáticamente. Recarga para entrar.',
+            message: this.oc.clubCreatedNoSession,
           };
           this._loading = false;
           this._clubSubmitLocked = false;
@@ -4612,7 +4545,7 @@ class BiqOnboardApp extends HTMLElement {
         } catch {
           this._stepError = {
             scope: 'create',
-            message: 'El club se ha creado, pero no se pudo iniciar sesión automáticamente. Recarga para entrar.',
+            message: this.oc.clubCreatedNoSession,
           };
           this._loading = false;
           this._clubSubmitLocked = false;
@@ -4670,7 +4603,7 @@ class BiqOnboardApp extends HTMLElement {
     }
     const data = await res.json().catch(() => null);
     const message =
-      (data && (data as { detail?: string }).detail) || `Error ${res.status}`;
+      (data && (data as { detail?: string }).detail) || this.oc.httpError(res.status);
     this._recoverSubmission(scope, message, seq);
   }
 
@@ -4750,7 +4683,7 @@ class BiqOnboardApp extends HTMLElement {
                   <div class="entry-field"><label>${entryCopy.teamName}</label>
                     <input type="text" name="name" maxlength="120" required /></div>
                   <div class="entry-field"><label>${entryCopy.category}</label>
-                    <select name="category_key">${PERSONAL_CATEGORIES.map((c) => `<option value="${c.key}">${c.label}</option>`).join('')}</select></div>
+                    <select name="category_key">${PERSONAL_CATEGORIES.map((c) => `<option value="${c.key}">${this.oc.categories[c.key] ?? c.label}</option>`).join('')}</select></div>
                   <div class="entry-field"><label>${entryCopy.gender}</label>
                     <select name="gender"><option value="X">${entryCopy.mixed}</option><option value="F">${entryCopy.female}</option><option value="M">${entryCopy.male}</option></select></div>
                   <button class="onboard-btn onboard-btn-primary" type="submit" ${busy ? 'disabled' : ''}>${entryCopy.createAndEnter}</button>
@@ -4832,7 +4765,7 @@ class BiqOnboardApp extends HTMLElement {
                 !normEntryText((c.name || c.owner_scope.club_id || '')).includes(clubQuery),
             })).join('')}
           </ul>
-          <p class="entry-empty" data-entry-club-picker-empty ${pickerRows.length ? 'hidden' : ''}>No hay clubes que coincidan${clubQuery ? ` con «${escapeHtml(this._clubPickerQuery)}»` : ''}.</p>
+          <p class="entry-empty" data-entry-club-picker-empty ${pickerRows.length ? 'hidden' : ''}>${escapeHtml(this.oc.noClubMatches(clubQuery ? this._clubPickerQuery : ''))}</p>
         </div>
       </div>` : '';
 
@@ -4923,7 +4856,7 @@ class BiqOnboardApp extends HTMLElement {
 
     if (this._guidedEntries !== null && this._entryRecovery?.kind !== 'narrowing' && !this._helpOpen && !this._clubPickerOpen) {
       const nameField=this._guidedNeedsName?`<div class="entry-field"><label>${entryCopy.nickname}</label><input name="nickname" autocomplete="nickname" maxlength="80" required></div>`:'';
-      const coachForm = `<form class="entry-form" data-entry-personal-create>${nameField}<div class="entry-field"><label>${entryCopy.teamName}</label><input name="name" maxlength="120" required></div><div class="entry-field"><label>${entryCopy.category}</label><select name="category_key">${PERSONAL_CATEGORIES.map(c=>`<option value="${c.key}">${c.label}</option>`).join('')}</select></div><div class="entry-field"><label>${entryCopy.gender}</label><select name="gender"><option value="X">${entryCopy.mixed}</option><option value="F">${entryCopy.female}</option><option value="M">${entryCopy.male}</option></select></div><button class="onboard-btn onboard-btn-primary" ${busy?'disabled':''}>${entryCopy.createAndEnterTeam}</button></form>`;
+      const coachForm = `<form class="entry-form" data-entry-personal-create>${nameField}<div class="entry-field"><label>${entryCopy.teamName}</label><input name="name" maxlength="120" required></div><div class="entry-field"><label>${entryCopy.category}</label><select name="category_key">${PERSONAL_CATEGORIES.map(c=>`<option value="${c.key}">${this.oc.categories[c.key] ?? c.label}</option>`).join('')}</select></div><div class="entry-field"><label>${entryCopy.gender}</label><select name="gender"><option value="X">${entryCopy.mixed}</option><option value="F">${entryCopy.female}</option><option value="M">${entryCopy.male}</option></select></div><button class="onboard-btn onboard-btn-primary" ${busy?'disabled':''}>${entryCopy.createAndEnterTeam}</button></form>`;
       const directorForm = `<form class="entry-form" data-entry-club-create>${nameField}<div class="entry-field"><label>${entryCopy.clubName}</label><input name="name" maxlength="200" required></div><button class="onboard-btn onboard-btn-primary" ${busy?'disabled':''}>${entryCopy.createAndEnterClub}</button></form>`;
       const invitationError = this._guidedInvitationsFailed
         ? `<p class="entry-error" role="alert">${entryCopy.invitesFailed} <button class="onboard-btn" type="button" data-guided-retry-invitations>${guidedEntryCopy(this.locale).retry}</button></p>`
@@ -5006,7 +4939,7 @@ class BiqOnboardApp extends HTMLElement {
     const empty = this.shadow.querySelector('[data-entry-club-picker-empty]') as HTMLElement | null;
     if (empty) {
       empty.hidden = rows > 0;
-      empty.textContent = `No hay clubes que coincidan${needle ? ` con «${query.trim()}»` : ''}.`;
+      empty.textContent = this.oc.noClubMatches(needle ? query.trim() : '');
     }
   }
 
@@ -5022,7 +4955,7 @@ class BiqOnboardApp extends HTMLElement {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ token: this._inviteToken }),
       });
-      if (!res.ok) throw new Error('Invitación no válida o caducada');
+      if (!res.ok) throw new Error(this.oc.invalidInvitation);
       this._invitePreview = await res.json();
     } catch (err) {
       this._entryError = (err as Error).message;
@@ -5078,7 +5011,7 @@ class BiqOnboardApp extends HTMLElement {
     if (!this.isConnected) return; // la carcasa ya desmontó el módulo
     // A failed logout must not release an in-flight intent's busy hold.
     if (!this._entryIntent) this._entryBusy = false;
-    this._entryError = 'No se pudo cerrar la sesión. Reintenta o recarga la página.';
+    this._entryError = this.oc.signOutFailed;
     this.render();
   }
 
@@ -5102,7 +5035,7 @@ class BiqOnboardApp extends HTMLElement {
     this._runEntryIntent(intent, async () => {
       const res = await this._entryMutation('/api/context/v1/invitations/redeem', reference);
       if (!res.ok) {
-        throw new Error('No se pudo aceptar la invitación. Comprueba que siga vigente y que hayas entrado con el correo invitado.');
+        throw new Error(this.oc.acceptInvitationFailed);
       }
       const data = await res.json();
       intent.mutated = true;
@@ -5318,7 +5251,7 @@ class BiqOnboardApp extends HTMLElement {
         });
         if (!res.ok) {
           const body = await res.json().catch(() => null);
-          throw new Error(body?.detail || `No se pudo crear el club (${res.status})`);
+          throw new Error(body?.detail || this.oc.createClubFailedStatus(res.status));
         }
         const data = await res.json().catch(() => null);
         intent.mutated = true;
@@ -5362,7 +5295,7 @@ class BiqOnboardApp extends HTMLElement {
           <div class="entry-field"><label>${entryCopy.teamName}</label>
             <input type="text" name="name" maxlength="120" required value="${escapeHtml(t.name)}" /></div>
           <div class="entry-field"><label>${entryCopy.category}</label>
-            <select name="category_key">${PERSONAL_CATEGORIES.map((c) => `<option value="${c.key}"${c.key === t.category_key ? ' selected' : ''}>${c.label}</option>`).join('')}</select></div>
+            <select name="category_key">${PERSONAL_CATEGORIES.map((c) => `<option value="${c.key}"${c.key === t.category_key ? ' selected' : ''}>${this.oc.categories[c.key] ?? c.label}</option>`).join('')}</select></div>
           <div class="entry-field"><label>${entryCopy.gender}</label>
             <select name="gender">${['X', 'F', 'M'].map((g) => `<option value="${g}"${g === t.gender ? ' selected' : ''}>${g === 'X' ? entryCopy.mixed : g === 'F' ? entryCopy.female : entryCopy.male}</option>`).join('')}</select></div>
           <button class="onboard-btn onboard-btn-primary" type="submit" ${this._entryBusy ? 'disabled' : ''}>${guidedEntryCopy(this.locale).save}</button>
@@ -5401,7 +5334,7 @@ class BiqOnboardApp extends HTMLElement {
           <div class="entry-field"><label>${entryCopy.teamName}</label>
             <input type="text" name="name" maxlength="120" required /></div>
           <div class="entry-field"><label>${entryCopy.category}</label>
-            <select name="category_key">${PERSONAL_CATEGORIES.map((c) => `<option value="${c.key}">${c.label}</option>`).join('')}</select></div>
+            <select name="category_key">${PERSONAL_CATEGORIES.map((c) => `<option value="${c.key}">${this.oc.categories[c.key] ?? c.label}</option>`).join('')}</select></div>
           <div class="entry-field"><label>${entryCopy.gender}</label>
             <select name="gender"><option value="X">${entryCopy.mixed}</option><option value="F">${entryCopy.female}</option><option value="M">${entryCopy.male}</option></select></div>
           <button class="onboard-btn onboard-btn-primary" type="submit" ${this._entryBusy ? 'disabled' : ''}>${entryCopy.createTeam}</button>
@@ -5574,7 +5507,7 @@ class BiqOnboardApp extends HTMLElement {
     const orgCtx = this._org;
     const memberships = orgCtx?.memberships || [];
     const err = this._stepError;
-    const tabs = clubTabsForMembershipState(memberships);
+    const tabs = clubTabsForMembershipState(memberships, this.oc);
     const activeTab = tabs.some((tab) => tab.id === this._activeClubTab)
       ? this._activeClubTab
       : defaultClubTab(memberships);
@@ -5589,44 +5522,44 @@ class BiqOnboardApp extends HTMLElement {
       const selected = tab.id === activeTab;
       if (tab.id === 'memberships') {
         return `<section id="club-panel-memberships" role="tabpanel" aria-labelledby="club-tab-memberships" ${selected ? '' : 'hidden'}>
-          <p class="onboard-card-desc">Perteneces a varios clubs. Elige con cuál quieres entrar.</p>
-          <div class="onboard-picker" role="listbox" aria-label="Elige tu club">
+          <p class="onboard-card-desc">${this.oc.severalClubs}</p>
+          <div class="onboard-picker" role="listbox" aria-label="${this.oc.chooseYourClub}">
             ${memberships.map((m) => `<button class="onboard-club-row" data-pick-club="${escapeHtml(m.club_id)}" role="option" ${locked ? 'disabled' : ''}>
               <span class="onboard-club-name">${escapeHtml(m.club_name || m.club_id)}</span>
-              <span class="onboard-club-role">${escapeHtml(ROLE_LABELS[m.role] || m.role)}</span>
+              <span class="onboard-club-role">${escapeHtml(this.oc.roles[m.role] || m.role)}</span>
             </button>`).join('')}
           </div>
         </section>`;
       }
       if (tab.id === 'join') {
         return `<section id="club-panel-join" role="tabpanel" aria-labelledby="club-tab-join" aria-busy="${selected && this._loading ? 'true' : 'false'}" ${selected ? '' : 'hidden'}>
-          <p class="onboard-card-desc">Si tu club ya usa BasketIQ, pide a un administrador el ID del club.</p>
+          <p class="onboard-card-desc">${this.oc.joinHelp}</p>
           <div class="onboard-form-row">
-            <input type="text" class="onboard-input" data-join-id placeholder="ID del club" aria-label="ID del club" value="${escapeHtml(this._clubForm.joinId)}" ${locked ? 'disabled' : ''} />
-            <button class="onboard-btn onboard-btn-primary" data-join-btn ${locked ? 'disabled' : ''}>${this._loading && selected ? '<span class="onboard-spinner" aria-hidden="true"></span> Enviando solicitud…' : 'Solicitar acceso'}</button>
+            <input type="text" class="onboard-input" data-join-id placeholder="${this.oc.clubId}" aria-label="${this.oc.clubId}" value="${escapeHtml(this._clubForm.joinId)}" ${locked ? 'disabled' : ''} />
+            <button class="onboard-btn onboard-btn-primary" data-join-btn ${locked ? 'disabled' : ''}>${this._loading && selected ? `<span class="onboard-spinner" aria-hidden="true"></span> ${this.oc.sendingRequest}` : this.oc.requestAccess}</button>
           </div>
           ${err?.scope === 'join' ? `<div class="onboard-error" role="alert" tabindex="-1">${escapeHtml(err.message)}</div>` : ''}
           ${this._stepMessage ? `<div class="onboard-success" aria-live="polite">${escapeHtml(this._stepMessage)}</div>` : ''}
         </section>`;
       }
       return `<section id="club-panel-create" role="tabpanel" aria-labelledby="club-tab-create" aria-busy="${selected && this._loading ? 'true' : 'false'}" ${selected ? '' : 'hidden'}>
-        <p class="onboard-card-desc">Crea la organización de tu club. Serás su administrador; podremos tomar el escudo y los colores de su web para personalizar la app.</p>
-        <label class="onboard-field-label" for="create-name">Nombre del club</label>
-        <input type="text" id="create-name" class="onboard-input onboard-input-block" data-create-name placeholder="Club Baloncesto…" value="${escapeHtml(this._clubForm.createName)}" ${locked ? 'disabled' : ''} />
-        <label class="onboard-field-label" for="create-web">Web del club (opcional)</label>
+        <p class="onboard-card-desc">${this.oc.createHelp}</p>
+        <label class="onboard-field-label" for="create-name">${this.oc.clubName}</label>
+        <input type="text" id="create-name" class="onboard-input onboard-input-block" data-create-name placeholder="${this.oc.clubNamePlaceholder}" value="${escapeHtml(this._clubForm.createName)}" ${locked ? 'disabled' : ''} />
+        <label class="onboard-field-label" for="create-web">${this.oc.clubWebsiteOptional}</label>
         <input type="url" id="create-web" class="onboard-input onboard-input-block" data-create-website placeholder="mi-club.es" value="${escapeHtml(this._clubForm.createWebsite)}" ${locked ? 'disabled' : ''} />
-        <button class="onboard-btn onboard-btn-primary" data-create-btn ${locked ? 'disabled' : ''}>${this._loading && selected ? '<span class="onboard-spinner" aria-hidden="true"></span> Creando el club…' : 'Crear club'}</button>
+        <button class="onboard-btn onboard-btn-primary" data-create-btn ${locked ? 'disabled' : ''}>${this._loading && selected ? `<span class="onboard-spinner" aria-hidden="true"></span> ${this.oc.creatingClub}` : this.oc.createClub}</button>
         ${err?.scope === 'create' ? `<div class="onboard-error" role="alert" tabindex="-1">${escapeHtml(err.message)}</div>` : ''}
       </section>`;
     }).join('');
 
     return `<header class="onboard-step-head">
-      <h2 class="onboard-section-title">Tu club</h2>
-      <p class="onboard-card-desc">Elige una opción para empezar a usar BasketIQ.</p>
+      <h2 class="onboard-section-title">${this.oc.yourClub}</h2>
+      <p class="onboard-card-desc">${this.oc.chooseOption}</p>
       ${this._error ? `<div class="onboard-error" role="alert">${escapeHtml(this._error)}</div>` : ''}
     </header>
-    ${this._loading ? '<div class="onboard-loading" role="status" aria-live="polite"><span class="onboard-spinner" aria-hidden="true"></span> Procesando…</div>' : ''}
-    <div class="onboard-tabs" role="tablist" aria-label="Opciones de club">${tabButtons}</div>
+    ${this._loading ? `<div class="onboard-loading" role="status" aria-live="polite"><span class="onboard-spinner" aria-hidden="true"></span> ${this.oc.processing}</div>` : ''}
+    <div class="onboard-tabs" role="tablist" aria-label="${this.oc.clubOptions}">${tabButtons}</div>
     <div class="onboard-tab-panels">${panels}</div>`;
   }
 
@@ -5733,7 +5666,7 @@ class BiqOnboardApp extends HTMLElement {
         ? this._renderTeamEditLoading()
         : this._renderTeamEditScreen(this._editModel);
     }
-    if (!canManage) return '<p>Sin acceso a la administración de equipos.</p>';
+    if (!canManage) return `<p>${this.oc.noTeamsAccess}</p>`;
 
     // Team-seeding job states — pending shows "generating", failed (or a
     // stale pending) shows an explicit error + Reintentar. The category
@@ -5742,21 +5675,21 @@ class BiqOnboardApp extends HTMLElement {
     if (canManage) {
       const seeding = this._teamSeedingJob;
       if (seeding?.status === 'pending' && !this._seedingStale) {
-        seedingBanner = '<div class="onboard-loading" role="status" aria-live="polite"><span class="onboard-spinner" aria-hidden="true"></span> Generando el catálogo de equipos del club… Esto puede tardar unos segundos.</div>';
+        seedingBanner = `<div class="onboard-loading" role="status" aria-live="polite"><span class="onboard-spinner" aria-hidden="true"></span> ${this.oc.seedingTeams}</div>`;
       } else if (seeding?.status === 'failed' || (seeding?.status === 'pending' && this._seedingStale)) {
         const reason = seeding.reason ? `<p class="onboard-card-desc">${escapeHtml(seeding.reason)}</p>` : '';
-        const staleNote = this._seedingStale ? '<p class="onboard-card-desc">El proceso está tardando demasiado.</p>' : '';
+        const staleNote = this._seedingStale ? `<p class="onboard-card-desc">${this.oc.processSlow}</p>` : '';
         seedingBanner = `<div class="onboard-card">
-        <p class="onboard-error" role="alert">No se pudieron generar los equipos automáticamente.</p>
+        <p class="onboard-error" role="alert">${this.oc.seedingFailed}</p>
         ${reason}${staleNote}
-        <p class="onboard-card-desc">Puedes reintentar la generación o añadir equipos manualmente desde cada categoría.</p>
-        <button class="onboard-btn onboard-btn-primary" data-reseed-teams ${this._seedingLoading ? 'disabled' : ''}>${this._seedingLoading ? 'Generando…' : 'Reintentar'}</button>
+        <p class="onboard-card-desc">${this.oc.seedingRetryHelp}</p>
+        <button class="onboard-btn onboard-btn-primary" data-reseed-teams ${this._seedingLoading ? 'disabled' : ''}>${this._seedingLoading ? this.oc.generating : this.oc.retry}</button>
       </div>`;
       }
     }
 
     if (canManage && this._teamsLoading && !this._teams.length) {
-      return `<div class="onboard-loading" role="status" aria-live="polite"><span class="onboard-spinner" aria-hidden="true"></span> Cargando equipos…</div>`;
+      return `<div class="onboard-loading" role="status" aria-live="polite"><span class="onboard-spinner" aria-hidden="true"></span> ${this.oc.loadingTeams}</div>`;
     }
     if (canManage && this._teamsError && !this._deleteConfirmTeamId && !this._teams.length) {
       return `<div class="onboard-error" role="alert">${escapeHtml(this._teamsError)}</div>`;
@@ -5797,30 +5730,30 @@ class BiqOnboardApp extends HTMLElement {
       if (ib === -1) return -1;
       return ia - ib;
     }).map((cat) => {
-      const catLabel = CATEGORY_LABELS[cat] || cat;
+      const catLabel = this.oc.categories[cat] || cat;
       const teams = groups.get(cat) || [];
       const rows = teams.map((t) => {
         // Gender shows the stored single-letter code (M/F/X) — no Fem/Masc/Mix
         // mapping, so the badge stays one character wide on narrow screens.
         const genderBadge = t.gender ? `<span class="onboard-badge">${escapeHtml(t.gender)}</span>` : '';
-        const archivedBadge = t.archived ? '<span class="onboard-badge onboard-badge-muted">Archivado</span>' : '';
+        const archivedBadge = t.archived ? `<span class="onboard-badge onboard-badge-muted">${this.oc.archived}</span>` : '';
         const level = t.competitive_level
-          ? (COMPETITIVE_LEVEL_LABELS[t.competitive_level] || t.competitive_level)
-          : (canManage ? 'Sin definir' : '');
+          ? (this.oc.levels[t.competitive_level] || t.competitive_level)
+          : (canManage ? this.oc.undefinedLevel : '');
         let actions = '';
         if (canManage) {
           const actionBtns = [
-            `<button class="onboard-icon-btn" data-edit-team="${escapeHtml(t.id)}" title="Editar equipo" aria-label="Editar equipo">${ICON_EDIT}</button>`,
-            `<button class="onboard-icon-btn" data-edit-roster="${escapeHtml(t.id)}" title="Plantilla" aria-label="Editar plantilla">${ICON_USERS}</button>`,
+            `<button class="onboard-icon-btn" data-edit-team="${escapeHtml(t.id)}" title="${this.oc.editTeam}" aria-label="${this.oc.editTeam}">${ICON_EDIT}</button>`,
+            `<button class="onboard-icon-btn" data-edit-roster="${escapeHtml(t.id)}" title="${this.oc.roster}" aria-label="${this.oc.editRoster}">${ICON_USERS}</button>`,
           ];
           if (t.archived) {
             // Archived teams: show restore + delete (physical)
-            actionBtns.push(`<button class="onboard-icon-btn" data-unarchive-team="${escapeHtml(t.id)}" title="Restaurar" aria-label="Restaurar">${ICON_RESTORE}</button>`);
-            actionBtns.push(`<button class="onboard-icon-btn onboard-icon-btn-danger" data-delete-team="${escapeHtml(t.id)}" title="Eliminar" aria-label="Eliminar">${ICON_TRASH}</button>`);
+            actionBtns.push(`<button class="onboard-icon-btn" data-unarchive-team="${escapeHtml(t.id)}" title="${this.oc.restore}" aria-label="${this.oc.restore}">${ICON_RESTORE}</button>`);
+            actionBtns.push(`<button class="onboard-icon-btn onboard-icon-btn-danger" data-delete-team="${escapeHtml(t.id)}" title="${this.oc.delete}" aria-label="${this.oc.delete}">${ICON_TRASH}</button>`);
           } else {
             // Active teams: archive (logical) + delete (physical)
-            actionBtns.push(`<button class="onboard-icon-btn" data-archive-team="${escapeHtml(t.id)}" title="Archivar" aria-label="Archivar">${ICON_ARCHIVE}</button>`);
-            actionBtns.push(`<button class="onboard-icon-btn onboard-icon-btn-danger" data-delete-team="${escapeHtml(t.id)}" title="Eliminar" aria-label="Eliminar">${ICON_TRASH}</button>`);
+            actionBtns.push(`<button class="onboard-icon-btn" data-archive-team="${escapeHtml(t.id)}" title="${this.oc.archive}" aria-label="${this.oc.archive}">${ICON_ARCHIVE}</button>`);
+            actionBtns.push(`<button class="onboard-icon-btn onboard-icon-btn-danger" data-delete-team="${escapeHtml(t.id)}" title="${this.oc.delete}" aria-label="${this.oc.delete}">${ICON_TRASH}</button>`);
           }
           actions = `<div class="onboard-team-actions">${actionBtns.join('')}</div>`;
         }
@@ -5841,7 +5774,7 @@ class BiqOnboardApp extends HTMLElement {
       // Category-level add row (when _addingTeamCategory === cat)
       const addRow = canManage && this._addingTeamCategory === cat ? `<div class="onboard-team-row" data-adding-row="true">
         <div class="onboard-team-row-main">
-          <input type="text" class="onboard-input onboard-input-sm" data-new-team-name placeholder="Nombre del equipo" />
+          <input type="text" class="onboard-input onboard-input-sm" data-new-team-name placeholder="${this.oc.teamName}" />
         </div>
         <div class="onboard-team-row-meta">
           <select class="onboard-input onboard-input-sm" data-new-team-gender>
@@ -5849,10 +5782,10 @@ class BiqOnboardApp extends HTMLElement {
             <option value="F">F</option>
             <option value="X">X</option>
           </select>
-          <select class="onboard-input onboard-input-sm" data-new-team-level aria-label="Nivel de competición">${competitiveLevelOptionsHtml('')}</select>
+          <select class="onboard-input onboard-input-sm" data-new-team-level aria-label="${this.oc.competitionLevel}">${competitiveLevelOptionsHtml('', this.oc)}</select>
           <div class="onboard-team-actions">
-            <button class="onboard-icon-btn" data-confirm-add-team="${escapeHtml(cat)}" title="Confirmar" aria-label="Confirmar">${ICON_CHECK}</button>
-            <button class="onboard-icon-btn" data-cancel-add-team title="Cancelar" aria-label="Cancelar">${ICON_CANCEL}</button>
+            <button class="onboard-icon-btn" data-confirm-add-team="${escapeHtml(cat)}" title="${this.oc.confirm}" aria-label="${this.oc.confirm}">${ICON_CHECK}</button>
+            <button class="onboard-icon-btn" data-cancel-add-team title="${this.oc.cancel}" aria-label="${this.oc.cancel}">${ICON_CANCEL}</button>
           </div>
         </div>
       </div>` : '';
@@ -5863,16 +5796,16 @@ class BiqOnboardApp extends HTMLElement {
         return `<div class="onboard-card">
           <div class="onboard-team-header">
             <h3 class="onboard-card-title">${escapeHtml(catLabel)}</h3>
-            ${canManage ? `<button class="onboard-icon-btn" data-add-team-category="${escapeHtml(cat)}" title="Añadir equipo" aria-label="Añadir equipo a ${escapeHtml(catLabel)}">${ICON_PLUS}</button>` : ''}
+            ${canManage ? `<button class="onboard-icon-btn" data-add-team-category="${escapeHtml(cat)}" title="${this.oc.addTeam}" aria-label="${escapeHtml(this.oc.addTeamTo(catLabel))}">${ICON_PLUS}</button>` : ''}
           </div>
         </div>`;
       }
       return `<div class="onboard-card">
         <div class="onboard-team-header">
           <h3 class="onboard-card-title">${escapeHtml(catLabel)}</h3>
-          ${canManage ? `<button class="onboard-icon-btn" data-add-team-category="${escapeHtml(cat)}" title="Añadir equipo" aria-label="Añadir equipo a ${escapeHtml(catLabel)}">${ICON_PLUS}</button>` : ''}
+          ${canManage ? `<button class="onboard-icon-btn" data-add-team-category="${escapeHtml(cat)}" title="${this.oc.addTeam}" aria-label="${escapeHtml(this.oc.addTeamTo(catLabel))}">${ICON_PLUS}</button>` : ''}
         </div>
-        <div class="onboard-team-list" role="table" aria-label="Equipos">
+        <div class="onboard-team-list" role="table" aria-label="${this.oc.teams}">
           ${rows}${addRow}
         </div>
       </div>`;
@@ -5884,9 +5817,9 @@ class BiqOnboardApp extends HTMLElement {
       const teamName = team ? team.name : this._deleteConfirmTeamId;
       return `<div class="onboard-modal-overlay" role="dialog" aria-modal="true" aria-labelledby="delete-modal-title">
         <div class="onboard-modal">
-          <h3 id="delete-modal-title">Confirmar eliminación</h3>
-          <p>¿Seguro que quieres eliminar definitivamente el equipo <strong>${escapeHtml(teamName)}</strong>?</p>
-          <p class="onboard-card-desc">Esta acción no se puede deshacer.</p>
+          <h3 id="delete-modal-title">${this.oc.confirmDeletion}</h3>
+          <p>${this.oc.confirmDeleteTeam} <strong>${escapeHtml(teamName)}</strong>?</p>
+          <p class="onboard-card-desc">${this.oc.cannotUndo}</p>
           <div class="onboard-team-actions">
             <button class="onboard-btn onboard-btn-danger" data-confirm-delete-team="${escapeHtml(this._deleteConfirmTeamId)}">${guidedEntryCopy(this.locale).delete}</button>
             <button class="onboard-btn onboard-btn-secondary" data-cancel-delete>${guidedEntryCopy(this.locale).cancel}</button>
@@ -5897,21 +5830,21 @@ class BiqOnboardApp extends HTMLElement {
 
     return `<section class="onboard-section">
       <div class="onboard-form-row onboard-clubteams-head">
-        <h3 class="onboard-card-title">Equipos del club</h3>
+        <h3 class="onboard-card-title">${this.oc.clubTeams}</h3>
         ${canManage ? `<label class="onboard-filter-label">
-          Ver:
+          ${this.oc.view}
           <select class="onboard-input onboard-input-sm" data-teams-filter>
-            <option value="active" ${this._teamsFilter === 'active' ? 'selected' : ''}>Activos</option>
-            <option value="all" ${this._teamsFilter === 'all' ? 'selected' : ''}>Todos</option>
+            <option value="active" ${this._teamsFilter === 'active' ? 'selected' : ''}>${this.oc.activeFilter}</option>
+            <option value="all" ${this._teamsFilter === 'all' ? 'selected' : ''}>${this.oc.allFilter}</option>
           </select>
         </label>` : ''}
       </div>
       ${seedingBanner}
       ${this._teamsError ? `<div class="onboard-error" role="alert">${escapeHtml(this._teamsError)}</div>` : ''}
-      ${sections || '<p class="onboard-card-desc">No hay equipos.</p>'}
+      ${sections || `<p class="onboard-card-desc">${this.oc.noTeams}</p>`}
       ${canManage && this._pendingCatalogClub === this._org?.club?.id && this._teams.length && !this._teamsError && !this._teamsLoading && !seedingBanner && this._confirmedCatalogClub !== this._org?.club?.id
-        ? '<button class="onboard-btn onboard-btn-primary" data-confirm-team-catalog>Confirmar equipos</button>' : ''}
-      ${this._catalogConfirmationError && this._catalogConfirmationError === this._org?.club?.id ? '<p role="alert">No se ha podido confirmar el catálogo. Vuelve a pulsar Confirmar equipos.</p>' : ''}
+        ? `<button class="onboard-btn onboard-btn-primary" data-confirm-team-catalog>${this.oc.confirmTeams}</button>` : ''}
+      ${this._catalogConfirmationError && this._catalogConfirmationError === this._org?.club?.id ? `<p role="alert">${this.oc.confirmCatalogFailed}</p>` : ''}
       ${deleteModal}
     </section>`;
   }
@@ -5926,7 +5859,7 @@ class BiqOnboardApp extends HTMLElement {
   private _renderTeamEditLoading(): string {
     return `<section class="onboard-section onboard-subscreen">
       <div class="onboard-subscreen-card">
-        <p class="entry-loading">Cargando equipo…</p>
+        <p class="entry-loading">${this.oc.loadingTeam}</p>
       </div>
     </section>`;
   }
@@ -5948,25 +5881,25 @@ class BiqOnboardApp extends HTMLElement {
       .join('');
     return `<section class="onboard-section onboard-subscreen" data-edit-modal aria-labelledby="edit-team-title">
       <div class="onboard-subscreen-card">
-        <h3 class="onboard-card-title" id="edit-team-title">${readOnly ? 'Equipo (solo lectura)' : 'Editar equipo'}</h3>
-        ${readOnly ? '<p class="onboard-card-desc" data-edit-readonly-note>Este equipo está fuera de tu selección activa — solo lectura.</p>' : ''}
+        <h3 class="onboard-card-title" id="edit-team-title">${readOnly ? this.oc.teamReadOnly : this.oc.editTeam}</h3>
+        ${readOnly ? `<p class="onboard-card-desc" data-edit-readonly-note>${this.oc.teamReadOnlyNote}</p>` : ''}
         ${model.category !== undefined ? `
-        <label class="onboard-field-label" for="edit-team-category">Categoría</label>
-        <select id="edit-team-category" class="onboard-input" data-edit-team-category${off}>${categoryOptionsHtml(this._editCategoryDraft)}</select>` : ''}
-        <label class="onboard-field-label" for="edit-team-name">Nombre del equipo</label>
+        <label class="onboard-field-label" for="edit-team-category">${this.oc.category}</label>
+        <select id="edit-team-category" class="onboard-input" data-edit-team-category${off}>${categoryOptionsHtml(this._editCategoryDraft, this.oc)}</select>` : ''}
+        <label class="onboard-field-label" for="edit-team-name">${this.oc.teamName}</label>
         <input id="edit-team-name" type="text" class="onboard-input" data-edit-team-name value="${escapeHtml(this._editNameDraft)}"${off} />
         ${model.gender !== undefined ? `
-        <label class="onboard-field-label" for="edit-team-gender">Género</label>
-        <select id="edit-team-gender" class="onboard-input" data-edit-team-gender${off}>${genderOptionsHtml(this._editGenderDraft)}</select>` : ''}
-        <label class="onboard-field-label" for="edit-team-level">Nivel de competición</label>
-        <select id="edit-team-level" class="onboard-input" data-edit-team-level${off}>${competitiveLevelOptionsHtml(this._editLevelDraft)}</select>
+        <label class="onboard-field-label" for="edit-team-gender">${this.oc.gender}</label>
+        <select id="edit-team-gender" class="onboard-input" data-edit-team-gender${off}>${genderOptionsHtml(this._editGenderDraft, this.oc)}</select>` : ''}
+        <label class="onboard-field-label" for="edit-team-level">${this.oc.competitionLevel}</label>
+        <select id="edit-team-level" class="onboard-input" data-edit-team-level${off}>${competitiveLevelOptionsHtml(this._editLevelDraft, this.oc)}</select>
         <div class="onboard-roster">
           <div class="onboard-roster-head">
-            <h4 class="onboard-roster-title">Plantilla</h4>
-            ${readOnly ? '' : `<button class="onboard-linkbtn" data-add-player type="button"${off}>+ Añadir jugador</button>`}
+            <h4 class="onboard-roster-title">${this.oc.roster}</h4>
+            ${readOnly ? '' : `<button class="onboard-linkbtn" data-add-player type="button"${off}>${this.oc.addPlayer}</button>`}
           </div>
           <div class="onboard-roster-rows" data-edit-roster-rows>
-            ${rosterRows || '<p class="onboard-card-desc onboard-roster-empty">Sin jugadores todavía — añade el primero con «Añadir jugador».</p>'}
+            ${rosterRows || `<p class="onboard-card-desc onboard-roster-empty">${this.oc.noPlayersYet}</p>`}
           </div>
           ${!readOnly && isClub && this._addPlayerPickerOpen ? this._addPlayerPickerHtml() : ''}
         </div>
@@ -5974,12 +5907,12 @@ class BiqOnboardApp extends HTMLElement {
         ${readOnly ? '' : `<div class="onboard-save-state">
           <span class="onboard-save-chip is-${this._editSaveStatus}" data-edit-save-status role="status" aria-live="polite" tabindex="-1"${this._editSaveStatus === 'idle' ? ' hidden' : ''}>${this._editSaveStatusLabel()}</span>
           <span class="onboard-save-detail" data-edit-save-detail role="alert"${this._editSaveMessage ? '' : ' hidden'}>${escapeHtml(this._editSaveMessage || '')}</span>
-          <button class="onboard-btn onboard-btn-sm" data-edit-retry type="button"${this._editSaveStatus === 'error' || (this._editSaveStatus === 'conflict' && !this._editConflictServer) ? '' : ' hidden'}>Reintentar</button>
-          <button class="onboard-btn onboard-btn-sm" data-edit-keep-mine type="button"${this._editSaveStatus === 'conflict' && this._editConflictServer ? '' : ' hidden'}>Mantener mis cambios</button>
-          <button class="onboard-btn onboard-btn-sm onboard-btn-quiet" data-edit-load-server type="button"${this._editSaveStatus === 'conflict' && this._editConflictServer ? '' : ' hidden'}>Cargar versión actual</button>
+          <button class="onboard-btn onboard-btn-sm" data-edit-retry type="button"${this._editSaveStatus === 'error' || (this._editSaveStatus === 'conflict' && !this._editConflictServer) ? '' : ' hidden'}>${this.oc.retry}</button>
+          <button class="onboard-btn onboard-btn-sm" data-edit-keep-mine type="button"${this._editSaveStatus === 'conflict' && this._editConflictServer ? '' : ' hidden'}>${this.oc.keepMine}</button>
+          <button class="onboard-btn onboard-btn-sm onboard-btn-quiet" data-edit-load-server type="button"${this._editSaveStatus === 'conflict' && this._editConflictServer ? '' : ' hidden'}>${this.oc.loadCurrent}</button>
         </div>`}
         <div class="onboard-team-actions">
-          <button class="onboard-btn onboard-btn-secondary" data-cancel-edit type="button">Volver</button>
+          <button class="onboard-btn onboard-btn-secondary" data-cancel-edit type="button">${this.oc.back}</button>
         </div>
       </div>
     </section>`;
@@ -6037,47 +5970,42 @@ class BiqOnboardApp extends HTMLElement {
           <button class="onboard-linkbtn onboard-linkable" data-link-player="${escapeHtml(c.player_id)}" type="button">
             ${escapeHtml(c.name)}${c.number !== null ? ` · Nº ${c.number}` : ''} — ${escapeHtml(c.teamName)}${c.birth_date ? ` · ${escapeHtml(c.birth_date)}` : ''}
           </button>`).join('')}</div>`
-      : '<p class="onboard-card-desc">No hay más jugadoras en las plantillas del club.</p>';
+      : `<p class="onboard-card-desc">${this.oc.noMorePlayers}</p>`;
     return `<div class="onboard-addplayer" data-add-player-picker>
-      <p class="onboard-card-desc">¿Ya figura en otra plantilla del club? Vincúlala para conservar su identidad de scouting.</p>
+      <p class="onboard-card-desc">${this.oc.linkExistingHelp}</p>
       ${list}
       <div class="onboard-team-actions">
-        <button class="onboard-btn onboard-btn-sm" data-add-new-player type="button">Nueva jugadora</button>
+        <button class="onboard-btn onboard-btn-sm" data-add-new-player type="button">${this.oc.newPlayer}</button>
         <button class="onboard-btn onboard-btn-sm onboard-btn-quiet" data-cancel-link type="button">${guidedEntryCopy(this.locale).cancel}</button>
       </div>
     </div>`;
   }
 
   private renderProfile(): string {
-    const user = this._user || 'Usuario';
+    const user = this._user || this.oc.userFallback;
     const club = this._org?.club;
     const role = this._org?.role || 'coach';
-    const roleLabels: Record<string, string> = {
-      sports_director: 'Director deportivo',
-      coach: 'Entrenador',
-      administrator: 'Director deportivo',
-      super_administrator: 'Super administrador',
-    };
+    const roleLabels = this.oc.roles;
 
     // Phase 3: club summary card — real reads from the summary endpoint.
     // Presence is tri-state: Sí / No / Desconocido (upstream unreachable).
     const presence = (v: boolean | null | undefined) =>
-      v === true ? 'Sí' : v === false ? 'No' : 'Desconocido';
+      v === true ? this.oc.yes : v === false ? this.oc.no : this.oc.unknown;
     const s = this._clubSummary;
     let summaryCard: string;
     if (this._clubSummaryLoading && !s) {
-      summaryCard = '<div class="onboard-loading" role="status" aria-live="polite"><span class="onboard-spinner" aria-hidden="true"></span> Cargando datos del club…</div>';
+      summaryCard = `<div class="onboard-loading" role="status" aria-live="polite"><span class="onboard-spinner" aria-hidden="true"></span> ${this.oc.loadingClubData}</div>`;
     } else if (this._clubSummaryError && !s) {
       summaryCard = `<div class="onboard-error" role="alert">${escapeHtml(this._clubSummaryError)}</div>`;
     } else if (s) {
       summaryCard = `<div class="onboard-card" data-club-summary>
-        <h3 class="onboard-card-title">Tu club</h3>
+        <h3 class="onboard-card-title">${this.oc.yourClub}</h3>
         <dl class="onboard-summary-list">
-          <div class="onboard-summary-row"><dt>ID del club</dt><dd><code class="onboard-club-id" data-club-id>${escapeHtml(s.club.id)}</code></dd></div>
-          <div class="onboard-summary-row"><dt>Equipos</dt><dd data-team-count>${s.team_count}</dd></div>
-          <div class="onboard-summary-row"><dt>Miembros</dt><dd data-member-count>${s.member_count}</dd></div>
-          <div class="onboard-summary-row"><dt>Metodología</dt><dd data-methodology-present>${presence(s.methodology_present)}</dd></div>
-          <div class="onboard-summary-row"><dt>Plan de temporada</dt><dd data-season-plan-present>${presence(s.season_plan_present)}</dd></div>
+          <div class="onboard-summary-row"><dt>${this.oc.clubId}</dt><dd><code class="onboard-club-id" data-club-id>${escapeHtml(s.club.id)}</code></dd></div>
+          <div class="onboard-summary-row"><dt>${this.oc.navTeams}</dt><dd data-team-count>${s.team_count}</dd></div>
+          <div class="onboard-summary-row"><dt>${this.oc.navMembers}</dt><dd data-member-count>${s.member_count}</dd></div>
+          <div class="onboard-summary-row"><dt>${this.oc.methodology}</dt><dd data-methodology-present>${presence(s.methodology_present)}</dd></div>
+          <div class="onboard-summary-row"><dt>${this.oc.seasonPlan}</dt><dd data-season-plan-present>${presence(s.season_plan_present)}</dd></div>
         </dl>
       </div>`;
     } else {
@@ -6126,29 +6054,29 @@ class BiqOnboardApp extends HTMLElement {
 
     let body: string;
     if (this._membersError) {
-      body = `<p class="onboard-error" data-members-error>No se pudo cargar la lista de miembros (${escapeHtml(this._membersError)}).</p><button class="onboard-btn onboard-btn-sm" data-members-retry type="button">${guidedEntryCopy(this.locale).retry}</button>`;
+      body = `<p class="onboard-error" data-members-error>${escapeHtml(this.oc.loadMembersFailed(this._membersError))}</p><button class="onboard-btn onboard-btn-sm" data-members-retry type="button">${guidedEntryCopy(this.locale).retry}</button>`;
     } else if (this._members === null) {
       // Roster unknown: never fetched or load still in flight — never show
       // the empty message until a successful 200 confirms an empty array.
-      body = '<p class="onboard-muted">Cargando miembros…</p>';
+      body = `<p class="onboard-muted">${this.oc.loadingMembers}</p>`;
     } else if (members.length === 0) {
-      body = '<p class="onboard-muted">Aún no hay miembros en este club.</p>';
+      body = `<p class="onboard-muted">${this.oc.noMembers}</p>`;
     } else {
       body = `<div class="onboard-member-list">${members.map((m) => this._renderMemberRow(m, isAdminTier)).join('')}</div>`;
     }
 
     return `<section class="onboard-section" data-testid="members-tab">
       <div class="onboard-invite-card">
-        <h3 class="onboard-invite-title">Invitar a un miembro</h3>
-        <p class="onboard-muted">Recibirá un email con instrucciones para unirse al club.</p>
+        <h3 class="onboard-invite-title">${this.oc.inviteMember}</h3>
+        <p class="onboard-muted">${this.oc.inviteHelp}</p>
         <form class="onboard-invite-form" data-invite-form data-club-id="${escapeHtml(clubId)}">
-          <input type="email" class="onboard-input" data-invite-email placeholder="email@ejemplo.com"
+          <input type="email" class="onboard-input" data-invite-email placeholder="${this.oc.emailPlaceholder}"
             required ${inv.sending ? 'disabled' : ''} />
           <button type="submit" class="onboard-btn" ${inv.sending ? 'disabled' : ''}>
-            ${inv.sending ? 'Enviando…' : 'Invitar'}</button>
+            ${inv.sending ? this.oc.sending : this.oc.invite}</button>
         </form>
         ${inv.error ? `<p class="onboard-error" data-invite-error>${escapeHtml(inv.error)}</p>` : ''}
-        ${inv.sent ? `<p class="onboard-success" data-invite-sent>Invitación enviada a ${escapeHtml(inv.sent)}.</p>` : ''}
+        ${inv.sent ? `<p class="onboard-success" data-invite-sent>${escapeHtml(this.oc.invitationSent(inv.sent))}</p>` : ''}
       </div>
       ${body}
     </section>`;
@@ -6157,38 +6085,38 @@ class BiqOnboardApp extends HTMLElement {
   private _renderMemberRow(m: MemberRow, isAdminTier: boolean): string {
     const deactivated = m.status === 'deactivated';
     const canEdit = this._memberCanEdit(m);
-    const roleBadges = `<span class="onboard-role-badge">${escapeHtml(ROLE_LABELS[canonicalClubRole(m.role)] || m.role)}</span>`;
+    const roleBadges = `<span class="onboard-role-badge">${escapeHtml(this.oc.roles[canonicalClubRole(m.role)] || m.role)}</span>`;
 
     const statusBadge = deactivated
-      ? '<span class="onboard-status-badge off">Desactivado</span>' : '';
+      ? `<span class="onboard-status-badge off">${this.oc.deactivated}</span>` : '';
     // V2 Miembros (UX-15/16): el email es la única identidad de la fila —
     // nunca display_name ni id técnicos como cabecera. Un email genuinamente
     // ausente es incidencia explícita, no un fallback fabricado.
     const email = (m.email || '').trim();
     const identity = email ? escapeHtml(email) : '';
-    const identityForLabel = email ? escapeHtml(email) : 'miembro sin email disponible';
+    const identityForLabel = escapeHtml(email || this.oc.memberWithoutEmail);
     const actions = canEdit ? `
       <div class="onboard-member-actions">
         <button class="onboard-icon-btn onboard-icon-btn-lg" data-member-edit="${escapeHtml(m.id)}" type="button"
-          aria-label="Editar a ${identityForLabel}" title="Editar a ${identityForLabel}">${MEMBER_ICONS.edit}</button>
+          aria-label="${this.oc.editMember(identityForLabel)}" title="${this.oc.editMember(identityForLabel)}">${MEMBER_ICONS.edit}</button>
         <button class="onboard-icon-btn onboard-icon-btn-lg" data-member-status="${escapeHtml(m.id)}" type="button"
           data-status="${deactivated ? 'active' : 'deactivated'}"
-          aria-label="${deactivated ? 'Reactivar' : 'Desactivar'} a ${identityForLabel}"
-          title="${deactivated ? 'Reactivar' : 'Desactivar'} a ${identityForLabel}">${deactivated ? MEMBER_ICONS.reactivate : MEMBER_ICONS.deactivate}</button>
+          aria-label="${deactivated ? this.oc.reactivateMember(identityForLabel) : this.oc.deactivateMember(identityForLabel)}"
+          title="${deactivated ? this.oc.reactivateMember(identityForLabel) : this.oc.deactivateMember(identityForLabel)}">${deactivated ? MEMBER_ICONS.reactivate : MEMBER_ICONS.deactivate}</button>
         ${isAdminTier ? (this._deleteConfirmUserId === m.id
           ? `<button class="onboard-btn onboard-btn-sm onboard-btn-danger" data-member-delete="${escapeHtml(m.id)}" type="button"
-              aria-label="Confirmar eliminación de ${identityForLabel}">Confirmar</button>`
+              aria-label="${this.oc.confirmMemberDeletion(identityForLabel)}">${this.oc.confirm}</button>`
           : `<button class="onboard-icon-btn onboard-icon-btn-lg onboard-icon-btn-danger" data-member-delete="${escapeHtml(m.id)}" type="button"
-              aria-label="Eliminar a ${identityForLabel}" title="Eliminar a ${identityForLabel}">${MEMBER_ICONS.delete}</button>`)
+              aria-label="${this.oc.deleteMember(identityForLabel)}" title="${this.oc.deleteMember(identityForLabel)}">${MEMBER_ICONS.delete}</button>`)
         : ''}
       </div>` : '';
     return `<div class="onboard-member-row${deactivated ? ' off' : ''}" data-member-row="${escapeHtml(m.id)}">
       <div class="onboard-member-main">
-        <span class="onboard-member-email${email ? '' : ' missing'}">${email ? identity : 'Email no disponible'}</span>
+        <span class="onboard-member-email${email ? '' : ' missing'}">${email ? identity : this.oc.emailUnavailable}</span>
         ${actions}
       </div>
       <div class="onboard-member-meta">${roleBadges}${statusBadge}</div>
-      ${email ? '' : '<p class="onboard-member-note">Debe recuperarse el email desde la fuente autorizada.</p>'}
+      ${email ? '' : `<p class="onboard-member-note">${this.oc.emailRecoveryNote}</p>`}
     </div>`;
   }
 
@@ -6200,13 +6128,13 @@ class BiqOnboardApp extends HTMLElement {
     // passed _memberCanEdit.
     const identityFields = isAdminTier ? `
       <input class="onboard-input" data-edit-name="${escapeHtml(m.id)}"
-        value="${escapeHtml(m.display_name || '')}" placeholder="Nombre" />
+        value="${escapeHtml(m.display_name || '')}" placeholder="${this.oc.name}" />
       <input class="onboard-input" data-edit-email="${escapeHtml(m.id)}"
-        value="${escapeHtml(m.email || '')}" placeholder="Email" type="email" />` : '';
+        value="${escapeHtml(m.email || '')}" placeholder="${this.oc.email}" type="email" />` : '';
     const primarySelect = isAdminTier ? `
-      <label class="onboard-member-field">Rol
+      <label class="onboard-member-field">${this.oc.role}
         <select class="onboard-input" data-edit-primary="${escapeHtml(m.id)}">
-          ${roleOptions.map((r) => `<option value="${r}" ${r === (m.role === 'administrator' ? 'sports_director' : m.role) ? 'selected' : ''}>${escapeHtml(ROLE_LABELS[r] || r)}</option>`).join('')}
+          ${roleOptions.map((r) => `<option value="${r}" ${r === (m.role === 'administrator' ? 'sports_director' : m.role) ? 'selected' : ''}>${escapeHtml(this.oc.roles[r] || r)}</option>`).join('')}
         </select>
       </label>` : '';
 
@@ -6367,7 +6295,7 @@ class BiqOnboardApp extends HTMLElement {
       this.render();
       try {
         const res = await fetch(`/api/clubs/${clubId}/theme`, { method: 'PUT', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ seed_brand: colours.brand, seed_brand_alt: colours.alt, variant: (button as HTMLElement).dataset.identityVariant }) });
-        if (!res.ok) throw new Error((await res.json().catch(() => null))?.detail || 'No se pudo preparar la propuesta');
+        if (!res.ok) throw new Error((await res.json().catch(() => null))?.detail || this.oc.preparePreviewFailed);
         await this.loadThemeData(clubId);
       } catch (err) { this._error = (err as Error).message; }
       finally { this._loading = false; this.render(); }
@@ -6512,7 +6440,7 @@ class BiqOnboardApp extends HTMLElement {
       }
       this._editDirty = false;
       this._editSaveStatus = 'saved';
-      this._editSaveMessage = 'Se cargó la versión actual del equipo.';
+      this._editSaveMessage = this.oc.loadedCurrent;
       // Render completo: la elección es explícita — el borrador descartado
       // desaparece de todos los campos, no solo del modelo.
       this.render();
@@ -6794,7 +6722,7 @@ class BiqOnboardApp extends HTMLElement {
         const gender = (addRow.querySelector('[data-new-team-gender]') as HTMLSelectElement)?.value || 'M';
         const competitive_level = (addRow.querySelector('[data-new-team-level]') as HTMLSelectElement)?.value.trim() || '';
         if (!name) {
-          this._teamsError = 'El nombre es obligatorio.';
+          this._teamsError = this.oc.nameRequired;
           this.render();
           return;
         }

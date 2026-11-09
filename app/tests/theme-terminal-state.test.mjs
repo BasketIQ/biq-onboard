@@ -87,7 +87,9 @@ test('job state card is suppressed when uncertain AND theme exists', () => {
 
 // ─── THEME_JOB_COPY has uncertain entry (still defined, just not shown) ─
 
-test('THEME_JOB_COPY has an entry for uncertain status', () => {
-  const match = SRC.match(/uncertain:\s*\{[^}]*title:/);
-  assert.ok(match, 'THEME_JOB_COPY should have an uncertain entry with a title');
+test('themeJob copy has an entry for uncertain status in every locale', () => {
+  const COPY = readFileSync(join(__dirname, '..', 'src', 'onboard-copy.ts'), 'utf-8');
+  const matches = COPY.match(/uncertain:\s*\{[^}]*title:/g) || [];
+  assert.equal(matches.length, 2, 'themeJob should have an uncertain entry with a title in ES and EN');
+  assert.ok(SRC.includes('this.oc.themeJob[jobStatus]'), 'renderClubDetails reads the localized themeJob copy');
 });

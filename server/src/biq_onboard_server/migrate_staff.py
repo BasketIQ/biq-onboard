@@ -21,10 +21,10 @@ that refused to run in production.
 
 from __future__ import annotations
 
-from . import org
+from . import org, team_authority
 
 
-def _migrate_club(registry, club_id: str) -> tuple[int, int, int]:
+def _migrate_club(registry, club_id: str, actor_user_id: str) -> tuple[int, int, int]:
     """Migrate one club's team staff membership. Returns (teams_updated, users_seeded, additions)."""
     teams_updated = 0
     users_seeded = 0
@@ -60,32 +60,24 @@ def _migrate_club(registry, club_id: str) -> tuple[int, int, int]:
         if user_added:
             users_seeded += 1
 
-    # Write back the teams that changed
-    from biq_core.org import Team
-
     for team in teams:
         new_staff = team_staff.get(team.id, team.staff_user_ids)
         if set(new_staff) != set(team.staff_user_ids):
-            # Use partial-write: only set staff_user_ids
-            updated = Team(
-                id=team.id,
-                club_id=team.club_id,
-                name=team.name,
-                staff_user_ids=new_staff,
-            )
-            registry.upsert_team(updated)
+            team_authority.upsert(actor_user_id, club_id, [{
+                "id": team.id, "club_id": club_id, "staff_user_ids": new_staff,
+            }])
             teams_updated += 1
 
     return teams_updated, users_seeded, additions
 
 
-def migrate_club(club_id: str) -> dict:
+def migrate_club(club_id: str, actor_user_id: str) -> dict:
     """Migrate a single club's staff membership (for the admin API endpoint).
 
     Idempotent: only adds users not already in staff_user_ids.
     """
     registry = org.get_registry()
-    teams_updated, users_seeded, additions = _migrate_club(registry, club_id)
+    teams_updated, users_seeded, additions = _migrate_club(registry, club_id, actor_user_id)
     summary = {
         "club_id": club_id,
         "teams_updated": teams_updated,

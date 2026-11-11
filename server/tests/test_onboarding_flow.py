@@ -513,9 +513,8 @@ def test_create_idempotency_key_replay_never_duplicates(client, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_f12_create_club_seeds_full_team_catalog(client, monkeypatch):
-    """F12: creating a club via create_my_club() seeds the full default
-    team catalog (every category × gender) for the new club."""
+def test_f12_create_club_starts_without_catalog(client, monkeypatch):
+    """Beta clubs start empty; the director selects up to five teams later."""
     reg = org.get_registry()
     _seed_user(reg, "u_f12", "f12@basketiq.io")
     _as_session(monkeypatch, "u_f12")
@@ -524,35 +523,12 @@ def test_f12_create_club_seeds_full_team_catalog(client, monkeypatch):
     assert resp.status_code == 200
     data = resp.json()
     club_id = data["club"]["id"]
-    assert data["teams_seeded"] > 0, "teams_seeded count in response"
-
-    teams = reg.list_teams(club_id)
-    # build_team_catalog generates 30 teams for a season (9 categories ×
-    # genders, with birth-year cohorts for some categories).
-    assert len(teams) == 30, f"expected 30 teams, got {len(teams)}"
-
-    # Verify representative category × gender entries exist.
-    categories = {t.category for t in teams}
-    genders = {t.gender for t in teams}
-    assert "babybasket" in categories
-    assert "senior" in categories
-    assert "veteranos" in categories
-    assert "M" in genders
-    assert "F" in genders
-
-    # Veteranos teams use the per-gender display names, not
-    # "Veteranos Masculino/Femenino" and no birth-year suffix.
-    vet_names = sorted(t.name for t in teams if t.category == "veteranos")
-    assert vet_names == ["Veteranas", "Veteranos"]
-
-    # Verify team IDs are scoped by club_id (the slug parameter).
-    assert all(t.club_id == club_id for t in teams)
-    assert any(t.id.startswith(f"team_{club_id}_") for t in teams)
+    assert data["teams_seeded"] == 0
+    assert reg.list_teams(club_id) == []
 
 
-def test_f12_idempotent_replay_reseeds_without_duplicates(client, monkeypatch):
-    """F12: replaying the same idempotency key re-seeds teams via upsert
-    (merge semantics) — no duplicates, same count."""
+def test_f12_idempotent_replay_never_seeds_or_duplicates(client, monkeypatch):
+    """Club creation replay preserves the empty authored catalog state."""
     reg = org.get_registry()
     _seed_user(reg, "u_f12_idem", "f12-idem@basketiq.io")
     _as_session(monkeypatch, "u_f12_idem")
@@ -561,21 +537,16 @@ def test_f12_idempotent_replay_reseeds_without_duplicates(client, monkeypatch):
     first = client.post("/api/onboarding/clubs", json=body)
     assert first.status_code == 200
     club_id = first.json()["club"]["id"]
-
-    teams_after_first = reg.list_teams(club_id)
-    assert len(teams_after_first) == 30
+    assert reg.list_teams(club_id) == []
 
     second = client.post("/api/onboarding/clubs", json=body)
     assert second.status_code == 200
     assert second.json()["club"]["id"] == club_id
-
-    teams_after_second = reg.list_teams(club_id)
-    assert len(teams_after_second) == 30, "no duplicate teams on replay"
+    assert reg.list_teams(club_id) == []
 
 
-def test_f12_seeding_job_done_after_create(client, monkeypatch):
-    """Seeding tracks Club.team_seeding_job pending→done — durable, queryable
-    state instead of a log-only outcome."""
+def test_f12_seeding_job_stays_empty_after_create(client, monkeypatch):
+    """No automatic write means no fake pending/done seeding job."""
     reg = org.get_registry()
     _seed_user(reg, "u_f12j", "f12j@basketiq.io")
     _as_session(monkeypatch, "u_f12j")
@@ -583,38 +554,23 @@ def test_f12_seeding_job_done_after_create(client, monkeypatch):
     resp = client.post("/api/onboarding/clubs", json={"name": "CB F12 Job"})
     assert resp.status_code == 200
     club_id = resp.json()["club"]["id"]
-
-    job = reg.get_club(club_id).team_seeding_job
-    assert job is not None
-    assert job["status"] == "done"
-    assert job["teams_expected"] == 30
-    assert job["teams_written"] == 30
-    assert job["reason"] is None
-    assert job["catalog_slug"] == club_id
-    assert job["requestedAt"]
-    assert job["finishedAt"]
+    assert reg.get_club(club_id).team_seeding_job is None
 
 
-def test_f12_seeding_failure_persists_failed_job(client, monkeypatch):
-    """A seeding write failure leaves a durable 'failed' job — and club
-    creation still succeeds (unchanged never-fails guarantee)."""
+def test_f12_club_creation_never_calls_team_authority(client, monkeypatch):
+    """An unavailable authority cannot fail or leave a fake seeding job."""
     reg = org.get_registry()
     _seed_user(reg, "u_f12f", "f12f@basketiq.io")
     _as_session(monkeypatch, "u_f12f")
+    from biq_onboard_server import team_authority
 
     def _boom(*_a, **_k):
-        raise RuntimeError("simulated write failure")
+        raise AssertionError("club creation must not seed teams")
 
-    monkeypatch.setattr(reg, "bulk_upsert_teams", _boom)
+    monkeypatch.setattr(team_authority, "upsert", _boom)
 
     resp = client.post("/api/onboarding/clubs", json={"name": "CB F12 Fail"})
     assert resp.status_code == 200
     data = resp.json()
     assert data["teams_seeded"] == 0
-
-    job = reg.get_club(data["club"]["id"]).team_seeding_job
-    assert job is not None
-    assert job["status"] == "failed"
-    assert "simulated write failure" in job["reason"]
-    assert job["teams_written"] == 0
-    assert job["finishedAt"] is not None
+    assert reg.get_club(data["club"]["id"]).team_seeding_job is None

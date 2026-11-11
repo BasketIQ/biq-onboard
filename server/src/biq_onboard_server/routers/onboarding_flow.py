@@ -168,32 +168,8 @@ def create_my_club(payload: ClubSelfCreate, request: Request) -> dict:
             detail="No se pudo crear el club",
         ) from exc
 
-    # F12: Seed the default team catalog for the new club — one bulk write via
-    # seed_club_team_catalog (was: 28 sequential upsert_team calls inside a
-    # request with a tight upstream proxy timeout). The helper persists
-    # Club.team_seeding_job pending→done/failed so a seeding failure is a
-    # durable, queryable state — not just a log line.
-    # Club creation never fails or rolls back because team seeding fails:
-    # the club/creator are already persisted atomically above. If the write
-    # fails, the persisted "failed" job + this log make it visible (same
-    # discipline as the theme-job enqueue failure below — visible, not
-    # swallowed).
-    #
-    # bulk_upsert_teams uses the same merge semantics as upsert_team
-    # (Firestore set(merge=True) / Memory _merge_partial), so re-seeding with
-    # the same IDs on an idempotent replay is safe — it relabels docs in place.
+    # Beta clubs start empty; the Director explicitly chooses at most five.
     teams_seeded = 0
-    try:
-        from ..onboarding import seed_club_team_catalog
-
-        season_str = registry.get_season()
-        season_year = int((season_str or "").split("/")[0]) if season_str else _current_season_year()
-        teams_seeded = seed_club_team_catalog(registry, club_id, club_id, season_year)
-    except Exception as exc:
-        logger.error(
-            "F12 team-catalog seeding failed for club %s: %s (club creation succeeded)",
-            club_id, exc, exc_info=True,
-        )
 
     # B9/B10: if website present, enqueue theme generation asynchronously.
     # Club creation never fails or rolls back because optional generation

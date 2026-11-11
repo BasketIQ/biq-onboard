@@ -81,7 +81,7 @@ async function newPage(browser, state) {
       return;
     }
     if (u.includes('/teams/reseed') && method === 'POST') {
-      if (state.onReseed) state.onReseed();
+      if (state.onReseed) state.onReseed(JSON.parse(req.postData() || '{}'));
       await json({ ok: true, club_id: 'club1', teams_written: state.teams.length, team_seeding_job: state.job });
       return;
     }
@@ -161,11 +161,14 @@ test('F12: pending job shows generating banner, polls until done, then renders t
 
 test('F12: failed job shows error + Reintentar, which POSTs reseed and recovers', async () => {
   const browser = await chromium.launch();
+  const selection = [{ id: 'team_club1_senior_m', name: 'Senior Masculino' }];
+  let posted = null;
   const state = {
-    job: { status: 'failed', reason: 'Firestore UNAVAILABLE', teams_expected: 28 },
+    job: { status: 'failed', reason: 'Firestore UNAVAILABLE', teams_expected: 1, selection },
     teams: [],
-    onReseed() {
-      state.job = { status: 'done', teams_expected: 1, teams_written: 1 };
+    onReseed(body) {
+      posted = body;
+      state.job = { status: 'done', teams_expected: 1, teams_written: 1, selection };
       state.teams = SEED_TEAMS;
     },
   };
@@ -200,6 +203,7 @@ test('F12: failed job shows error + Reintentar, which POSTs reseed and recovers'
   }, { timeout: 10000 });
   const reseedCalls = log.filter((e) => e.url.includes('/teams/reseed') && e.method === 'POST');
   assert.equal(reseedCalls.length, 1, 'exactly one reseed POST');
+  assert.deepEqual(posted, { teams: selection }, 'retry sends the recorded explicit selection');
 
   await browser.close();
 });

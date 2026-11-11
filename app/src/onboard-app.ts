@@ -763,7 +763,7 @@ class BiqOnboardApp extends HTMLElement {
   private _deleteConfirmTeamId: string | null = null;
   private _catalogLoaded = false;
   // F12: Team-catalog seeding job state (Club.team_seeding_job, Phase 1).
-  private _teamSeedingJob: { status?: string; reason?: string | null } | null = null;
+  private _teamSeedingJob: { status?: string; reason?: string | null; selection?: Array<Record<string, unknown>> } | null = null;
   private _seedingLoading = false; // reseed POST in-flight
   private _seedingStale = false; // polled past _staleThresholdMs without terminal state
   private _seedingPollTimer: ReturnType<typeof setTimeout> | null = null;
@@ -5337,6 +5337,7 @@ class BiqOnboardApp extends HTMLElement {
     return `
       <div class="entry-step">
         <h2 class="entry-title">${entryCopy.myPersonalSpace}</h2>
+        <p><a class="onboard-btn" href="#/subscription">${entryCopy.subscriptions}</a></p>
         ${this.staffEnabled ? `<biq-personal-staff lang="${escapeHtml(this.locale)}"></biq-personal-staff>` : ''}
         <button class="onboard-btn" data-personal-switch-space>${entryCopy.switchSpace}</button>
         ${this._entryError ? `<p class="entry-error" role="alert">${escapeHtml(this._entryError)}</p>` : ''}
@@ -6603,10 +6604,13 @@ class BiqOnboardApp extends HTMLElement {
         this._teamsError = null;
         this.render();
         try {
+          const selection = Array.isArray(this._teamSeedingJob?.selection) ? this._teamSeedingJob.selection : null;
+          if (!selection?.length) throw new Error(this.oc.seedingSelectionRequired);
           const res = await fetch(`/api/clubs/${clubId}/teams/reseed`, {
             method: 'POST',
             credentials: 'include',
             headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ teams: selection }),
           });
           if (!res.ok) {
             const data = await res.json().catch(() => ({}));

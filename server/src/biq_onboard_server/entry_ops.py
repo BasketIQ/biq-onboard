@@ -441,25 +441,11 @@ async def ops_create_club(request: Request) -> dict:
     except Exception as exc:
         raise HTTPException(status_code=503, detail="club creation failed") from exc
 
-    teams_seeded = 0
-    try:
-        from .onboarding import seed_club_team_catalog
-
-        season_str = registry.get_season()
-        season_year = (
-            int((season_str or "").split("/")[0])
-            if season_str
-            else __import__("datetime").datetime.now(__import__("datetime").UTC).year
-        )
-        teams_seeded = seed_club_team_catalog(registry, club_id, club_id, season_year)
-    except Exception as exc:
-        logger.error("entry club-create seeding failed for %s: %s", club_id, exc)
-
     return {
         "club": {"id": club_id, "name": name, "website": website or None},
         "membership_subject_id": membership_id,
         "idempotent": bool(idem),
-        "teams_seeded": teams_seeded,
+        "teams_seeded": 0,
     }
 
 

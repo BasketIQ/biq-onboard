@@ -12,6 +12,53 @@ const escape = (value: unknown) => String(value ?? '').replace(/[&<>"']/g, chara
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
 })[character]!);
 
+const COPY = {
+  es: {
+    loading: 'Cargando staff…',
+    verifyEmail: 'Para aceptar invitaciones, inicia sesión con un enlace enviado al correo invitado.',
+    pending: 'Invitaciones a equipos personales', expires: 'Caduca:', accept: 'Aceptar invitación',
+    staff: 'Staff del equipo', team: 'Equipo', premium: 'Premium activo',
+    grace: 'Cortesía: trabajo ordinario durante siete días, sin invitaciones ni consumo Premium.',
+    expired: 'Suscripción vencida. Equipo archivado.', free: 'Coach', owner: 'Dueño',
+    premiumPermission: 'Permitir Premium y Smart', remove: 'Retirar del staff',
+    email: 'Correo del entrenador', invite: 'Invitar al staff', resend: 'Reenviar',
+    revoke: 'Revocar invitación', pendingTransfer: 'Transferencia de propiedad pendiente de aceptación.',
+    acceptOwnership: 'Aceptar propiedad', cancelTransfer: 'Cancelar transferencia', newOwner: 'Nuevo dueño',
+    proposeTransfer: 'Proponer transferencia', restore: 'Restaurar equipo', archive: 'Archivar equipo',
+    leave: 'Salir del equipo', ownerMustTransfer: 'Para salir, otro entrenador debe aceptar primero la propiedad.',
+    refresh: 'Actualizar staff', conflict: 'El equipo ha cambiado. Actualiza y revisa antes de reintentar.',
+    verifiedEmailRequired: 'Verifica el correo invitado mediante un enlace de acceso para aceptar.',
+    premiumRequired: 'Esta acción requiere Premium activo en el equipo.',
+    actionFailed: 'No se pudo completar la acción. Actualiza el equipo o vuelve a iniciar sesión.',
+    loadFailed: 'No se pudo cargar el staff.',
+    mailFailed: 'Invitación guardada, pero el correo no se ha enviado. Puedes reintentar sin ampliar el vencimiento.',
+    confirmRemove: '¿Retirar a este entrenador? Perderá el acceso al equipo.',
+    confirmLeave: '¿Salir del equipo y perder el acceso?',
+  },
+  en: {
+    loading: 'Loading staff…',
+    verifyEmail: 'To accept invitations, sign in with a link sent to the invited mailbox.',
+    pending: 'Personal team invitations', expires: 'Expires:', accept: 'Accept invitation',
+    staff: 'Team staff', team: 'Team', premium: 'Premium active',
+    grace: 'Courtesy period: ordinary work for seven days, without invitations or Premium consumption.',
+    expired: 'Subscription expired. Team archived.', free: 'Coach', owner: 'Owner',
+    premiumPermission: 'Allow Premium and Smart', remove: 'Remove from staff',
+    email: "Coach's email", invite: 'Invite to staff', resend: 'Resend',
+    revoke: 'Revoke invitation', pendingTransfer: 'Ownership transfer pending acceptance.',
+    acceptOwnership: 'Accept ownership', cancelTransfer: 'Cancel transfer', newOwner: 'New owner',
+    proposeTransfer: 'Propose transfer', restore: 'Restore team', archive: 'Archive team',
+    leave: 'Leave team', ownerMustTransfer: 'To leave, another coach must accept ownership first.',
+    refresh: 'Refresh staff', conflict: 'The team has changed. Refresh and review before retrying.',
+    verifiedEmailRequired: 'Verify the invited email with a sign-in link to accept.',
+    premiumRequired: 'This action requires active Premium on the team.',
+    actionFailed: 'The action could not be completed. Refresh the team or sign in again.',
+    loadFailed: 'Staff could not be loaded.',
+    mailFailed: 'Invitation saved, but the email was not sent. You can retry without extending expiry.',
+    confirmRemove: 'Remove this coach? They will lose access to the team.',
+    confirmLeave: 'Leave the team and lose access?',
+  },
+} as const;
+
 export class PersonalStaff extends HTMLElement {
   localize?: (key: string, fallback: string) => string;
   private controller: AbortController | null = null;
@@ -28,7 +75,15 @@ export class PersonalStaff extends HTMLElement {
 
   connectedCallback() { void this.load(); }
   disconnectedCallback() { this.generation++; this.controller?.abort(); }
-  private copy(key: string, fallback: string) { return escape(this.localize?.(`personalStaff.${key}`, fallback) || fallback); }
+  private get language() { return this.locale.toLowerCase().startsWith('en') ? 'en' : 'es'; }
+  private copy(key: string, fallback: string) {
+    const localized = COPY[this.language][key as keyof typeof COPY.es] || fallback;
+    return escape(this.localize?.(`personalStaff.${key}`, localized) || localized);
+  }
+  private message(key: keyof typeof COPY.es) {
+    const fallback = COPY[this.language][key];
+    return this.localize?.(`personalStaff.${key}`, fallback) || fallback;
+  }
   private get invitationsOnly() { return this.hasAttribute('invitations-only'); }
   private get locale() { return this.getAttribute('lang') || document.documentElement.lang || 'es-ES'; }
 
@@ -41,10 +96,10 @@ export class PersonalStaff extends HTMLElement {
     const data = await response.json().catch(() => null);
     if (!response.ok) {
       const code = data?.detail;
-      if (response.status === 409) throw new Error('El equipo ha cambiado. Actualiza y revisa antes de reintentar.');
-      if (code === 'verified_email_required') throw new Error('Verifica el correo invitado mediante un enlace de acceso para aceptar.');
-      if (code === 'premium_required') throw new Error('Esta acción requiere Premium activo en el equipo.');
-      throw new Error('No se pudo completar la acción. Actualiza el equipo o vuelve a iniciar sesión.');
+      if (response.status === 409) throw new Error(this.message('conflict'));
+      if (code === 'verified_email_required') throw new Error(this.message('verifiedEmailRequired'));
+      if (code === 'premium_required') throw new Error(this.message('premiumRequired'));
+      throw new Error(this.message('actionFailed'));
     }
     return data;
   }
@@ -61,7 +116,7 @@ export class PersonalStaff extends HTMLElement {
         this.request('/invitations'),
       ]);
       if (generation !== this.generation || !this.isConnected) return;
-      if (!Array.isArray(teams?.teams) || !Array.isArray(invitations?.invitations)) throw new Error('No se pudo cargar el staff.');
+      if (!Array.isArray(teams?.teams) || !Array.isArray(invitations?.invitations)) throw new Error(this.message('loadFailed'));
       this.teams = teams.teams;
       this.invitations = invitations.invitations;
       this.verificationRequired = invitations.requires_email_verification === true;
@@ -91,7 +146,7 @@ export class PersonalStaff extends HTMLElement {
       const result = await this.request(path, body, method);
       if (generation !== this.generation || !this.isConnected) return;
       this.operations.delete(identity);
-      if (result.mail_delivery_state && result.mail_delivery_state !== 'sent') this.error = 'Invitación guardada, pero el correo no se ha enviado. Puedes reintentar sin ampliar el vencimiento.';
+      if (result.mail_delivery_state && result.mail_delivery_state !== 'sent') this.error = this.message('mailFailed');
       if (path === '/invitations/accept' || path.endsWith('/leave') || path === '/transfers/accept' || path.endsWith('/archive')) {
         this.dispatchEvent(new CustomEvent('personal-staff:changed', { bubbles: true, composed: true }));
       }
@@ -126,7 +181,7 @@ export class PersonalStaff extends HTMLElement {
           `<option value="${escape(team.team_id)}" ${team.team_id === this.selected ? 'selected' : ''}>${escape(team.name)}</option>`).join('')}</select></label>
         ${directory && grant ? `<p>${this.copy(grant.plan_state, {
           premium: 'Premium activo', grace: 'Cortesía: trabajo ordinario durante siete días, sin invitaciones ni consumo Premium.',
-          expired: 'Suscripción vencida. Equipo archivado.', free: 'Equipo gratuito',
+          expired: 'Suscripción vencida. Equipo archivado.', free: 'Coach',
         }[grant.plan_state])}</p>
         <ul class="entry-teams">${directory.members.map(member => `<li class="entry-team">
           <strong>${escape(member.display_name || member.account_id)}</strong>
@@ -182,10 +237,10 @@ export class PersonalStaff extends HTMLElement {
     }));
     this.querySelectorAll<HTMLButtonElement>('[data-remove]').forEach(button => button.addEventListener('click', () => {
       const member = directory?.members.find(member => member.account_id === button.dataset.remove);
-      if (member && window.confirm('¿Retirar a este entrenador? Perderá el acceso al equipo.')) void this.command(teamPath + '/remove', { account_id: member.account_id, generation: member.generation });
+      if (member && window.confirm(this.message('confirmRemove'))) void this.command(teamPath + '/remove', { account_id: member.account_id, generation: member.generation });
     }));
     this.querySelector('[data-leave]')?.addEventListener('click', () => {
-      if (grant && window.confirm('¿Salir del equipo y perder el acceso?')) void this.command(teamPath + '/leave', { generation: grant.generation });
+      if (grant && window.confirm(this.message('confirmLeave'))) void this.command(teamPath + '/leave', { generation: grant.generation });
     });
     this.querySelector('[data-archive]')?.addEventListener('click', () => {
       if (grant) void this.command(teamPath + '/archive', { archived: !grant.archived }, 'PATCH');

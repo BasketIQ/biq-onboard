@@ -11,8 +11,9 @@ let origin;
 before(async () => {
   server = createServer((request, response) => {
     response.setHeader('Content-Type', request.url === '/embed.js' ? 'text/javascript' : 'text/html');
+    const lang = request.url === '/embed.js' ? 'es-ES' : new URL(request.url, 'http://localhost').searchParams.get('lang') || 'es-ES';
     response.end(request.url === '/embed.js' ? bundle
-      : '<!doctype html><html lang="es-ES"><meta charset="utf-8"><biq-personal-staff></biq-personal-staff><script type="module" src="/embed.js"></script></html>');
+      : `<!doctype html><html lang="${lang}"><meta charset="utf-8"><biq-personal-staff></biq-personal-staff><script type="module" src="/embed.js"></script></html>`);
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   origin = `http://127.0.0.1:${server.address().port}`;
@@ -39,7 +40,7 @@ const initial = () => ({
   },
 });
 
-async function scenario(state, command, fn, width = 390) {
+async function scenario(state, command, fn, width = 390, lang = 'es-ES') {
   const context = await browser.newContext({ viewport: { width, height: 844 } });
   const page = await context.newPage();
   const operations = [];
@@ -56,8 +57,8 @@ async function scenario(state, command, fn, width = 390) {
       operations.push({ path, body, method: request.method() });
       return route.fulfill({ json: await command(path, body, state) });
     });
-    await page.goto(origin);
-    await page.getByRole('heading', { name: 'Staff del equipo' }).waitFor();
+    await page.goto(`${origin}?lang=${encodeURIComponent(lang)}`);
+    await page.getByRole('heading', { name: lang === 'en' ? 'Team staff' : 'Staff del equipo' }).waitFor();
     await fn(page, operations);
   } finally { await context.close(); }
 }
@@ -104,7 +105,7 @@ test('account entry accepts pending staff without sending an actor or locator', 
     await page.getByRole('button', { name: 'Aceptar invitación', exact: true }).click();
     await page.getByRole('button', { name: 'Salir del equipo', exact: true }).waitFor();
     assert.equal(operations.length, 1);
-    assert.equal(await page.getByRole('checkbox', { name: 'Permitir complementos Premium' }).count(), 0);
+    assert.equal(await page.getByRole('checkbox', { name: 'Permitir Premium y Smart' }).count(), 0);
   }, 1280);
 });
 
@@ -122,7 +123,7 @@ test('owner permission uses current generation and revision; transfer stays pend
     state.directory.transfer = { transfer_id: 'transfer-one', to_account_id: 'guest' };
     return state.directory.transfer;
   }, async (page, operations) => {
-    await page.getByRole('checkbox', { name: 'Permitir complementos Premium' }).check();
+    await page.getByRole('checkbox', { name: 'Permitir Premium y Smart' }).check();
     await page.waitForFunction(() => !document.querySelector('biq-personal-staff [data-permission]')?.disabled);
     await page.getByRole('button', { name: 'Proponer transferencia', exact: true }).click();
     await page.getByText('Transferencia de propiedad pendiente de aceptación.').waitFor();
@@ -140,7 +141,19 @@ test('courtesy exposes ordinary work but no invitation form or consumption permi
   await scenario(state, async () => assert.fail('No automatic mutation is allowed'), async page => {
     await page.getByText(/Cortesía: trabajo ordinario/).waitFor();
     assert.equal(await page.getByRole('button', { name: 'Invitar al staff', exact: true }).count(), 0);
-    assert.equal(await page.getByRole('checkbox', { name: 'Permitir complementos Premium' }).count(), 0);
+    assert.equal(await page.getByRole('checkbox', { name: 'Permitir Premium y Smart' }).count(), 0);
     assert.equal(await page.getByRole('button', { name: 'Salir del equipo', exact: true }).count(), 1);
   });
+});
+
+test('English renders Coach, staff actions and Smart permission without overflow', async () => {
+  const state = initial();
+  state.directory.grant.plan_state = 'free';
+  await scenario(state, async () => assert.fail('No automatic mutation is allowed'), async page => {
+    await page.getByRole('heading', { name: 'Team staff' }).waitFor();
+    await page.getByText('Coach', { exact: true }).waitFor();
+    await page.getByRole('checkbox', { name: 'Allow Premium and Smart' }).waitFor();
+    await page.getByRole('button', { name: 'Refresh staff', exact: true }).waitFor();
+    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= 1280));
+  }, 1280, 'en');
 });

@@ -62,7 +62,8 @@ def test_onboard_club_default_staff(admin_client):
     assert data["ok"] is True
     assert data["users_created"] == 9
     assert data["roles_assigned"] == 9
-    assert data["teams_created"] > 0
+    assert data["teams_created"] == 0
+    assert data["teams_verified"] == 0
     staff_ids = [s["user_id"] for s in data["staff"]]
     assert "admin_club_test" in staff_ids
     assert "director_club_test" in staff_ids
@@ -859,22 +860,37 @@ def test_f12_s2s_bad_token_returns_401(f12_client, monkeypatch):
     assert r.status_code == 401
 
 
-# ─── Team seeding status + reseed ──────────────────────────────────────────────
+# ─── Team catalogue selection + seeding status ───────────────────────────────
 
 
-def test_team_seeding_job_done_after_onboard(admin_client):
+def _catalog_selection(client, club_id: str, count: int = 2) -> dict:
+    r = client.get(f"/api/admin/clubs/{club_id}/teams/catalogue")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["limit"] == 5
+    return {"teams": [
+        {"id": row["id"], "name": f"Equipo {index}"}
+        for index, row in enumerate(data["items"][:count], start=1)
+    ]}
+
+
+def test_team_seeding_job_records_explicit_selection(admin_client):
     admin_client.post(
         "/api/admin/clubs/club_seed/onboard",
         json={"club_id": "club_seed", "name": "Club Seed", "slug": "seed", "season": "2026/27"},
     )
-    r = admin_client.get("/api/admin/clubs/club_seed/team-seeding")
+    assert admin_client.get("/api/admin/clubs/club_seed/team-seeding").json()["team_seeding_job"] is None
+    r = admin_client.post(
+        "/api/admin/clubs/club_seed/teams/reseed",
+        json=_catalog_selection(admin_client, "club_seed", 2),
+    )
     assert r.status_code == 200
     data = r.json()
     assert data["ok"] is True
     job = data["team_seeding_job"]
     assert job["status"] == "done"
-    assert job["teams_expected"] == 30
-    assert job["teams_written"] == 30
+    assert job["teams_expected"] == 2
+    assert job["teams_written"] == 2
     assert job["catalog_slug"] == "seed"
 
 
@@ -894,71 +910,77 @@ def test_team_seeding_requires_auth(client):
 
 
 def test_reseed_recovers_zero_team_club(admin_client):
-    """The reported incident shape: a club at zero teams reseeds back to the
-    full catalog in place — under the ORIGINAL slug namespace, recovered from
-    the recorded job even with no teams left to parse."""
+    """A zero-team club can recover the same namespace from its recorded job."""
     admin_client.post(
         "/api/admin/clubs/club_zero/onboard",
         json={"club_id": "club_zero", "name": "Club Zero", "slug": "zero", "season": "2026/27"},
     )
+    selection = _catalog_selection(admin_client, "club_zero", 2)
+    assert admin_client.post("/api/admin/clubs/club_zero/teams/reseed", json=selection).status_code == 200
+
     from biq_onboard_server import org
 
     reg = org.get_registry()
-    # Drive the club to the zero-team failure state (memory backend).
     reg._teams["club_zero"] = {}
     assert reg.list_teams("club_zero") == []
 
-    r = admin_client.post("/api/admin/clubs/club_zero/teams/reseed")
+    r = admin_client.post("/api/admin/clubs/club_zero/teams/reseed", json=selection)
     assert r.status_code == 200
     data = r.json()
     assert data["ok"] is True
-    assert data["teams_written"] == 30
+    assert data["teams_written"] == 2
     assert data["team_seeding_job"]["status"] == "done"
     teams = reg.list_teams("club_zero")
-    assert len(teams) == 30
+    assert len(teams) == 2
     assert all(t.id.startswith("team_zero_") for t in teams)
 
 
 def test_reseed_recovers_zero_team_pretracking_club(admin_client):
-    """A club seeded before job tracking (no team_seeding_job) with zero teams
-    falls back to the club_id namespace — the create_my_club convention."""
+    """A club without a recorded seeding job falls back to club_id."""
     admin_client.post("/api/admin/clubs", json={"id": "club_pre", "name": "Club Pre"})
-    r = admin_client.post("/api/admin/clubs/club_pre/teams/reseed")
+    r = admin_client.post(
+        "/api/admin/clubs/club_pre/teams/reseed",
+        json=_catalog_selection(admin_client, "club_pre", 2),
+    )
     assert r.status_code == 200
     data = r.json()
-    assert data["teams_written"] == 30
+    assert data["teams_written"] == 2
     from biq_onboard_server import org
 
     teams = org.get_registry().list_teams("club_pre")
-    assert len(teams) == 30
+    assert len(teams) == 2
     assert all(t.id.startswith("team_club_pre_") for t in teams)
 
 
 def test_reseed_twice_is_idempotent(admin_client):
-    """Reseeding a fully-seeded club relabels in place — no duplicates."""
+    """Replaying a selection creates nothing twice and reports zero writes."""
     admin_client.post(
         "/api/admin/clubs/club_r2/onboard",
         json={"club_id": "club_r2", "name": "Club R2", "slug": "r2", "season": "2026/27"},
     )
+    selection = _catalog_selection(admin_client, "club_r2", 2)
+    r = admin_client.post("/api/admin/clubs/club_r2/teams/reseed", json=selection)
+    assert r.status_code == 200
+    assert r.json()["teams_written"] == 2
+    r = admin_client.post("/api/admin/clubs/club_r2/teams/reseed", json=selection)
+    assert r.status_code == 200
+    assert r.json()["teams_written"] == 0
     from biq_onboard_server import org
 
-    for _ in range(2):
-        r = admin_client.post("/api/admin/clubs/club_r2/teams/reseed")
-        assert r.status_code == 200
-        assert r.json()["teams_written"] == 30
-    assert len(org.get_registry().list_teams("club_r2")) == 30
+    assert len(org.get_registry().list_teams("club_r2")) == 2
 
 
 def test_reseed_preserves_roster(admin_client):
-    """A reseed upserts catalog teams without players in the payload — the
-    partial-write contract (exclude_unset + merge) must leave a roster the
-    director already entered untouched."""
+    """create_only catalogue writes never replace an authored roster."""
     admin_client.post(
         "/api/admin/clubs/club_rs/onboard",
         json={"club_id": "club_rs", "name": "Club RS", "slug": "rs", "season": "2026/27"},
     )
+    selection = _catalog_selection(admin_client, "club_rs", 1)
+    team_id = selection["teams"][0]["id"]
+    assert admin_client.post("/api/admin/clubs/club_rs/teams/reseed", json=selection).status_code == 200
     r = admin_client.put(
-        "/api/admin/clubs/club_rs/teams/team_rs_senior_m",
+        f"/api/admin/clubs/club_rs/teams/{team_id}",
         json={
             "players": [
                 {"name": "Ana García", "number": 7},
@@ -968,17 +990,29 @@ def test_reseed_preserves_roster(admin_client):
     )
     assert r.status_code == 200
 
-    r = admin_client.post("/api/admin/clubs/club_rs/teams/reseed")
+    r = admin_client.post("/api/admin/clubs/club_rs/teams/reseed", json=selection)
     assert r.status_code == 200
-    assert r.json()["teams_written"] == 30
+    assert r.json()["teams_written"] == 0
 
     from biq_onboard_server import org
 
-    team = org.get_registry().get_team("club_rs", "team_rs_senior_m")
+    team = org.get_registry().get_team("club_rs", team_id)
     assert [(p.name, p.number) for p in team.players] == [
         ("Ana García", 7),
         ("Luis Pérez", None),
     ]
+
+
+def test_reseed_rejects_more_than_five_or_unknown_catalogue_entries(admin_client):
+    admin_client.post("/api/admin/clubs", json={"id": "club_limit", "name": "Club Limit"})
+    too_many = _catalog_selection(admin_client, "club_limit", 6)
+    assert admin_client.post(
+        "/api/admin/clubs/club_limit/teams/reseed", json=too_many,
+    ).status_code == 422
+    unknown = {"teams": [{"id": "team_limit_unknown", "name": "Unknown"}]}
+    assert admin_client.post(
+        "/api/admin/clubs/club_limit/teams/reseed", json=unknown,
+    ).status_code == 422
 
 
 def test_reseed_failure_persists_failed_job(admin_client, monkeypatch):
@@ -986,25 +1020,34 @@ def test_reseed_failure_persists_failed_job(admin_client, monkeypatch):
         "/api/admin/clubs/club_rf/onboard",
         json={"club_id": "club_rf", "name": "Club RF", "slug": "rf", "season": "2026/27"},
     )
-    from biq_onboard_server import org
+    from biq_onboard_server import org, team_authority
 
     reg = org.get_registry()
 
     def _boom(*_a, **_k):
         raise RuntimeError("simulated write failure")
 
-    monkeypatch.setattr(reg, "bulk_upsert_teams", _boom)
+    monkeypatch.setattr(team_authority, "upsert", _boom)
 
-    r = admin_client.post("/api/admin/clubs/club_rf/teams/reseed")
-    assert r.status_code == 500
+    r = admin_client.post(
+        "/api/admin/clubs/club_rf/teams/reseed",
+        json=_catalog_selection(admin_client, "club_rf", 1),
+    )
+    assert r.status_code == 503
     job = reg.get_club("club_rf").team_seeding_job
     assert job["status"] == "failed"
-    assert "simulated write failure" in job["reason"]
+    assert job["reason"] == "club_team_authority_unavailable"
 
 
 def test_reseed_404_missing_club(admin_client):
-    assert admin_client.post("/api/admin/clubs/ghost/teams/reseed").status_code == 404
+    assert admin_client.post(
+        "/api/admin/clubs/ghost/teams/reseed",
+        json={"teams": [{"id": "team_ghost_senior_m", "name": "Senior M"}]},
+    ).status_code == 404
 
 
 def test_reseed_requires_auth(client):
-    assert client.post("/api/admin/clubs/x/teams/reseed").status_code == 401
+    assert client.post(
+        "/api/admin/clubs/x/teams/reseed",
+        json={"teams": [{"id": "team_x_senior_m", "name": "Senior M"}]},
+    ).status_code == 401

@@ -4,20 +4,37 @@ from __future__ import annotations
 
 import os
 import re
+from datetime import UTC, datetime
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 
+from biq_core.org import Team, ensure_player_ids
+from biq_core.org.catalog import build_team_catalog
 from biq_core.roles import effective_capabilities
+from pydantic import BaseModel, ConfigDict, Field
 
-from .. import org
-from ..auth import _is_break_glass_admin, require_admin, session_user
+from .. import org, team_authority
+from ..auth import _is_break_glass_admin, require_admin_acting, session_user
+from ..migrate_staff import migrate_club
 from ..models import TeamCreate, TeamUpdate
+from ..onboarding import seed_club_team_catalog
 from ..auth import _resolve_acting_identity
 
 router = APIRouter(prefix="/clubs/{club_id}/teams")
 # Mounted alongside `router` at /api/admin — club-scoped endpoints that are
 # about the team catalog but not under the /teams path itself.
 club_router = APIRouter(prefix="/clubs/{club_id}")
+
+
+class CatalogueChoice(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: str = Field(min_length=1, max_length=128)
+    name: str = Field(min_length=1, max_length=140, pattern=r"\S")
+
+
+class CatalogueSelection(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    teams: list[CatalogueChoice] = Field(min_length=1, max_length=5)
 
 
 def _s2s_secret() -> str | None:
@@ -118,8 +135,7 @@ def _require_teams_manage(request: Request, club_id: str) -> str:
 
 @router.post("")
 def create_team(club_id: str, payload: TeamCreate, request: Request) -> dict:
-    _require_teams_manage(request, club_id)
-    from biq_core.org import Team
+    actor = _require_teams_manage(request, club_id)
 
     registry = org.get_registry()
     # competitive_level/players are only passed when the caller sent them —
@@ -142,7 +158,7 @@ def create_team(club_id: str, payload: TeamCreate, request: Request) -> dict:
         label=payload.label,
         **extra,
     )
-    registry.upsert_team(team)
+    team_authority.upsert(actor, club_id, [team.model_dump(mode="json", exclude_unset=True)])
     return {"ok": True, "team": {"id": team.id, "name": team.name}}
 
 
@@ -211,25 +227,36 @@ def get_team_seeding(club_id: str, request: Request) -> dict:
     club = org.get_registry().get_club(club_id)
     if club is None:
         raise HTTPException(status_code=404, detail="club not found")
-    return {"ok": True, "team_seeding_job": club.team_seeding_job}
+    job = club.team_seeding_job
+    return {"ok": True, "team_seeding_job": job if job and job.get("status") else None}
 
 
-@router.post("/reseed")
-def reseed_teams(club_id: str, request: Request) -> dict:
-    """Regenerate the default team catalog in place (idempotent).
-
-    ``bulk_upsert_teams`` merge semantics relabel existing docs rather than
-    duplicating, so this is safe to call any number of times — including from
-    a zero-team state, which is the recovery path for clubs whose creation-time
-    seeding failed silently (the Equipos tab's "Reintentar" action).
-    """
+@router.get("/catalogue")
+def get_team_catalogue(club_id: str, request: Request) -> dict:
+    """Locale-neutral descriptors; UI creates editable, localized name drafts."""
     _require_teams_manage(request, club_id)
+    registry = org.get_registry()
+    club = registry.get_club(club_id)
+    if club is None:
+        raise HTTPException(404, "club_not_found")
+    slug = _catalog_slug(club_id, registry.list_teams(club_id), club.team_seeding_job)
+    season = registry.get_season()
+    year = int(season.split("/")[0]) if season else datetime.now(UTC).year
+    return {"items": [
+        {key: row[key] for key in ("id", "category", "gender", "label")}
+        for row in build_team_catalog(slug, year)
+    ], "limit": 5}
+
+
+@router.post("/reseed", dependencies=[Depends(_require_teams_manage)])
+def reseed_teams(club_id: str, payload: CatalogueSelection, request: Request) -> dict:
+    """An explicit one-to-five selection, committed atomically by App."""
+    actor = _require_teams_manage(request, club_id)
     registry = org.get_registry()
     club = registry.get_club(club_id)
     if club is None:
         raise HTTPException(status_code=404, detail="club not found")
 
-    from ..onboarding import seed_club_team_catalog
     from .onboarding_flow import _current_season_year
 
     slug = _catalog_slug(club_id, registry.list_teams(club_id), club.team_seeding_job)
@@ -238,13 +265,18 @@ def reseed_teams(club_id: str, request: Request) -> dict:
         int(season_str.split("/")[0]) if season_str else _current_season_year()
     )
     try:
-        written = seed_club_team_catalog(registry, club_id, slug, season_year)
+        written = seed_club_team_catalog(
+            registry, club_id, slug, season_year, actor_user_id=actor,
+            selection=[row.model_dump() for row in payload.teams],
+        )
+    except HTTPException:
+        raise
     except Exception as exc:
         # The helper already persisted the failed job — surface it as a hard
         # error so the caller knows the retry did not succeed; the durable
         # state stays queryable via GET .../team-seeding.
         raise HTTPException(
-            status_code=500, detail=f"team reseed failed: {exc}"
+            status_code=503, detail="club_team_authority_unavailable"
         ) from exc
     return {
         "ok": True,
@@ -255,37 +287,26 @@ def reseed_teams(club_id: str, request: Request) -> dict:
 
 @router.put("/{team_id}")
 def update_team(club_id: str, team_id: str, payload: TeamUpdate, request: Request) -> dict:
-    _require_teams_manage(request, club_id)
-    from biq_core.org import Team
+    actor = _require_teams_manage(request, club_id)
 
     registry = org.get_registry()
     existing = registry.get_team(club_id, team_id)
     if existing is None:
         raise HTTPException(status_code=404, detail="team not found")
 
-    # Build the updated team using `is not None` checks (not `or`) so that
-    # an explicit empty list (staff_user_ids: []) or empty string is written
-    # rather than silently falling through to the existing value.
-    # The `payload.x or existing.x` idiom is a trap for list/str fields
-    # where falsy values (empty list, empty string) are legitimate.
-    # `None` means "not sent → preserve"; `""` means "clear the field".
-    team = Team(
-        id=team_id,
-        club_id=club_id,
-        name=payload.name if payload.name is not None else existing.name,
-        category=existing.category if payload.category is None else _nullable(payload.category),
-        gender=existing.gender if payload.gender is None else _nullable(payload.gender),
-        label=payload.label if payload.label is not None else existing.label,
-        timezone=payload.timezone if payload.timezone is not None else existing.timezone,
-        staff_user_ids=payload.staff_user_ids if payload.staff_user_ids is not None else existing.staff_user_ids,
-        competitive_level=payload.competitive_level if payload.competitive_level is not None else existing.competitive_level,
-        players=(
-            _resolve_roster_players(payload.players, registry, club_id)
-            if payload.players is not None
-            else existing.players
-        ),
-    )
-    registry.upsert_team(team)
+    # Send only changed fields: an old read must not undo a concurrent archive.
+    patch = {"id": team_id, "club_id": club_id, **{
+        key: value for key, value in payload.model_dump(exclude_unset=True).items()
+        if value is not None
+    }}
+    for key in ("category", "gender"):
+        if key in patch:
+            patch[key] = _nullable(patch[key])
+    if payload.players is not None:
+        patch["players"] = [player.model_dump(mode="json")
+                            for player in _resolve_roster_players(payload.players, registry, club_id)]
+    result = team_authority.upsert(actor, club_id, [patch])
+    team = Team.model_validate(result["teams"][0])
     return {
         "ok": True,
         "team": {
@@ -319,56 +340,28 @@ def archive_team(club_id: str, team_id: str, request: Request) -> dict:
     Sets archived=true on the team. Archived teams have their future
     operational occurrences and actions cancelled by the OEE engine.
     """
-    _require_teams_manage(request, club_id)
-    from biq_core.org import Team
+    actor = _require_teams_manage(request, club_id)
 
     registry = org.get_registry()
     existing = registry.get_team(club_id, team_id)
     if existing is None:
         raise HTTPException(status_code=404, detail="team not found")
 
-    team = Team(
-        id=team_id,
-        club_id=club_id,
-        name=existing.name,
-        category=existing.category,
-        gender=existing.gender,
-        label=existing.label,
-        timezone=existing.timezone,
-        staff_user_ids=existing.staff_user_ids,
-        competitive_level=existing.competitive_level,
-        players=existing.players,
-        archived=True,
-    )
-    registry.upsert_team(team)
+    team_authority.upsert(actor, club_id, [{"id": team_id, "club_id": club_id, "archived": True}])
     return {"ok": True, "team_id": team_id, "archived": True}
 
 
 @router.put("/{team_id}/unarchive")
 def unarchive_team(club_id: str, team_id: str, request: Request) -> dict:
     """Unarchive a team — resume normal operational reconciliation."""
-    _require_teams_manage(request, club_id)
-    from biq_core.org import Team
+    actor = _require_teams_manage(request, club_id)
 
     registry = org.get_registry()
     existing = registry.get_team(club_id, team_id)
     if existing is None:
         raise HTTPException(status_code=404, detail="team not found")
 
-    team = Team(
-        id=team_id,
-        club_id=club_id,
-        name=existing.name,
-        category=existing.category,
-        gender=existing.gender,
-        label=existing.label,
-        timezone=existing.timezone,
-        staff_user_ids=existing.staff_user_ids,
-        competitive_level=existing.competitive_level,
-        players=existing.players,
-        archived=False,
-    )
-    registry.upsert_team(team)
+    team_authority.upsert(actor, club_id, [{"id": team_id, "club_id": club_id, "archived": False}])
     return {"ok": True, "team_id": team_id, "archived": False}
 
 
@@ -380,10 +373,8 @@ def migrate_staff(club_id: str, request: Request) -> dict:
     selections. Idempotent: only adds users not already in
     ``staff_user_ids``; running it twice produces the same membership.
     """
-    require_admin(request, club_id)
-    from ..migrate_staff import migrate_club
-
-    return {"ok": True, "summary": migrate_club(club_id)}
+    actor = require_admin_acting(request, club_id)
+    return {"ok": True, "summary": migrate_club(club_id, actor)}
 
 
 @router.post("/migrate-player-ids")
@@ -396,8 +387,7 @@ def migrate_player_ids(club_id: str, request: Request, dry_run: bool = True) -> 
     ``players``: the partial ``Team`` (``exclude_unset`` merge) preserves
     every other field. Logs counts only — never player names.
     """
-    require_admin(request, club_id)
-    from biq_core.org import Team, ensure_player_ids
+    actor = require_admin_acting(request, club_id)
 
     registry = org.get_registry()
     teams_scanned = teams_changed = rows_assigned = rows_already_identified = 0
@@ -411,16 +401,11 @@ def migrate_player_ids(club_id: str, request: Request, dry_run: bool = True) -> 
         rows_assigned += missing
         if dry_run:
             continue
-        registry.upsert_team(
-            # Partial write: only `players` is set besides identity fields,
-            # so staff_user_ids/competitive_level/timezone/… are preserved.
-            Team(
-                id=team.id,
-                club_id=club_id,
-                name=team.name,
-                players=ensure_player_ids(list(team.players)),
-            )
-        )
+        team_authority.upsert(actor, club_id, [{
+            "id": team.id, "club_id": club_id,
+            "players": [player.model_dump(mode="json")
+                        for player in ensure_player_ids(list(team.players))],
+        }])
     summary = {
         "teams_scanned": teams_scanned,
         "teams_changed": teams_changed,

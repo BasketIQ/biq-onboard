@@ -114,8 +114,8 @@ async function stopServer() {
  * `routeQuery` optionally sets el.route (e.g. 'entry?invite=tok-1').
  * Returns { page, log } — `log` captures every /api/** request.
  */
-async function newEntryPage(browser, { bootstrap = BOOTSTRAP, routeQuery = null, personalTeams = PERSONAL_TEAMS, personalContext = false, org = undefined, personalTeamsFailure = null, personalTeamsDelayMs = 0, personalTeamsHold = null, waitFeed = true, workspaces = null, invitations = [] } = {}) {
-  const page = await browser.newPage();
+async function newEntryPage(browser, { bootstrap = BOOTSTRAP, routeQuery = null, personalTeams = PERSONAL_TEAMS, personalContext = false, org = undefined, personalTeamsFailure = null, personalTeamsDelayMs = 0, personalTeamsHold = null, waitFeed = true, workspaces = null, invitations = [], i18nLocale = null, viewport = null } = {}) {
+  const page = viewport ? await browser.newPage({ viewport }) : await browser.newPage();
   const log = [];
   let feedCalls = 0;
 
@@ -170,15 +170,16 @@ async function newEntryPage(browser, { bootstrap = BOOTSTRAP, routeQuery = null,
     const el = document.getElementById('app');
     return !!(el && el.shadowRoot);
   }, { timeout: 10000 });
-  await page.evaluate(({ rq, personal, orgCtx }) => {
+  await page.evaluate(({ rq, personal, orgCtx, i18nLocale }) => {
     const el = document.getElementById('app');
+    if (i18nLocale) el.i18n = { locale: i18nLocale };
     if (rq) el.route = rq;
     if (personal) el.context = { owner_scope: { kind: 'personal' } };
     el.org = orgCtx !== null
       ? orgCtx
       : { club: null, email: 'e2e@basketiq.io', display_name: 'E2E', memberships: [] };
     el.user = 'e2e-user';
-  }, { rq: routeQuery, personal: personalContext, orgCtx: org === undefined ? null : org });
+  }, { rq: routeQuery, personal: personalContext, orgCtx: org === undefined ? null : org, i18nLocale });
   await page.waitForFunction(() => {
     const el = document.getElementById('app');
     return !!(el.shadowRoot && el.shadowRoot.childElementCount > 0);
@@ -1267,15 +1268,34 @@ test('club nav exposes an Espacios tab that opens the selector (R6)', async () =
   }
 });
 
-test('personal panel offers the space switch (R6)', async () => {
+test('personal panel offers subscriptions and the space switch (R6)', async () => {
   const browser = await chromium.launch();
   try {
-    const { page } = await newEntryPage(browser, { personalContext: true });
-    const hasSwitch = await page.evaluate(() => {
+    const { page } = await newEntryPage(browser, { personalContext: true, viewport: { width: 390, height: 844 } });
+    const state = await page.evaluate(() => {
       const el = document.getElementById('app');
-      return !!el.shadowRoot.querySelector('[data-personal-switch-space]');
+      const link = el.shadowRoot.querySelector('a[href="#/subscription"]');
+      return {
+        hasSwitch: !!el.shadowRoot.querySelector('[data-personal-switch-space]'),
+        link: link?.textContent.trim(),
+      };
     });
-    assert.ok(hasSwitch, 'personal mode must expose the space switch');
+    assert.equal(state.link, 'Suscripciones: Premium y Smart');
+    assert.ok(state.hasSwitch, 'personal mode must expose the space switch');
+  } finally {
+    await browser.close();
+  }
+});
+
+test('personal panel localizes the subscriptions link in English', async () => {
+  const browser = await chromium.launch();
+  try {
+    const { page } = await newEntryPage(browser, { personalContext: true, i18nLocale: 'en-US', viewport: { width: 1280, height: 800 } });
+    const link = await page.evaluate(() => {
+      const el = document.getElementById('app');
+      return el.shadowRoot.querySelector('a[href="#/subscription"]')?.textContent.trim();
+    });
+    assert.equal(link, 'Subscriptions: Premium and Smart');
   } finally {
     await browser.close();
   }

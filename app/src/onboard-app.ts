@@ -15,6 +15,7 @@
  */
 
 import styles from './styles.css?inline';
+import './personal-staff';
 import { guidedEntryCopy } from './guided-entry-copy';
 import { onboardCopy, type OnboardCopy } from './onboard-copy';
 import { guidedEntry, type PendingInvitation, type WorkspacesEntry } from './guided-entry';
@@ -298,6 +299,7 @@ interface OwnerScope {
 }
 
 interface ContextDescriptor {
+  personal_team_contract?: string;
   token?: string;
   context_id: string;
   context_epoch: number;
@@ -340,6 +342,9 @@ interface PersonalTeamRow {
   season: string;
   archived: boolean;
   team_revision: number;
+  owner_account_id?: string;
+  account_id?: string;
+  plan_state?: string;
 }
 
 // ─── Entry intent (entry-login §4.2) ────────────────────────────────────
@@ -758,7 +763,7 @@ class BiqOnboardApp extends HTMLElement {
   private _deleteConfirmTeamId: string | null = null;
   private _catalogLoaded = false;
   // F12: Team-catalog seeding job state (Club.team_seeding_job, Phase 1).
-  private _teamSeedingJob: { status?: string; reason?: string | null } | null = null;
+  private _teamSeedingJob: { status?: string; reason?: string | null; selection?: Array<Record<string, unknown>> } | null = null;
   private _seedingLoading = false; // reseed POST in-flight
   private _seedingStale = false; // polled past _staleThresholdMs without terminal state
   private _seedingPollTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1043,6 +1048,24 @@ class BiqOnboardApp extends HTMLElement {
     if (read && typeof read.allowed === 'boolean') return read.allowed;
     const personal = (boot.contexts || []).find((c) => c.kind === 'personal');
     return personal ? personal.requires_verification !== true : true;
+  }
+
+  private get staffEnabled(): boolean {
+    return this._bootstrap?.entry_actions?.['personal.staff.manage']?.allowed === true
+      || this._context?.personal_team_contract === 'personal_team/1.0';
+  }
+
+  private ownedFreeCount(teams: PersonalTeamRow[]): number {
+    return teams.filter(team => !team.archived && (
+      !team.owner_account_id || team.owner_account_id === team.account_id && team.plan_state === 'free'
+    )).length;
+  }
+
+  private wireStaffEvents(): void {
+    this.shadow.querySelector('biq-personal-staff')?.addEventListener('personal-staff:changed', () => {
+      void this.loadBootstrap();
+      void this.loadPersonalTeams();
+    });
   }
 
   // ─── SF1 §5: context-bound team-editor ports ──────────────────────────
@@ -4639,7 +4662,8 @@ class BiqOnboardApp extends HTMLElement {
     // Director 2026-10-24 (bugfix-auth-club-roster, bug 2): «Mi club» is
     // ALWAYS shown — the PD-ENTRY coach-hiding gate is removed; with no
     // clubs the block offers «Crear club».
-    const personalTeamCount = this._guidedEntries?.find(entry => entry.kind === 'personal')?.teams.length ?? personalTeams.length;
+    const personalTeamCount = this.staffEnabled ? this.ownedFreeCount(this._personalTeams || [])
+      : this._guidedEntries?.find(entry => entry.kind === 'personal')?.teams.length ?? personalTeams.length;
     const atTeamCap = personalTeamCount >= 2;
     const teamMeta = (t: PersonalTeamRow) =>
       `${escapeHtml(t.category_label || t.category_key)}${t.gender && t.gender !== 'X' ? ` · ${escapeHtml(t.gender)}` : ''}${t.age_band ? ` · ${escapeHtml(t.age_band)}` : ''}`;
@@ -4862,11 +4886,12 @@ class BiqOnboardApp extends HTMLElement {
         ? `<p class="entry-error" role="alert">${entryCopy.invitesFailed} <button class="onboard-btn" type="button" data-guided-retry-invitations>${guidedEntryCopy(this.locale).retry}</button></p>`
         : '';
       const createTeam = actions['personal.team.create']?.allowed === true && !atTeamCap;
-      return `${recoveryMarkup}${invitationError}${this._entryError?`<p class="entry-error" role="alert">${escapeHtml(this._entryError)}</p>`:''}${guidedEntry({entries:this._guidedEntries, role:this._guidedRole, step:this._guidedStep,selection:this._guidedSelection,busy,createTeam,createClub:createAllowed,coachImage:coachEntryImage,directorImage:directorEntryImage,invitations:this._guidedInvitations,otherOptions:this._guidedOtherOptions}, {coach:coachForm,director:directorForm}, this._inviteToken&&!this._invitePreview?`<p class="entry-status" role="status">${entryCopy.checkingInvite}</p>`:inviteBlock, this.locale)}`;
+      return `${this.staffEnabled ? `<biq-personal-staff invitations-only lang="${escapeHtml(this.locale)}"></biq-personal-staff>` : ''}${recoveryMarkup}${invitationError}${this._entryError?`<p class="entry-error" role="alert">${escapeHtml(this._entryError)}</p>`:''}${guidedEntry({entries:this._guidedEntries, role:this._guidedRole, step:this._guidedStep,selection:this._guidedSelection,busy,createTeam,createClub:createAllowed,coachImage:coachEntryImage,directorImage:directorEntryImage,invitations:this._guidedInvitations,otherOptions:this._guidedOtherOptions}, {coach:coachForm,director:directorForm}, this._inviteToken&&!this._invitePreview?`<p class="entry-status" role="status">${entryCopy.checkingInvite}</p>`:inviteBlock, this.locale)}`;
     }
     return `
       <div class="entry-step"${this._helpOpen || this._clubPickerOpen ? ' inert' : ''}>
         <h1 class="sr-only">${entryCopy.enterBasketIQ}</h1>
+        ${this.staffEnabled ? `<biq-personal-staff invitations-only lang="${escapeHtml(this.locale)}"></biq-personal-staff>` : ''}
         ${activeLabel ? `<p class="entry-active">${entryCopy.workingIn} <strong>${escapeHtml(activeLabel)}</strong></p>` : ''}
         ${this._entryError ? `<p class="entry-error" role="alert">${escapeHtml(this._entryError)}</p>` : ''}
         ${recoveryMarkup}
@@ -5055,6 +5080,7 @@ class BiqOnboardApp extends HTMLElement {
   }
 
   private wireEntryEvents(): void {
+    this.wireStaffEvents();
     const inviteAllowed =
       this._bootstrap?.entry_actions?.['club.invitation.redeem']?.allowed !== false;
 
@@ -5162,7 +5188,7 @@ class BiqOnboardApp extends HTMLElement {
       this._runEntryIntent(intent, async () => {
         await this._saveGuidedNickname(fd);
         const res = await this._entryMutation(
-          '/api/context/v1/personal-teams',
+          this.staffEnabled ? '/api/context/v1/personal-staff/teams' : '/api/context/v1/personal-teams',
           {
             name: String(fd.get('name') || '').trim(),
             category_key: String(fd.get('category_key') || ''),
@@ -5177,7 +5203,7 @@ class BiqOnboardApp extends HTMLElement {
         }
         const data = await res.json().catch(() => null);
         intent.mutated = true;
-        intent.team_id = data?.team?.team_id || '';
+        intent.team_id = data?.team?.team_id || data?.team_id || '';
         if (!this._intentCurrent(intent)) return;
         await this._postActivate('personal');
         intent.mutated = true;
@@ -5288,7 +5314,7 @@ class BiqOnboardApp extends HTMLElement {
     const all = this._personalTeams || [];
     const teams = all.filter((t) => !t.archived);
     const archived = all.filter((t) => t.archived);
-    const atCap = teams.length >= 2;
+    const atCap = this.ownedFreeCount(teams) >= 2;
     const teamRow = (t: PersonalTeamRow) => this._editingPersonalTeamId === t.team_id ? `
       <li class="entry-team">
         <form class="entry-form" data-personal-team-edit="${escapeHtml(t.team_id)}" data-revision="${t.team_revision}">
@@ -5311,6 +5337,8 @@ class BiqOnboardApp extends HTMLElement {
     return `
       <div class="entry-step">
         <h2 class="entry-title">${entryCopy.myPersonalSpace}</h2>
+        <p><a class="onboard-btn" href="#/subscription">${entryCopy.subscriptions}</a></p>
+        ${this.staffEnabled ? `<biq-personal-staff lang="${escapeHtml(this.locale)}"></biq-personal-staff>` : ''}
         <button class="onboard-btn" data-personal-switch-space>${entryCopy.switchSpace}</button>
         ${this._entryError ? `<p class="entry-error" role="alert">${escapeHtml(this._entryError)}</p>` : ''}
         ${this._personalTeamsStatus === 'loading' || this._personalTeamsStatus === 'uninitialized'
@@ -5326,7 +5354,7 @@ class BiqOnboardApp extends HTMLElement {
           <ul class="entry-teams">${archived.map((t) => `
             <li class="entry-team"><strong>${escapeHtml(t.name)}</strong>
               <span>${escapeHtml(t.category_label || t.category_key)}</span>
-              <button class="onboard-btn" data-personal-team-restore="${escapeHtml(t.team_id)}" ${this._entryBusy || atCap ? 'disabled' : ''}>${entryCopy.restore}</button>
+              <button class="onboard-btn" data-personal-team-restore="${escapeHtml(t.team_id)}" ${this._entryBusy || (atCap && (!t.plan_state || t.plan_state === 'free')) || t.plan_state === 'expired' ? 'disabled' : ''}>${entryCopy.restore}</button>
             </li>`).join('')}</ul>` : ''}
         ${atCap
           ? `<p class="entry-note">${entryCopy.personalTeamCap}</p>`
@@ -5343,6 +5371,7 @@ class BiqOnboardApp extends HTMLElement {
   }
 
   private wirePersonalEvents(): void {
+    this.wireStaffEvents();
     // Only a never-attempted feed self-loads — a failure is a bounded error
     // state, not an invitation to refetch on every render.
     if (this._personalTeamsStatus === 'uninitialized') {
@@ -5363,10 +5392,10 @@ class BiqOnboardApp extends HTMLElement {
       this._entryError = null;
       this.render();
       try {
-        const res = await fetch('/api/context/v1/personal-teams', {
+        const res = await fetch(this.staffEnabled ? '/api/context/v1/personal-staff/teams' : '/api/context/v1/personal-teams', {
           method: 'POST',
           credentials: 'include',
-          headers: { 'Content-Type': 'application/json', 'Idempotency-Key': `panel-${Date.now()}` },
+          headers: { 'Content-Type': 'application/json', 'Idempotency-Key': (this._guidedCreateKeys[`panel:${JSON.stringify(Array.from(fd.entries()))}`] ||= `panel-${crypto.randomUUID()}`) },
           body: JSON.stringify({
             name: String(fd.get('name') || '').trim(),
             category_key: String(fd.get('category_key') || ''),
@@ -6575,10 +6604,13 @@ class BiqOnboardApp extends HTMLElement {
         this._teamsError = null;
         this.render();
         try {
+          const selection = Array.isArray(this._teamSeedingJob?.selection) ? this._teamSeedingJob.selection : null;
+          if (!selection?.length) throw new Error(this.oc.seedingSelectionRequired);
           const res = await fetch(`/api/clubs/${clubId}/teams/reseed`, {
             method: 'POST',
             credentials: 'include',
             headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ teams: selection }),
           });
           if (!res.ok) {
             const data = await res.json().catch(() => ({}));

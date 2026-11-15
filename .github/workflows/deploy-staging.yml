@@ -35,9 +35,12 @@ permissions:
 jobs:
   pick:
     name: Pick runner
-    runs-on: [self-hosted, development]
+    runs-on: [self-hosted, pick]
     outputs:
       runner: ${{ steps.runner.outputs.runner }}
+      heavy: ${{ steps.runner.outputs.runner_heavy }}
+      light: ${{ steps.runner.outputs.runner_light }}
+      deploy: ${{ steps.runner.outputs.runner_deploy }}
     steps:
       - name: Checkout (action only)
         uses: actions/checkout@v4

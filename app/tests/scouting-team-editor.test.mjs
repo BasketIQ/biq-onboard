@@ -95,7 +95,7 @@ function resetClubTeam() {
     roster_hash: 'a'.repeat(64),
     players: [
       { name: 'Ana García', number: 7, player_id: 'pl_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' },
-      { name: 'Luis Pérez', number: 9, player_id: 'pl_bbbbbbbbbbbbbbbb' },
+      { name: 'Luis Pérez', number: 9, player_id: 'team_club1_cadete_m-p02' },
     ],
   };
 }
@@ -455,6 +455,7 @@ test('a Chispa append invalidates an already-open roster edit', async () => {
       .querySelector('[data-player-name="2"]')?.value === 'Nueva desde Chispa');
     assert.equal(CLUB_TEAM.players.length, 3);
     assert.equal(CLUB_TEAM.players[0].name, 'Ana García');
+    assert.equal(CLUB_TEAM.players[1].player_id, 'team_club1_cadete_m-p02');
   } finally {
     await browser.close();
   }
@@ -735,14 +736,14 @@ test('editing a birth date persists it through the biq-player profile PUT', asyn
       await page.waitForTimeout(80);
     }
     assert.ok(profilePut, 'profile PUT landed');
-    assert.ok(profilePut.url.includes('/players/pl_bbbbbbbbbbbbbbbb/profile'));
+    assert.ok(profilePut.url.includes('/players/team_club1_cadete_m-p02/profile'));
     assert.ok(profilePut.url.includes('team_id=team_club1_cadete_m'));
     const body = JSON.parse(profilePut.postData);
     assert.equal(body.birth_date, '2012-07-01');
     assert.equal(body.expected_revision, 0, 'fresh CAS revision read before write');
     assert.equal(profilePut.headers['x-biq-module'], 'onboard');
     assert.equal(profilePut.headers['authorization'], undefined, 'pasarela: sin Bearer en el navegador');
-    assert.equal(PROFILES.pl_bbbbbbbbbbbbbbbb.birth_date, '2012-07-01');
+    assert.equal(PROFILES["team_club1_cadete_m-p02"].birth_date, '2012-07-01');
 
     // The roster PUT payload never carries birth_date — it is not a team
     // record field.

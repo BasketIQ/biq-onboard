@@ -23,9 +23,12 @@ concurrency:
 jobs:
   pick:
     name: Pick runner
-    runs-on: [self-hosted, development]
+    runs-on: [self-hosted, pick]
     outputs:
       runner: ${{ steps.runner.outputs.runner }}
+      heavy: ${{ steps.runner.outputs.runner_heavy }}
+      light: ${{ steps.runner.outputs.runner_light }}
+      deploy: ${{ steps.runner.outputs.runner_deploy }}
     steps:
       - name: Checkout (action only)
         uses: actions/checkout@v4
@@ -39,7 +42,7 @@ jobs:
 
   frontend:
     needs: [pick]
-    runs-on: ${{ needs.pick.outputs.runner == 'ubuntu-latest' && fromJSON('["ubuntu-latest"]') || fromJSON(format('["self-hosted","{0}"]', needs.pick.outputs.runner)) }}
+    runs-on: ${{ needs.pick.outputs.light == 'ubuntu-latest' && fromJSON('["ubuntu-latest"]') || fromJSON(format('["self-hosted","{0}"]', needs.pick.outputs.light)) }}
     steps:
       - uses: actions/checkout@v4
       - name: Setup self-hosted env

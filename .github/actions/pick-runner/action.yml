@@ -1,22 +1,24 @@
 name: Pick self-hosted runner
 description: >-
-  Pick a BasketIQ self-hosted runner pool (development -> integration2 ->
-  integration) and fall back to ubuntu-latest when no pool has a
-  free/online runner, no runner-read token is set, or the chosen host is
-  critically loaded per Netdata Cloud CPU. The BasketIQ self-hosted runners
-  live at org level (BasketIQ org, Default group, visibility=all) since
-  2026-05-21, so this queries orgs/<owner>/actions/runners derived from
-  github.repository. Pools are evaluated by runner label: a pool is free
-  when ANY online, non-busy runner carries its label (e.g. several runners
-  on the development Mac mini all carry 'development'). Netdata is an
-  optional circuit-breaker. Hosted fallback is disabled: empty token,
-  missing jq, API error, or all pools busy/offline => 'development'
-  (jobs queue on the pool until a runner frees). The pick job itself runs
-  on [self-hosted, development]; 'override: ubuntu-latest' remains the
-  manual escape hatch.
+  Pick BasketIQ self-hosted runner pools per workload class (ADR-010,
+  rule 06). One pick job returns one label per class so every job routes by
+  what it costs, not by a single workflow-wide snapshot:
+  runner_heavy  - CPU-bound test suites: development only (queues there);
+  runner_light  - short gates/suites: development -> integration2 ->
+                  integration -> development (queue);
+  runner_deploy - Cloud Build / Cloud Run deploys (remote-bound):
+                  integration -> development -> integration2 -> integration
+                  if online-busy, else development (queue).
+  `runner` / `runner_json` are the legacy outputs and equal runner_heavy, so
+  an unmigrated job never lands on the slower integration host. Pools are
+  org runners evaluated by label (free = any online, non-busy runner carries
+  the label). No hosted fallback: empty token, missing jq or API error =>
+  development for every class. Optional Netdata CPU circuit-breaker. The
+  pick job itself runs on [self-hosted, pick]; `override` forces one label
+  for every class (manual escape hatch, incl. ubuntu-latest).
 inputs:
   token:
-    description: "Token with org 'Self-hosted runners: Read'. Empty => ubuntu-latest."
+    description: "Token with org 'Self-hosted runners: Read'. Empty => development for every class."
     required: false
     default: ''
   override:
@@ -81,11 +83,20 @@ inputs:
     default: '120'
 outputs:
   runner:
-    description: Selected runner label (development | integration | integration2 | ubuntu-latest)
+    description: Legacy output, equal to runner_heavy (development | ubuntu-latest via override)
     value: ${{ steps.choose.outputs.runner }}
   runner_json:
-    description: JSON array suitable for runs-on (e.g., ["self-hosted","integration2"])
+    description: Legacy JSON array for runs-on, equal to runner_heavy (e.g. ["self-hosted","development"])
     value: ${{ steps.choose.outputs.runner_json }}
+  runner_heavy:
+    description: Label for CPU-bound test suites (development, or the override)
+    value: ${{ steps.choose.outputs.runner_heavy }}
+  runner_light:
+    description: Label for short gates/suites (development | integration2 | integration, or the override)
+    value: ${{ steps.choose.outputs.runner_light }}
+  runner_deploy:
+    description: Label for remote-bound deploy jobs (integration | development | integration2, or the override)
+    value: ${{ steps.choose.outputs.runner_deploy }}
 runs:
   using: composite
   steps:
@@ -110,35 +121,37 @@ runs:
       run: |
         set -uo pipefail
 
-        emit() {
-          local label="$1"
-          local reason="${2:-}"
-          local json
-          if [[ "$label" == ubuntu-* ]]; then
-            json="[\"$label\"]"
-          else
-            json="[\"self-hosted\",\"$label\"]"
-          fi
-          {
-            echo "runner=$label"
-            echo "runner_json=$json"
-          } >> "$GITHUB_OUTPUT"
-          echo "::notice title=pick-runner::selected=$label ${reason}"
+        json_for() {
+          if [[ "$1" == ubuntu-* ]]; then echo "[\"$1\"]"; else echo "[\"self-hosted\",\"$1\"]"; fi
         }
+
+        # emit <heavy> <light> <deploy> <reason>
+        emit() {
+          local heavy="$1" light="$2" deploy="$3" reason="${4:-}"
+          {
+            echo "runner=$heavy"
+            echo "runner_json=$(json_for "$heavy")"
+            echo "runner_heavy=$heavy"
+            echo "runner_light=$light"
+            echo "runner_deploy=$deploy"
+          } >> "$GITHUB_OUTPUT"
+          echo "::notice title=pick-runner::selected heavy=$heavy light=$light deploy=$deploy ${reason}"
+        }
+
+        # emit_all <label> <reason>: same label for every class
+        emit_all() { emit "$1" "$1" "$1" "${2:-}"; }
 
         # ----- Override path -----
         case "$OVERRIDE" in
-          ubuntu-latest|ubuntu-22.04|ubuntu-24.04) emit "$OVERRIDE" "override=$OVERRIDE"; exit 0 ;;
-          development) emit development "override=development"; exit 0 ;;
-          integration) emit integration "override=integration"; exit 0 ;;
-          integration2) emit integration2 "override=integration2"; exit 0 ;;
+          ubuntu-latest|ubuntu-22.04|ubuntu-24.04) emit_all "$OVERRIDE" "override=$OVERRIDE"; exit 0 ;;
+          development|integration|integration2) emit_all "$OVERRIDE" "override=$OVERRIDE"; exit 0 ;;
           self-hosted|"") : ;;
           *) echo "::error::Invalid override '$OVERRIDE'"; exit 1 ;;
         esac
 
         # ----- No token / no jq fast-fail -> queue on development -----
-        if [ -z "$GH_TOKEN" ]; then emit development "no token — queue on development"; exit 0; fi
-        if ! command -v jq >/dev/null 2>&1; then emit development "no jq — queue on development"; exit 0; fi
+        if [ -z "$GH_TOKEN" ]; then emit_all development "no token — queue on development"; exit 0; fi
+        if ! command -v jq >/dev/null 2>&1; then emit_all development "no jq — queue on development"; exit 0; fi
 
         # ----- Query org runners (curl: no gh CLI dependency on runners) -----
         ORG="${REPO%%/*}"
@@ -148,14 +161,14 @@ runs:
           echo "::group::pick-runner api error"
           printf '%s\n' "${runners:0:600}"
           echo "::endgroup::"
-          emit development "api error — queue on development"
+          emit_all development "api error — queue on development"
           exit 0
         fi
         echo "$runners" | jq -e '.runners' >/dev/null 2>&1 || {
           echo "::group::pick-runner api error (non-runners payload)"
           printf '%s\n' "${runners:0:600}"
           echo "::endgroup::"
-          emit development "api error — queue on development"
+          emit_all development "api error — queue on development"
           exit 0
         }
 
@@ -236,9 +249,21 @@ runs:
           fi
         fi
 
-        # ----- Final decision -----
-        # Chain: development -> integration2 -> integration -> development (queue)
-        if [ "$DEV" = free ]; then emit development "development free"; exit 0; fi
-        if [ "$INT2" = free ]; then emit integration2 "development=$DEV, integration2 free"; exit 0; fi
-        if [ "$INT" = free ]; then emit integration "development=$DEV integration2=$INT2, integration free"; exit 0; fi
-        emit development "all pools busy/offline (development=$DEV integration2=$INT2 integration=$INT) — queue"
+        # ----- Final decision per workload class (ADR-010, policy E) -----
+        # heavy: development only — CPU-bound suites run 4-6x slower on
+        # integration and a single integration runner serializes a workflow.
+        HEAVY=development
+        # light: development -> integration2 -> integration -> development (queue)
+        if [ "$DEV" = free ]; then LIGHT=development
+        elif [ "$INT2" = free ]; then LIGHT=integration2
+        elif [ "$INT" = free ]; then LIGHT=integration
+        else LIGHT=development; fi
+        # deploy: remote-bound (Cloud Build/Run), ~1.3x on integration; prefer it
+        # to keep development for tests. Queue on integration only while it is
+        # online; never on an offline/absent pool.
+        if [ "$INT" = free ]; then DEPLOY=integration
+        elif [ "$DEV" = free ]; then DEPLOY=development
+        elif [ "$INT2" = free ]; then DEPLOY=integration2
+        elif [ "$INT" = busy ]; then DEPLOY=integration
+        else DEPLOY=development; fi
+        emit "$HEAVY" "$LIGHT" "$DEPLOY" "(development=$DEV integration2=$INT2 integration=$INT)"

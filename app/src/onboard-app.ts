@@ -1172,7 +1172,7 @@ class BiqOnboardApp extends HTMLElement {
             const pid = row.player_id;
             if (
               pid !== null && pid !== undefined &&
-              (typeof pid !== 'string' || !/^pl_(?:[0-9a-f]{16}|[0-9a-f]{32})$/.test(pid))
+              (typeof pid !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(pid))
             ) {
               return { kind: 'unavailable', message: this.oc.invalidRosterResponse };
             }
@@ -1245,7 +1245,7 @@ class BiqOnboardApp extends HTMLElement {
           const pid = row.player_id;
           if (
             pid !== null && pid !== undefined &&
-            (typeof pid !== 'string' || !/^pl_(?:[0-9a-f]{16}|[0-9a-f]{32})$/.test(pid))
+            (typeof pid !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(pid))
           ) {
             return { kind: 'unavailable', message: this.oc.invalidSaveResponse };
           }
@@ -1327,7 +1327,7 @@ class BiqOnboardApp extends HTMLElement {
         const pid = row.player_id;
         if (
           pid !== null && pid !== undefined && pid !== '' &&
-          (typeof pid !== 'string' || !/^pl_(?:[0-9a-f]{16}|[0-9a-f]{32})$/.test(pid))
+          (typeof pid !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(pid))
         ) {
           return null;
         }

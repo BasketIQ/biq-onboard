@@ -75,7 +75,7 @@ class RosterPlayer(BaseModel):
 
     name: str = Field(min_length=1, max_length=120)
     number: int | None = Field(default=None, ge=0, le=99)
-    player_id: str | None = Field(default=None, pattern=r"^pl_(?:[0-9a-f]{16}|[0-9a-f]{32})$")
+    player_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 
     @field_validator("name")
     @classmethod

@@ -81,7 +81,7 @@ async function newPage(browser) {
 
     // GET /api/clubs/{clubId}/teams → return seed teams (proxied path)
     if (u.includes('/api/clubs/') && u.includes('/teams') && method === 'GET') {
-      await json({ teams: SEED_TEAMS, total: SEED_TEAMS.length });
+      await json({ teams: SEED_TEAMS.map(team => ({ ...team, roster_hash: 'a'.repeat(64) })), total: SEED_TEAMS.length });
       return;
     }
     // PUT /api/clubs/{clubId}/teams/{teamId} → update team (proxied path).
@@ -93,6 +93,7 @@ async function newPage(browser) {
         ok: true,
         team: {
           id: 'updated',
+          roster_hash: 'b'.repeat(64),
           name: body.name || 'Updated',
           category: body.category ?? null,
           gender: body.gender ?? null,

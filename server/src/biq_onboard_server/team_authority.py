@@ -1,6 +1,8 @@
 """Club team mutations use App's atomic beta authority, never a read/count/write."""
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import threading
 from urllib.parse import urlsplit
@@ -14,10 +16,15 @@ from .clients import _internal_token
 
 _memory_lock = threading.RLock()
 _ERRORS = {
-    "club_team_limit_reached": 409, "club_subscription_required": 403,
+    "stale_roster": 409, "revision_conflict": 409, "club_team_limit_reached": 409, "club_subscription_required": 403,
     "sports_director_required": 403, "actor_inactive": 403,
     "club_not_found": 404, "team_not_found": 404, "invalid_team": 422,
 }
+
+
+def roster_hash(players) -> str:
+    rows = [[p.name, p.number, p.player_id] for p in players]
+    return hashlib.sha256(json.dumps(rows, separators=(",", ":")).encode()).hexdigest()
 
 
 class HttpTeamAuthority:
@@ -70,7 +77,12 @@ class MemoryTeamAuthority:
             try:
                 for patch in patches:
                     previous = before[patch["id"]].model_dump(mode="json") if patch["id"] in before else {}
-                    merged = Team.model_validate({**previous, **patch}, strict=True)
+                    fields = dict(patch)
+                    expected = fields.pop("expected_roster_hash", None)
+                    if expected is not None and (not previous or
+                            roster_hash(before[patch["id"]].players) != expected):
+                        raise HTTPException(409, "stale_roster")
+                    merged = Team.model_validate({**previous, **fields}, strict=True)
                     after[patch["id"]] = before[patch["id"]] if create_only and previous else merged
             except ValueError:
                 raise HTTPException(422, "invalid_team") from None

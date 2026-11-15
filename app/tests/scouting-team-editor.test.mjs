@@ -30,7 +30,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const APP_ROOT = resolve(__dirname, '..');
 const REPO_ROOT = resolve(APP_ROOT, '..');
 const DIST_EMBED = join(REPO_ROOT, 'dist', 'embed', 'biq-onboard.js');
-const PORT = 9161;
+let port;
 
 if (!existsSync(DIST_EMBED)) {
   throw new Error('Build output not found. Run `npm run build:lib` first.');
@@ -58,7 +58,8 @@ async function startServer() {
     res.writeHead(200, { 'Content-Type': 'text/html' });
     res.end(HARNESS);
   });
-  await new Promise((r) => server.listen(PORT, r));
+  await new Promise((resolve, reject) => server.once("error", reject).listen(0, resolve));
+  port = server.address().port;
 }
 
 async function stopServer() {
@@ -91,8 +92,9 @@ function resetClubTeam() {
     staff_user_ids: ['u_dir'],
     archived: false,
     competitive_level: 'regional',
+    roster_hash: 'a'.repeat(64),
     players: [
-      { name: 'Ana García', number: 7, player_id: 'pl_aaaaaaaaaaaaaaaa' },
+      { name: 'Ana García', number: 7, player_id: 'pl_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' },
       { name: 'Luis Pérez', number: 9, player_id: 'pl_bbbbbbbbbbbbbbbb' },
     ],
   };
@@ -122,7 +124,7 @@ const CLUB_TEAM2 = {
 let PROFILES;
 function resetProfiles() {
   PROFILES = {
-    pl_aaaaaaaaaaaaaaaa: { birth_date: '2011-03-14', revision: 2 },
+    pl_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa: { birth_date: '2011-03-14', revision: 2 },
   };
 }
 resetProfiles();
@@ -191,10 +193,14 @@ async function newClubPage(browser, { routeQuery = null, teamOverrides = {}, put
       if (m && method === 'PUT') {
         if (putHold) await putHold;
         const body = JSON.parse(req.postData() || '{}');
+        if (body.expected_roster_hash !== CLUB_TEAM.roster_hash) {
+          return json({ detail: 'stale_roster' }, 409);
+        }
         // Server semantics: full roster replace; rows without player_id get
         // one assigned, rows with one keep it.
         CLUB_TEAM = {
           ...CLUB_TEAM,
+          roster_hash: CLUB_TEAM.roster_hash.startsWith('a') ? 'b'.repeat(64) : 'a'.repeat(64),
           name: body.name ?? CLUB_TEAM.name,
           category: body.category !== undefined ? (body.category || null) : CLUB_TEAM.category,
           gender: body.gender !== undefined ? (body.gender || null) : CLUB_TEAM.gender,
@@ -216,7 +222,7 @@ async function newClubPage(browser, { routeQuery = null, teamOverrides = {}, put
     }
   });
 
-  await page.goto(`http://localhost:${PORT}/`);
+  await page.goto(`http://localhost:${port}/`);
   await page.waitForSelector('biq-onboard-app', { state: 'attached', timeout: 10000 });
   await page.waitForFunction(() => {
     const el = document.getElementById('app');
@@ -324,7 +330,7 @@ async function newPersonalPage(browser, { rosterPlayers = null } = {}) {
     }
   });
 
-  await page.goto(`http://localhost:${PORT}/`);
+  await page.goto(`http://localhost:${port}/`);
   await page.waitForSelector('biq-onboard-app', { state: 'attached', timeout: 10000 });
   await page.evaluate((ctx) => {
     const el = document.getElementById('app');
@@ -422,11 +428,33 @@ test('club editor round-trips player_id through edit, remove and add', async () 
     }
     assert.ok(body, 'autosave PUT landed');
     assert.deepEqual(body.players, [
-      { name: 'Ana García Editada', number: 7, player_id: 'pl_aaaaaaaaaaaaaaaa' },
+      { name: 'Ana García Editada', number: 7, player_id: 'pl_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' },
       { name: 'Nueva Jugadora', number: 4, player_id: null },
     ], 'edited row keeps its id, removed row is gone, new row carries none');
-    assert.equal(body.players[0].player_id, 'pl_aaaaaaaaaaaaaaaa');
+    const firstPut = log.find(entry => entry.method === 'PUT' && entry.url.endsWith('/teams/team_club1_cadete_m'));
+    assert.equal(JSON.parse(firstPut.postData).expected_roster_hash, 'a'.repeat(64));
+    assert.equal(body.players[0].player_id, 'pl_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
     assert.equal(body.players[1].player_id, null);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('a Chispa append invalidates an already-open roster edit', async () => {
+  const browser = await chromium.launch();
+  try {
+    const { page } = await newClubPage(browser, { routeQuery: 'teams?edit=team_club1_cadete_m' });
+    await openClubEditor(page);
+    CLUB_TEAM.players.push({ name: 'Nueva desde Chispa', number: 12, player_id: 'pl_' + '9'.repeat(32) });
+    CLUB_TEAM.roster_hash = 'c'.repeat(64);
+    await page.locator('#app [data-player-name="0"]').fill('Cambio desde editor');
+    await page.locator('#app [data-edit-retry]').click();
+    await page.locator('#app [data-edit-load-server]').waitFor({ state: 'visible' });
+    await page.locator('#app [data-edit-load-server]').click();
+    await page.waitForFunction(() => document.getElementById('app').shadowRoot
+      .querySelector('[data-player-name="2"]')?.value === 'Nueva desde Chispa');
+    assert.equal(CLUB_TEAM.players.length, 3);
+    assert.equal(CLUB_TEAM.players[0].name, 'Ana García');
   } finally {
     await browser.close();
   }
@@ -471,7 +499,7 @@ test('the editor adopts server-assigned ids so the next autosave re-sends them',
     assert.equal(second.players.length, 3);
     assert.equal(second.players[2].player_id, 'pl_0000000000000001',
       'the adopted server id travels on the next write');
-    assert.equal(second.players[0].player_id, 'pl_aaaaaaaaaaaaaaaa');
+    assert.equal(second.players[0].player_id, 'pl_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
   } finally {
     await browser.close();
   }

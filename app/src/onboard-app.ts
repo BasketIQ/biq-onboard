@@ -225,6 +225,7 @@ interface TeamRow {
   archived: boolean;
   competitive_level?: string;
   players?: RosterPlayer[];
+  roster_hash?: string;
 }
 
 // Mi Club Phase 4 (Miembros tab): member roster row from
@@ -416,7 +417,7 @@ interface TeamEditorModel {
   name: string;
   competitive_level: string;
   players: RosterPlayer[];
-  version: number | null;
+  version: number | string | null;
   permissions: { read: boolean; edit: boolean };
   // F-CL-3 club-team fields — present only when the port serves the club
   // team catalog. The personal roster API has no category/gender contract,
@@ -450,7 +451,7 @@ interface TeamEditorPort {
       competitive_level: string;
       players: RosterPlayer[];
     },
-    version: number | null,
+    version: number | string | null,
   ): Promise<TeamEditorSave>;
 }
 
@@ -1171,7 +1172,7 @@ class BiqOnboardApp extends HTMLElement {
             const pid = row.player_id;
             if (
               pid !== null && pid !== undefined &&
-              (typeof pid !== 'string' || !/^pl_[0-9a-f]{16}$/.test(pid))
+              (typeof pid !== 'string' || !/^pl_(?:[0-9a-f]{16}|[0-9a-f]{32})$/.test(pid))
             ) {
               return { kind: 'unavailable', message: this.oc.invalidRosterResponse };
             }
@@ -1186,7 +1187,7 @@ class BiqOnboardApp extends HTMLElement {
               gender: t.gender,
               competitive_level: t.competitive_level ?? '',
               players,
-              version: null,
+              version: t.roster_hash ?? null,
               permissions: { read: true, edit: true },
             },
           };
@@ -1198,17 +1199,22 @@ class BiqOnboardApp extends HTMLElement {
         }
         return { kind: 'not-found' };
       },
-      save: async (teamId, draft) => {
+      save: async (teamId, draft, version) => {
+        if (typeof version !== "string") return { kind: "unavailable", message: this.oc.loadRosterFailed };
         let res: Response;
         try {
           res = await fetch(`/api/clubs/${clubId}/teams/${teamId}`, {
             method: 'PUT',
             credentials: 'include',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(draft),
+            body: JSON.stringify({ ...draft, expected_roster_hash: version }),
           });
         } catch {
           return { kind: 'unavailable', message: this.oc.saveTeamFailed };
+        }
+        if (res.status === 409) {
+          const code = (await res.json().catch(() => null))?.detail;
+          if (code === "stale_roster" || code === "revision_conflict") return { kind: "conflict" };
         }
         if (res.status === 403) return { kind: 'denied' };
         if (res.status === 404) return { kind: 'not-found' };
@@ -1239,7 +1245,7 @@ class BiqOnboardApp extends HTMLElement {
           const pid = row.player_id;
           if (
             pid !== null && pid !== undefined &&
-            (typeof pid !== 'string' || !/^pl_[0-9a-f]{16}$/.test(pid))
+            (typeof pid !== 'string' || !/^pl_(?:[0-9a-f]{16}|[0-9a-f]{32})$/.test(pid))
           ) {
             return { kind: 'unavailable', message: this.oc.invalidSaveResponse };
           }
@@ -1255,7 +1261,7 @@ class BiqOnboardApp extends HTMLElement {
             competitive_level:
               typeof team.competitive_level === 'string' ? team.competitive_level : '',
             players,
-            version: null,
+            version: typeof team.roster_hash === "string" ? team.roster_hash : null,
             permissions: { read: true, edit: true },
           },
         };
@@ -1321,7 +1327,7 @@ class BiqOnboardApp extends HTMLElement {
         const pid = row.player_id;
         if (
           pid !== null && pid !== undefined && pid !== '' &&
-          (typeof pid !== 'string' || !/^pl_[0-9a-f]{16}$/.test(pid))
+          (typeof pid !== 'string' || !/^pl_(?:[0-9a-f]{16}|[0-9a-f]{32})$/.test(pid))
         ) {
           return null;
         }
@@ -1373,7 +1379,7 @@ class BiqOnboardApp extends HTMLElement {
             credentials: 'include',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-              expected_revision: version ?? 0,
+              expected_revision: typeof version === "number" ? version : 0,
               name: draft.name,
               competitive_level: draft.competitive_level,
               // F-CL-3 identity preservation: a row id the read served is
@@ -2856,8 +2862,7 @@ class BiqOnboardApp extends HTMLElement {
     this._updateEditStatusDom();
     if (!this._isPersonalContext()) {
       // El puerto club lee la caché del feed de gestión — una
-      // reconciliación real exige refetch primero (limitación sin CAS
-      // declarada: la comparación es de contenido, no de revisión).
+      // reconciliación exige recargar la plantilla y su hash actual.
       const clubId = this._org?.club?.id;
       if (clubId) await this.loadTeams(clubId);
       if (!this._isEditOwner(owner)) return 'failed';

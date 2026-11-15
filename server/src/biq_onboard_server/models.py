@@ -75,7 +75,7 @@ class RosterPlayer(BaseModel):
 
     name: str = Field(min_length=1, max_length=120)
     number: int | None = Field(default=None, ge=0, le=99)
-    player_id: str | None = Field(default=None, pattern=r"^pl_[0-9a-f]{16}$")
+    player_id: str | None = Field(default=None, pattern=r"^pl_(?:[0-9a-f]{16}|[0-9a-f]{32})$")
 
     @field_validator("name")
     @classmethod
@@ -117,6 +117,7 @@ class TeamUpdate(BaseModel):
     staff_user_ids: list[str] | None = None
     competitive_level: str | None = None
     players: list[RosterPlayer] | None = None
+    expected_roster_hash: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
 
     @field_validator("category")
     @classmethod

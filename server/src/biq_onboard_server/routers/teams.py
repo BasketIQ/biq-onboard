@@ -181,6 +181,7 @@ def list_teams(club_id: str, request: Request) -> dict:
                 "archived": t.archived,
                 "competitive_level": t.competitive_level,
                 "players": _players_json(t),
+                "roster_hash": team_authority.roster_hash(t.players),
             }
             for t in teams
         ],
@@ -302,6 +303,8 @@ def update_team(club_id: str, team_id: str, payload: TeamUpdate, request: Reques
     for key in ("category", "gender"):
         if key in patch:
             patch[key] = _nullable(patch[key])
+    if payload.expected_roster_hash is not None and payload.players is None:
+        raise HTTPException(422, "invalid_team")
     if payload.players is not None:
         patch["players"] = [player.model_dump(mode="json")
                             for player in _resolve_roster_players(payload.players, registry, club_id)]
@@ -319,6 +322,7 @@ def update_team(club_id: str, team_id: str, payload: TeamUpdate, request: Reques
             "staff_user_ids": team.staff_user_ids,
             "competitive_level": team.competitive_level,
             "players": _players_json(team),
+            "roster_hash": team_authority.roster_hash(team.players),
         },
     }
 

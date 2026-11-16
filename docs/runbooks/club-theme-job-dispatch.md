@@ -82,5 +82,9 @@ switches ES → EN → ES without remounting the component or posting those draf
 Deployed verification must use the normal shell language picker, not a forced
 reload as a substitute for the live-switch contract.
 
+Completed-job review hints also come from the locale catalogue. The Spanish
+screen must not expose the English `adjust/regenerate/revert` hint; only the
+display label is translated, never stored job statuses or action codes.
+
 See `handoff/inbox/2026-09-02-club-theme-job-stuck-pending-regression-analysis-from-onboarding-architect.md`
 (local-only, not versioned) for the full incident writeup.

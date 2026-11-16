@@ -9,7 +9,7 @@ const ES = {
   themeJob: {
     pending: { title: 'Personalización en cola', description: 'Tu estilo se generará automáticamente en unos segundos.' },
     running: { title: 'Analizando la web del club', description: 'Extrayendo colores y generando el estilo.' },
-    succeeded: { title: 'Propuesta disponible', description: 'Revisa los colores y el escudo antes de aplicar la identidad.', action: 'adjust/regenerate/revert' },
+    succeeded: { title: 'Propuesta disponible', description: 'Revisa los colores y el escudo antes de aplicar la identidad.', action: 'ajustar/regenerar/revertir' },
     uncertain: { title: 'Revisión necesaria', description: 'La web parece legítima pero no tenemos suficiente confianza para aplicar los colores automáticamente.', action: 'Sí, usarlo / cambiar URL' },
     rejected_not_a_club: { title: 'No parece un club', description: 'La URL indicada no corresponde a un club de baloncesto.', action: 'Corregir URL / estilo manual' },
     unsupported_source: { title: 'Fuente no soportada', description: 'No podemos extraer colores de este tipo de página.', action: 'Añadir web / estilo manual' },

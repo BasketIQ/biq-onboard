@@ -9,14 +9,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chromium } from 'playwright';
-import { createServer } from 'http';
 import { readFileSync, existsSync } from 'fs';
 import { join, dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DIST_EMBED = join(resolve(__dirname, '..', '..'), 'dist', 'embed', 'biq-onboard.js');
-const PORT = 9151;
+const ORIGIN = 'http://onboard.test';
 
 if (!existsSync(DIST_EMBED)) throw new Error('Build output not found. Run `npm run build:lib` first.');
 const bundle = readFileSync(DIST_EMBED, 'utf-8');
@@ -38,18 +37,14 @@ const SUMMARY = { club: { id: 'club1', name: 'Club Test' }, team_count: 2, membe
 // fixtures ("Infantil A", "Cadete B") are user data and are excluded below.
 const SPANISH = /\b(Identidad|Equipos|Miembros|Perfil|Espacios|Invitar|Desactivado|Reactivar|Eliminar|Editar|Guardar|Cancelar|Cargando|Plantilla|Archivar|Restaurar|Confirmar|Todos|Activos|Ver:|Sin definir|Regional máximo|Entrenador|Metodología|Plan de temporada|Desconocido|Sí|Tu club|Colores del club|Proponer identidad|Logo del club|Subir archivo|Unirme|Solicitar acceso|Crear club|Nombre del club)\b/;
 
-let server;
-test.before(async () => {
-  server = createServer((req, res) => {
-    if (req.url === '/embed/biq-onboard.js') { res.writeHead(200, { 'Content-Type': 'text/javascript' }); res.end(bundle); return; }
-    res.writeHead(200, { 'Content-Type': 'text/html' }); res.end(HARNESS);
-  });
-  await new Promise((r) => server.listen(PORT, r));
-});
-test.after(async () => { await new Promise((r) => server.close(r)); });
-
 async function open(browser) {
   const page = await browser.newPage();
+  await page.route(ORIGIN + '/**', route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === '/embed/biq-onboard.js') return route.fulfill({ contentType: 'text/javascript', body: bundle });
+    if (path === '/') return route.fulfill({ contentType: 'text/html', body: HARNESS });
+    return route.abort();
+  });
   await page.route('**/api/**', async (route) => {
     const u = route.request().url();
     const json = (body) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
@@ -59,19 +54,19 @@ async function open(browser) {
     if (u.includes('/summary')) return json(SUMMARY);
     return json({ ok: true });
   });
-  await page.goto(`http://localhost:${PORT}/`);
+  await page.goto(ORIGIN);
   await page.waitForFunction(() => !!document.getElementById('app')?.shadowRoot, { timeout: 10000 });
   return page;
 }
 
-async function mountAt(page, route) {
-  await page.evaluate((r) => {
+async function mountAt(page, route, locale = 'en-US') {
+  await page.evaluate(({ r, locale }) => {
     const el = document.getElementById('app');
-    el.i18n = { locale: 'en-US' };
+    el.i18n = { locale };
     el.org = { club: { id: 'club1', name: 'Club Test' }, role: 'administrator' };
     el.user = 'admin';
     el.route = r;
-  }, route);
+  }, { r: route, locale });
 }
 
 const uiText = (page) => page.evaluate(() => {
@@ -159,5 +154,31 @@ test('EN: identity and profile surfaces', async () => {
     text = await uiText(page);
     assert.ok(text.includes('Sports director'), 'profile EN: role label');
     assertEnglish(text, 'profile');
+  } finally { await browser.close(); }
+});
+
+test('identity changes locale in place without losing manual source, logo or colour drafts', async () => {
+  const browser = await chromium.launch();
+  try {
+    const page = await open(browser);
+    await mountAt(page, 'club-details', 'es-ES');
+    await page.getByRole('heading', { name: 'Identidad visual', exact: true }).waitFor();
+    const fields = {
+      '[data-website-input]': 'https://club.example/unsaved',
+      '[data-logo-url-input]': 'https://club.example/unsaved-logo.png',
+      '[data-identity-brand]': '#123456',
+      '[data-identity-alt]': '#e9a405',
+    };
+    for (const [selector, value] of Object.entries(fields)) await page.locator(selector).fill(value);
+    for (const [locale, title] of [['en-US', 'Visual identity'], ['es-ES', 'Identidad visual']]) {
+      await page.evaluate(locale => {
+        document.getElementById('app').i18n.locale = locale;
+        window.dispatchEvent(new CustomEvent('biq-locale:changed', { detail: { locale } }));
+      }, locale);
+      await page.getByRole('heading', { name: title, exact: true }).waitFor({ timeout: 3000 });
+      for (const [selector, value] of Object.entries(fields)) {
+        assert.equal((await page.locator(selector).inputValue()).toLowerCase(), value);
+      }
+    }
   } finally { await browser.close(); }
 });

@@ -531,14 +531,19 @@ class BiqOnboardApp extends HTMLElement {
 
   private readonly onLocaleChanged = () => {
     const guided = this.shadow?.querySelector('.guided-entry');
-    if (!guided) return;
-    const controls = guided.querySelectorAll<HTMLInputElement | HTMLSelectElement>('form input[name], form select[name]');
+    const controls = guided?.querySelectorAll<HTMLInputElement | HTMLSelectElement>('form input[name], form select[name]') || [];
     const draft = new Map(Array.from(controls, control => [control.name, control.value]));
+    const selectors = ['[data-website-input]', '[data-logo-url-input]', '[data-identity-brand]', '[data-identity-alt]'];
+    const identityDraft = new Map(selectors.map(selector => [selector, this.shadow.querySelector<HTMLInputElement>(selector)?.value]));
     this.render();
     const next = this.shadow.querySelectorAll<HTMLInputElement | HTMLSelectElement>('.guided-entry form input[name], .guided-entry form select[name]');
     for (const control of next) {
       const value = draft.get(control.name);
       if (value !== undefined) control.value = value;
+    }
+    for (const [selector, value] of identityDraft) {
+      const control = this.shadow.querySelector<HTMLInputElement>(selector);
+      if (control && value !== undefined) control.value = value;
     }
   };
   private shadow: ShadowRoot;

@@ -32,28 +32,55 @@ looking for `attemptResponseLog.status` on the queue — `INVALID_ARGUMENT` mean
 itself is rejected before it ever reaches the Job container (`gcloud run jobs executions list`
 will show no matching execution around the request time).
 
-## 2. `BIQ_THEME_JOB_RESULT_TOKEN` — duplicated secret, not shared
+## 2. `BIQ_THEME_JOB_RESULT_TOKEN` — canonical numeric Secret Manager binding
 
-Both this repo and `biq-app` bake `BIQ_THEME_JOB_RESULT_TOKEN` into their respective Cloud Run
-env vars from a **same-named but separately-stored** GitHub Actions environment secret
-(`biq-onboard`'s `staging` environment and `biq-app`'s `staging` environment). There is no shared
-source of truth and no sync mechanism — if the value is ever rotated in one repo without the
-matching update in the other, every Job → API callback (`POST .../theme/result`) will 401
-(`_require_job_result_auth` fail-closed) with no automatic retry from the Job side, again freezing
-`theme_job.status` at `"pending"` (this time *after* a `"running"` post that also fails).
+F1 staging reuses the existing callback value as the single Secret Manager
+`BIQ_THEME_JOB_RESULT_TOKEN`, mounted by Onboard and the worker with a numeric
+version. The worker's outgoing App admission credential is a separate numeric
+mount from `BIQ_INTERNAL_TOKEN`; it is not the callback credential. The desired
+references and runtime identity are registered in
+`biq-app-cfg/cfg/basketiq/club-identity-runtime.config.json`.
 
-This was investigated as the leading hypothesis for the 2026-09-02 incident and **ruled out** by
-checking `gh secret list -R <repo> --env staging` update timestamps on both sides (they were
-last touched within one second of each other and unchanged since) — but the coupling itself is
-still real and will drift again on the next unilateral rotation. Not yet remediated; the
-architect-level design options on the table (ranked by preference) are:
+The September deployment used same-named, separately stored GitHub secrets;
+that historical coupling could leave jobs pending when callback authentication
+failed. Do not restore the old pattern or copy values into deployment commands.
+Verify the numeric references and scoped accessor grants on both deployed
+templates, then qualify the real callback path. A successful deploy or matching
+reference alone does not prove a generation completed.
 
-1. Single Secret Manager entry, referenced by both deploys via `--set-secrets` instead of
-   `--set-env-vars` — no baked copies, no duplication, no possible drift.
-2. An org-level GitHub Actions secret instead of two repo/environment-scoped copies.
-3. A post-deploy smoke test on both `deploy.yml` (this repo) and
-   `deploy-club-theme-job.yml` (`biq-app`) that round-trips a synthetic
-   `generate → poll until terminal (or timeout)` against a known-good URL.
+## 3. Admission and terminal-delivery deadlines
+
+Identity admission waits at most 30 seconds, while terminal delivery retains
+eight seconds. The previous eight-second admission timeout was shorter than
+the downstream control-plane request budget and could turn an authoritative
+late `403 smart_required` into `503 identity_smart_unavailable`. The regression
+test injects the late-denial boundary without sleeps and checks that admission
+still fails closed. This is a bounded request, not a retry or an execution
+permission. Manual colours/logo do not acquire a Smart admission.
+
+The worker's configured CPU, memory and 120-second task limit are unchanged.
+Rollback uses the prior main image through the governed deployment workflow.
+Do not lengthen timeouts manually on Cloud Run or use a warm-cache rerun as
+proof. The App technical memory describes the staging-only controlled provider
+and its zero-use receipts; no real model invocation is required to qualify
+that composition.
+
+ES: La admisión espera una respuesta autoritativa hasta 30 segundos; una
+denegación o una confirmación ambigua nunca permite encolar. El callback usa
+una versión numérica del secreto canónico, distinta del token saliente de App.
+Logo y colores manuales siguen funcionando sin Smart. La propuesta requiere
+revisión y activación explícita; el despliegue por sí solo no acredita el flujo.
+
+## 4. Live locale changes on identity screens
+
+The `biq-locale:changed` host event must rerender Mi Club as well as guided
+onboarding. Do not return early when `.guided-entry` is absent: that leaves
+identity in Spanish after the shell has switched to English. Preserve the
+unsaved website, logo URL and primary/secondary colour controls while
+rerendering, alongside the existing guided-form drafts. The browser regression
+switches ES → EN → ES without remounting the component or posting those drafts.
+Deployed verification must use the normal shell language picker, not a forced
+reload as a substitute for the live-switch contract.
 
 See `handoff/inbox/2026-09-02-club-theme-job-stuck-pending-regression-analysis-from-onboarding-architect.md`
 (local-only, not versioned) for the full incident writeup.

@@ -3,7 +3,7 @@ on:
   push:
     branches: ['mission/2026-10-30-club-identity-assisted']
   pull_request:
-    paths: ['app/src/onboard-app.ts', 'app/src/styles.css', 'app/tests/theme*.mjs', '.github/workflows/identity-validation.yml']
+    paths: ['app/src/onboard-app.ts', 'app/src/onboard-copy.ts', 'app/src/styles.css', 'app/tests/theme*.mjs', 'app/tests/locale-en-myclub.test.mjs', '.github/workflows/identity-validation.yml']
   workflow_dispatch:
 permissions:
   contents: read
@@ -31,7 +31,7 @@ jobs:
       - run: npm run typecheck && npm run build:lib
         working-directory: app
       - name: Identity regression suite (mock APIs only)
-        run: node --test --test-concurrency=1 tests/theme-*.test.mjs
+        run: node --test --test-concurrency=1 tests/theme-*.test.mjs tests/locale-en-myclub.test.mjs
         working-directory: app
         env:
           BIQ_IDENTITY_SCREENSHOTS: ${{ runner.temp }}/identity-screenshots

@@ -9,14 +9,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chromium } from 'playwright';
-import { createServer } from 'http';
 import { readFileSync, existsSync } from 'fs';
 import { join, dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DIST_EMBED = join(resolve(__dirname, '..', '..'), 'dist', 'embed', 'biq-onboard.js');
-let port;
+const ORIGIN = 'http://onboard.test';
 
 if (!existsSync(DIST_EMBED)) throw new Error('Build output not found. Run `npm run build:lib` first.');
 const bundle = readFileSync(DIST_EMBED, 'utf-8');
@@ -38,19 +37,14 @@ const SUMMARY = { club: { id: 'club1', name: 'Club Test' }, team_count: 2, membe
 // fixtures ("Infantil A", "Cadete B") are user data and are excluded below.
 const SPANISH = /\b(Identidad|Equipos|Miembros|Perfil|Espacios|Invitar|Desactivado|Reactivar|Eliminar|Editar|Guardar|Cancelar|Cargando|Plantilla|Archivar|Restaurar|Confirmar|Todos|Activos|Ver:|Sin definir|Regional máximo|Entrenador|Metodología|Plan de temporada|Desconocido|Sí|Tu club|Colores del club|Proponer identidad|Logo del club|Subir archivo|Unirme|Solicitar acceso|Crear club|Nombre del club)\b/;
 
-let server;
-test.before(async () => {
-  server = createServer((req, res) => {
-    if (req.url === '/embed/biq-onboard.js') { res.writeHead(200, { 'Content-Type': 'text/javascript' }); res.end(bundle); return; }
-    res.writeHead(200, { 'Content-Type': 'text/html' }); res.end(HARNESS);
-  });
-  await new Promise((r) => server.listen(0, r));
-  port = server.address().port;
-});
-test.after(async () => { await new Promise((r) => server.close(r)); });
-
 async function open(browser) {
   const page = await browser.newPage();
+  await page.route(ORIGIN + '/**', route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === '/embed/biq-onboard.js') return route.fulfill({ contentType: 'text/javascript', body: bundle });
+    if (path === '/') return route.fulfill({ contentType: 'text/html', body: HARNESS });
+    return route.abort();
+  });
   await page.route('**/api/**', async (route) => {
     const u = route.request().url();
     const json = (body) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
@@ -60,7 +54,7 @@ async function open(browser) {
     if (u.includes('/summary')) return json(SUMMARY);
     return json({ ok: true });
   });
-  await page.goto(`http://localhost:${port}/`);
+  await page.goto(ORIGIN);
   await page.waitForFunction(() => !!document.getElementById('app')?.shadowRoot, { timeout: 10000 });
   return page;
 }

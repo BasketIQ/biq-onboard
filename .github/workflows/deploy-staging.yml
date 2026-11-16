@@ -29,6 +29,7 @@ concurrency:
 
 permissions:
   contents: read
+  actions: read
   id-token: write
   deployments: write
 
@@ -109,6 +110,7 @@ jobs:
 
   staging:
     needs: [test]
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     uses: ./.github/workflows/deploy.yml
     with:
       env: staging

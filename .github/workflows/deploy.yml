@@ -46,6 +46,7 @@ concurrency:
 
 permissions:
   contents: read
+  actions: read
   id-token: write
   deployments: write
 
@@ -98,6 +99,32 @@ jobs:
       - name: Setup self-hosted env (toolcache)
         uses: ./.github/actions/setup-self-hosted-env
 
+      - name: Ensure gh on PATH
+        run: |
+          echo "/opt/homebrew/bin" >> "$GITHUB_PATH"
+          echo "/usr/local/bin" >> "$GITHUB_PATH"
+
+      - name: Verify checkout provenance and exact main CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          REQUESTED_REF: ${{ inputs.ref || 'main' }}
+          TARGET_ENV: ${{ inputs.env }}
+        run: |
+          set -euo pipefail
+          CHECKED_OUT_SHA="$(git rev-parse HEAD)"
+          echo "CHECKED_OUT_SHA=${CHECKED_OUT_SHA}" >> "$GITHUB_ENV"
+          if [ "$TARGET_ENV" = staging ]; then
+            [[ "$REQUESTED_REF" = main || "$REQUESTED_REF" =~ ^[a-f0-9]{40}$ ]] || exit 1
+            test "$GITHUB_REF" = refs/heads/main
+            EXPECTED_SHA="$(gh api "repos/${GH_REPO}/commits/${REQUESTED_REF}" --jq .sha)"
+            test "$CHECKED_OUT_SHA" = "$EXPECTED_SHA"
+            RUN_ID="$(gh api "repos/${GH_REPO}/actions/workflows/ci.yml/runs?event=push&branch=main&head_sha=${CHECKED_OUT_SHA}&per_page=100" \
+              --jq '[.workflow_runs[] | select(.head_sha == "'"$CHECKED_OUT_SHA"'" and .head_branch == "main" and .event == "push")] | sort_by(.created_at) | last | .id // empty')"
+            test -n "$RUN_ID"
+            gh run watch "$RUN_ID" --repo "$GH_REPO" --exit-status --interval 10
+          fi
+
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
         with:
@@ -109,17 +136,37 @@ jobs:
       - name: Set up gcloud
         uses: google-github-actions/setup-gcloud@v2
 
+      - name: Prepare numeric identity callback references
+        env:
+          TARGET_ENV: ${{ inputs.env }}
+          PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+          CALLBACK_SECRET_VERSION: ${{ vars.BIQ_THEME_JOB_RESULT_TOKEN_VERSION }}
+          EMBED_SECRET_VERSION: ${{ vars.BIQ_EMBED_JWT_SECRET_VERSION }}
+        run: |
+          set -euo pipefail
+          bash scripts/identity_runtime_secrets.sh >> "$GITHUB_ENV"
+          if [ "$TARGET_ENV" = staging ]; then
+            for spec in "BIQ_THEME_JOB_RESULT_TOKEN:${CALLBACK_SECRET_VERSION}" "BIQ_EMBED_JWT_SECRET:${EMBED_SECRET_VERSION}"; do
+              STATE="$(gcloud secrets versions describe "${spec#*:}" --secret="${spec%:*}" --project="$PROJECT_ID" --format='value(state)')"
+              test "$STATE" = ENABLED
+            done
+          fi
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
       - name: Prefetch biq-core wheelhouse from GAR (ADR-009)
         run: |
           rm -rf wheelhouse && mkdir -p wheelhouse
           TOKEN="$(gcloud auth print-access-token)"
           # Version comes from server/pyproject.toml (single source of truth).
           BIQ_CORE_VERSION=$(grep 'biq-core\[org\]==' server/pyproject.toml | head -1 | sed 's/.*==\([^"]*\).*/\1/')
+          PIP_EXTRA_INDEX_URL="https://oauth2accesstoken:${TOKEN}@europe-west1-python.pkg.dev/basketiq-platform-prod/basketiq-python/simple/" \
           python3 -m pip download "biq-core[org]==${BIQ_CORE_VERSION}" \
             --only-binary=:all: \
             --platform manylinux2014_x86_64 \
             --python-version 312 \
-            --extra-index-url "https://oauth2accesstoken:${TOKEN}@europe-west1-python.pkg.dev/basketiq-platform-prod/basketiq-python/simple/" \
             -d wheelhouse
           echo "wheelhouse: $(ls wheelhouse | wc -l) wheels"
 
@@ -132,7 +179,7 @@ jobs:
           AR_REPO: ${{ vars.GCP_AR_REPO }}
           RUN_SERVICE: ${{ vars.GCP_RUN_SERVICE }}
         run: |
-          IMAGE_URI="europe-west1-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/${RUN_SERVICE}:${GITHUB_SHA}"
+          IMAGE_URI="europe-west1-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/${RUN_SERVICE}:${CHECKED_OUT_SHA}"
           echo "IMAGE_URI=${IMAGE_URI}" >> "${GITHUB_ENV}"
           BUILD_ID=$(gcloud builds submit . \
             --project "${PROJECT_ID}" \
@@ -142,6 +189,9 @@ jobs:
           echo "BUILD_ID=${BUILD_ID}" >> "${GITHUB_ENV}"
           gcloud beta builds log "${BUILD_ID}" --project "${PROJECT_ID}" --stream --quiet
           gcloud builds describe "${BUILD_ID}" --project "${PROJECT_ID}" --format='value(status)' | grep -q '^SUCCESS$'
+          IMAGE_DIGEST="$(gcloud artifacts docker images describe "${IMAGE_URI}" --project "${PROJECT_ID}" --format='value(image_summary.digest)')"
+          [[ "$IMAGE_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]] || exit 1
+          echo "DEPLOY_IMAGE=${IMAGE_URI%:*}@${IMAGE_DIGEST}" >> "$GITHUB_ENV"
 
       - name: Verify dedicated task-invoker SA (C5/R1)
         env:
@@ -273,10 +323,14 @@ jobs:
           # broken deployment.
           REQUIRED_VARS=(
             "BIQ_ONBOARD_S2S_SECRET=${{ secrets.BIQ_ONBOARD_S2S_SECRET }}"
-            "BIQ_THEME_JOB_RESULT_TOKEN=${{ secrets.BIQ_THEME_JOB_RESULT_TOKEN }}"
             "BIQ_ONBOARD_CALLBACK_URL=${{ vars.BIQ_ONBOARD_CALLBACK_URL }}"
             "GCP_PROJECT_ID=${{ vars.GCP_PROJECT_ID }}"
           )
+          LEGACY_CALLBACK_ENV=""
+          if [ "${{ inputs.env }}" != staging ]; then
+            REQUIRED_VARS+=("BIQ_THEME_JOB_RESULT_TOKEN=${{ secrets.BIQ_THEME_JOB_RESULT_TOKEN }}")
+            LEGACY_CALLBACK_ENV=",BIQ_THEME_JOB_RESULT_TOKEN=${{ secrets.BIQ_THEME_JOB_RESULT_TOKEN }}"
+          fi
           for var_pair in "${REQUIRED_VARS[@]}"; do
             var_name="${var_pair%%=*}"
             var_value="${var_pair#*=}"
@@ -327,11 +381,11 @@ jobs:
             --project "${PROJECT_ID}" \
             --region europe-west1 \
             --platform managed \
-            --image "${IMAGE_URI}" \
+            --image "${DEPLOY_IMAGE}" \
             --allow-unauthenticated \
             --port 8080 \
-            --set-env-vars "BIQ_ENV=prod,BIQ_ORG_STORE=firestore,BIQ_ROLES_STORE=firestore,GCP_PROJECT_ID=${{ vars.GCP_PROJECT_ID }},GOOGLE_CLOUD_PROJECT=${{ vars.GCP_PROJECT_ID }},BIQ_ONBOARD_USER=${{ secrets.BIQ_ONBOARD_USER }},BIQ_ONBOARD_PASSWORD=${{ secrets.BIQ_ONBOARD_PASSWORD }},BIQ_ONBOARD_SESSION_SECRET=${{ secrets.BIQ_ONBOARD_SESSION_SECRET }},BIQ_ONBOARD_S2S_SECRET=${{ secrets.BIQ_ONBOARD_S2S_SECRET }},BIQ_THEME_JOB_RESULT_TOKEN=${{ secrets.BIQ_THEME_JOB_RESULT_TOKEN }},BIQ_CLOUD_TASKS_QUEUE=club-theme-generation,GCP_TASKS_QUEUE=club-theme-generation,GCP_TASKS_LOCATION=europe-west1,GCP_THEME_JOB_NAME=club-theme-generation,GCP_TASK_INVOKER_SA=${TASK_INVOKER_SA},BIQ_ONBOARD_CALLBACK_URL=${{ vars.BIQ_ONBOARD_CALLBACK_URL }},BIQ_METHODOLOGY_URL=https://biq-methodology-staging-859603579451.europe-west1.run.app,BIQ_SEASON_PLAN_URL=https://biq-season-plan-staging-859603579451.europe-west1.run.app,BIQ_APP_URL=https://biq-app-staging-859603579451.europe-west1.run.app" \
-            --set-secrets "BIQ_INTERNAL_TOKEN=BIQ_INTERNAL_TOKEN:${INTERNAL_TOKEN_VERSION},BIQ_EMBED_JWT_SECRET=BIQ_EMBED_JWT_SECRET:latest" \
+            --set-env-vars "BIQ_ENV=prod,BIQ_ORG_STORE=firestore,BIQ_ROLES_STORE=firestore,GCP_PROJECT_ID=${{ vars.GCP_PROJECT_ID }},GOOGLE_CLOUD_PROJECT=${{ vars.GCP_PROJECT_ID }},BIQ_ONBOARD_USER=${{ secrets.BIQ_ONBOARD_USER }},BIQ_ONBOARD_PASSWORD=${{ secrets.BIQ_ONBOARD_PASSWORD }},BIQ_ONBOARD_SESSION_SECRET=${{ secrets.BIQ_ONBOARD_SESSION_SECRET }},BIQ_ONBOARD_S2S_SECRET=${{ secrets.BIQ_ONBOARD_S2S_SECRET }}${LEGACY_CALLBACK_ENV},BIQ_CLOUD_TASKS_QUEUE=club-theme-generation,GCP_TASKS_QUEUE=club-theme-generation,GCP_TASKS_LOCATION=europe-west1,GCP_THEME_JOB_NAME=club-theme-generation,GCP_TASK_INVOKER_SA=${TASK_INVOKER_SA},BIQ_ONBOARD_CALLBACK_URL=${{ vars.BIQ_ONBOARD_CALLBACK_URL }},BIQ_METHODOLOGY_URL=https://biq-methodology-staging-859603579451.europe-west1.run.app,BIQ_SEASON_PLAN_URL=https://biq-season-plan-staging-859603579451.europe-west1.run.app,BIQ_APP_URL=https://biq-app-staging-859603579451.europe-west1.run.app" \
+            --set-secrets "BIQ_INTERNAL_TOKEN=BIQ_INTERNAL_TOKEN:${INTERNAL_TOKEN_VERSION},BIQ_EMBED_JWT_SECRET=BIQ_EMBED_JWT_SECRET:${PINNED_EMBED_VERSION}${CALLBACK_SECRET_MAPPING}" \
             --service-account "${DEFAULT_SA}"
 
       - name: Health check

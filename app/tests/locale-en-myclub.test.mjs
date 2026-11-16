@@ -182,3 +182,20 @@ test('identity changes locale in place without losing manual source, logo or col
     }
   } finally { await browser.close(); }
 });
+
+test('ES: completed identity job uses Spanish review actions', async () => {
+  const browser = await chromium.launch();
+  try {
+    const page = await open(browser);
+    await page.route('**/api/clubs/club1/theme', route => route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ ok: true, theme: { status: 'active', seed: { brand: '#123456', brandAlt: '#e9a405' }, gate: { passed: true } }, themeJob: { status: 'succeeded' } }),
+    }));
+    await mountAt(page, 'club-details', 'es-ES');
+    await page.getByRole('heading', { name: 'Propuesta disponible', exact: true }).waitFor({ timeout: 3000 });
+    const text = await uiText(page);
+    assert.ok(text.includes('ajustar/regenerar/revertir'));
+    assert.ok(!text.includes('adjust/regenerate/revert'));
+  } finally { await browser.close(); }
+});

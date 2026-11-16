@@ -48,6 +48,7 @@ from pydantic import BaseModel, field_validator
 from .. import org
 from ..auth import require_admin, session_user, _is_break_glass_admin
 from ..routers.onboarding_flow import _resolve_acting_identity
+from ..identity_smart import IdentitySmart
 
 router = APIRouter(prefix="/clubs/{club_id}/theme")
 
@@ -221,6 +222,8 @@ _tasks_client = None
 
 def _get_tasks_client():
     """Lazily build and cache the Cloud Tasks client."""
+    if os.environ.get("CI", "").lower() == "true":
+        raise RuntimeError("Live identity task dispatch is forbidden in CI")
     global _tasks_client
     if _tasks_client is not None:
         return _tasks_client
@@ -238,6 +241,9 @@ def _enqueue_generation_task(
     manual_seed_brand: str = "",
     manual_seed_alt: str = "",
     manual_variant: str = "standard",
+    actor_id: str = "",
+    requested_at: str = "",
+    ai_parent_id: str = "",
 ) -> str:
     """Enqueue a club-theme generation task to Cloud Tasks.
 
@@ -294,6 +300,12 @@ def _enqueue_generation_task(
         {"name": "SOURCE_URL", "value": source_url},
         {"name": "LEASE_ID", "value": lease_id},
     ]
+    if not manual_seed_brand:
+        env_vars.extend([
+            {"name": "ACTOR_MEMBERSHIP_ID", "value": actor_id},
+            {"name": "JOB_REQUESTED_AT", "value": requested_at},
+            {"name": "AI_PARENT_OPERATION_ID", "value": ai_parent_id},
+        ])
     # Durable correlation only: no credentials or request bodies.
     if os.environ.get("BIQ_OBSERVABILITY_ENABLED") == "1" or (
         os.environ.get("BIQ_OBSERVABILITY_ENABLED") != "0"
@@ -579,7 +591,7 @@ def generate_theme(club_id: str, payload: GenerateRequest, request: Request) -> 
 
     Idempotency (§C5.2): if a lease is live, returns the existing job.
     """
-    _require_theme_admin(request, club_id)
+    actor_id = _require_theme_admin(request, club_id)
 
     url = payload.homepage_url.strip()
     if not url.startswith("https://"):
@@ -609,7 +621,9 @@ def generate_theme(club_id: str, payload: GenerateRequest, request: Request) -> 
     # B10: persist theme_job: pending BEFORE dispatch
     now = _now_iso()
     existing_job = getattr(club, "theme_job", {}) or {}
-    lease_id = f"lease-{club_id}-{int(time.time())}"
+    lease_id = f"lease-{club_id}-{uuid.uuid4().hex}"
+    smart = IdentitySmart()
+    ai_parent_id = smart.begin(club_id, actor_id, lease_id, now, url)
     new_theme_job = {
         "previousTheme": existing_job.get("previousTheme"),
         "draftTheme": copy.deepcopy(existing_job.get("draftTheme")),
@@ -617,6 +631,8 @@ def generate_theme(club_id: str, payload: GenerateRequest, request: Request) -> 
         "status": "pending",
         "sourceUrl": url,
         "requestedAt": now,
+        "aiActorId": actor_id,
+        "aiOperationId": ai_parent_id,
         "finishedAt": None,
         "attempts": (existing_job.get("attempts", 0) if isinstance(existing_job, dict) else 0) + 1,
         "verdict": None,
@@ -631,13 +647,15 @@ def generate_theme(club_id: str, payload: GenerateRequest, request: Request) -> 
 
     # Enqueue after state is persisted (B10: worker cannot race absent state)
     try:
-        task_id = _enqueue_generation_task(club_id, url, lease_id)
+        task_id = _enqueue_generation_task(club_id, url, lease_id, actor_id=actor_id,
+                                           requested_at=now, ai_parent_id=ai_parent_id)
     except Exception as exc:
+        smart.finish(ai_parent_id, "failed")
         # Enqueue failure → club succeeds, persisted recoverable job failure (B9)
         failed_job = dict(new_theme_job)
         failed_job["status"] = "failed"
         failed_job["finishedAt"] = _now_iso()
-        failed_job["reason"] = f"enqueue failed: {exc}"
+        failed_job["reason"] = "identity_enqueue_failed"
         registry.merge_club_fields(club_id, {"theme_job": failed_job})
         raise HTTPException(
             status_code=503,
@@ -658,7 +676,7 @@ def retry_theme(club_id: str, request: Request) -> dict:
 
     Increments attempts/lease and clears notifiedAt. Idempotent.
     """
-    _require_theme_admin(request, club_id)
+    actor_id = _require_theme_admin(request, club_id)
 
     registry = org.get_registry()
     club = registry.get_club(club_id)
@@ -691,7 +709,9 @@ def retry_theme(club_id: str, request: Request) -> dict:
 
     # Clear notifiedAt for re-notification on next terminal (B16)
     now = _now_iso()
-    lease_id = f"lease-{club_id}-{int(time.time())}"
+    lease_id = f"lease-{club_id}-{uuid.uuid4().hex}"
+    smart = IdentitySmart()
+    ai_parent_id = smart.begin(club_id, actor_id, lease_id, now, source_url)
     new_theme_job = {
         "previousTheme": existing_job.get("previousTheme"),
         "draftTheme": copy.deepcopy(existing_job.get("draftTheme")),
@@ -699,6 +719,8 @@ def retry_theme(club_id: str, request: Request) -> dict:
         "status": "pending",
         "sourceUrl": source_url,
         "requestedAt": now,
+        "aiActorId": actor_id,
+        "aiOperationId": ai_parent_id,
         "finishedAt": None,
         "attempts": (existing_job.get("attempts", 0) or 0) + 1,
         "verdict": None,
@@ -712,12 +734,14 @@ def retry_theme(club_id: str, request: Request) -> dict:
     registry.merge_club_fields(club_id, {"theme_job": new_theme_job})
 
     try:
-        task_id = _enqueue_generation_task(club_id, source_url, lease_id)
+        task_id = _enqueue_generation_task(club_id, source_url, lease_id, actor_id=actor_id,
+                                           requested_at=now, ai_parent_id=ai_parent_id)
     except Exception as exc:
+        smart.finish(ai_parent_id, "failed")
         failed_job = dict(new_theme_job)
         failed_job["status"] = "failed"
         failed_job["finishedAt"] = _now_iso()
-        failed_job["reason"] = f"retry enqueue failed: {exc}"
+        failed_job["reason"] = "identity_enqueue_failed"
         registry.merge_club_fields(club_id, {"theme_job": failed_job})
         raise HTTPException(status_code=503, detail="theme retry could not be enqueued")
 
@@ -1311,12 +1335,21 @@ def post_result(club_id: str, payload: ResultRequest, request: Request) -> dict:
         registry.merge_club_fields(club_id, {"theme_job": new_theme_job})
         # Schedule a delayed retry via Cloud Tasks schedule_time (60s).
         source = new_theme_job.get("sourceUrl", "")
-        if source:
-            retry_lease = f"lease-{club_id}-retry-{int(time.time())}"
+        actor_id = new_theme_job.get("aiActorId", "")
+        if source and actor_id:
+            retry_lease = f"lease-{club_id}-retry-{uuid.uuid4().hex}"
+            requested_at = _now_iso()
+            try:
+                ai_parent_id = IdentitySmart().begin(club_id, actor_id, retry_lease, requested_at, source)
+            except HTTPException:
+                # Keep the terminal result and manual alternative, not a stale retry.
+                return {"ok": True, "status": status}
             new_job = {
                 "status": "pending",
                 "sourceUrl": source,
-                "requestedAt": _now_iso(),
+                "requestedAt": requested_at,
+                "aiActorId": actor_id,
+                "aiOperationId": ai_parent_id,
                 "finishedAt": None,
                 "attempts": new_theme_job.get("attempts", 1) + 1,
                 "verdict": None,
@@ -1334,6 +1367,15 @@ def post_result(club_id: str, payload: ResultRequest, request: Request) -> dict:
             # In configured mode, Cloud Tasks holds the task for 60s.
             # In dev mode, _enqueue_generation_task returns a synthetic ID
             # and the retry is immediate (acceptable for local dev).
-            _enqueue_generation_task(club_id, source, retry_lease, schedule_delay_seconds=60)
+            try:
+                _enqueue_generation_task(club_id, source, retry_lease, schedule_delay_seconds=60,
+                                           actor_id=actor_id, requested_at=requested_at,
+                                           ai_parent_id=ai_parent_id)
+            except Exception:
+                IdentitySmart().finish(ai_parent_id, "failed")
+                registry.merge_club_fields(club_id, {"theme_job": {
+                    **new_job, "status": "failed", "finishedAt": _now_iso(),
+                    "reason": "identity_enqueue_failed",
+                }})
 
     return {"ok": True, "status": status}

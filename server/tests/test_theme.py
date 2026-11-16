@@ -74,6 +74,28 @@ def test_generate_theme_enqueues_job(admin_client, club_id):
     assert data["themeJob"]["attempts"] == 1
 
 
+@pytest.mark.parametrize("status", [403, 409, 503])
+def test_smart_denial_preserves_identity_and_never_dispatches(admin_client, club_id, monkeypatch, status):
+    import copy
+    from fastapi import HTTPException
+    from biq_onboard_server import org
+    from biq_onboard_server.routers import theme
+
+    registry = org.get_registry()
+    before = copy.deepcopy(registry.get_club(club_id).model_dump())
+
+    def deny(*args):
+        raise HTTPException(status, "smart_required")
+
+    monkeypatch.setattr(theme.IdentitySmart, "begin", deny)
+    monkeypatch.setattr(theme, "_enqueue_generation_task",
+                        lambda *args, **kwargs: pytest.fail("Denied work must never enqueue"))
+    response = admin_client.post(f"/api/admin/clubs/{club_id}/theme/generate",
+                                 json={"homepage_url": "https://example.com"})
+    assert response.status_code == status
+    assert registry.get_club(club_id).model_dump() == before
+
+
 def test_generate_theme_normalises_url(admin_client, club_id):
     """URL without scheme should be normalised to https://."""
     r = admin_client.post(

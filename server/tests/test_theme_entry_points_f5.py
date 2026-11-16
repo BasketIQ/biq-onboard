@@ -221,7 +221,7 @@ def test_dispatch_failure_returns_503_and_persists_retryable_state(admin_client,
             return f"projects/{project}/locations/{location}/queues/{queue}"
 
         def create_task(self, request):
-            raise RuntimeError("Cloud Tasks unavailable")
+            raise RuntimeError("Cloud Tasks unavailable: PRIVATE_DISPATCH_CREDENTIAL")
 
     monkeypatch.setattr(theme_mod, "_get_tasks_client", lambda: FailingClient())
 
@@ -256,7 +256,9 @@ def test_dispatch_failure_returns_503_and_persists_retryable_state(admin_client,
     theme_job = club.theme_job
     assert theme_job["status"] == "failed"
     assert theme_job["finishedAt"] is not None
-    assert "enqueue failed" in (theme_job.get("reason") or "")
+    assert theme_job.get("reason") == "identity_enqueue_failed"
+    assert "PRIVATE_DISPATCH_CREDENTIAL" not in str(theme_job)
+    assert "PRIVATE_DISPATCH_CREDENTIAL" not in r.text
 
     # Retry must be available (failed is a retryable terminal state)
     monkeypatch.delenv("BIQ_CLOUD_TASKS_QUEUE", raising=False)

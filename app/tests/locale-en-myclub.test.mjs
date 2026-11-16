@@ -16,7 +16,7 @@ import { fileURLToPath } from 'url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DIST_EMBED = join(resolve(__dirname, '..', '..'), 'dist', 'embed', 'biq-onboard.js');
-const PORT = 9151;
+let port;
 
 if (!existsSync(DIST_EMBED)) throw new Error('Build output not found. Run `npm run build:lib` first.');
 const bundle = readFileSync(DIST_EMBED, 'utf-8');
@@ -44,7 +44,8 @@ test.before(async () => {
     if (req.url === '/embed/biq-onboard.js') { res.writeHead(200, { 'Content-Type': 'text/javascript' }); res.end(bundle); return; }
     res.writeHead(200, { 'Content-Type': 'text/html' }); res.end(HARNESS);
   });
-  await new Promise((r) => server.listen(PORT, r));
+  await new Promise((r) => server.listen(0, r));
+  port = server.address().port;
 });
 test.after(async () => { await new Promise((r) => server.close(r)); });
 
@@ -59,19 +60,19 @@ async function open(browser) {
     if (u.includes('/summary')) return json(SUMMARY);
     return json({ ok: true });
   });
-  await page.goto(`http://localhost:${PORT}/`);
+  await page.goto(`http://localhost:${port}/`);
   await page.waitForFunction(() => !!document.getElementById('app')?.shadowRoot, { timeout: 10000 });
   return page;
 }
 
-async function mountAt(page, route) {
-  await page.evaluate((r) => {
+async function mountAt(page, route, locale = 'en-US') {
+  await page.evaluate(({ r, locale }) => {
     const el = document.getElementById('app');
-    el.i18n = { locale: 'en-US' };
+    el.i18n = { locale };
     el.org = { club: { id: 'club1', name: 'Club Test' }, role: 'administrator' };
     el.user = 'admin';
     el.route = r;
-  }, route);
+  }, { r: route, locale });
 }
 
 const uiText = (page) => page.evaluate(() => {
@@ -159,5 +160,31 @@ test('EN: identity and profile surfaces', async () => {
     text = await uiText(page);
     assert.ok(text.includes('Sports director'), 'profile EN: role label');
     assertEnglish(text, 'profile');
+  } finally { await browser.close(); }
+});
+
+test('identity changes locale in place without losing manual source, logo or colour drafts', async () => {
+  const browser = await chromium.launch();
+  try {
+    const page = await open(browser);
+    await mountAt(page, 'club-details', 'es-ES');
+    await page.getByRole('heading', { name: 'Identidad visual', exact: true }).waitFor();
+    const fields = {
+      '[data-website-input]': 'https://club.example/unsaved',
+      '[data-logo-url-input]': 'https://club.example/unsaved-logo.png',
+      '[data-identity-brand]': '#123456',
+      '[data-identity-alt]': '#e9a405',
+    };
+    for (const [selector, value] of Object.entries(fields)) await page.locator(selector).fill(value);
+    for (const [locale, title] of [['en-US', 'Visual identity'], ['es-ES', 'Identidad visual']]) {
+      await page.evaluate(locale => {
+        document.getElementById('app').i18n.locale = locale;
+        window.dispatchEvent(new CustomEvent('biq-locale:changed', { detail: { locale } }));
+      }, locale);
+      await page.getByRole('heading', { name: title, exact: true }).waitFor({ timeout: 3000 });
+      for (const [selector, value] of Object.entries(fields)) {
+        assert.equal((await page.locator(selector).inputValue()).toLowerCase(), value);
+      }
+    }
   } finally { await browser.close(); }
 });

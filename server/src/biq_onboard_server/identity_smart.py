@@ -34,7 +34,7 @@ class IdentitySmart:
                           data=json.dumps(body).encode(), method="POST",
                           headers={"Content-Type": "application/json", "X-Internal-Token": self.token})
         try:
-            with build_opener(_NoRedirect()).open(request, timeout=8) as response:
+            with build_opener(_NoRedirect()).open(request, timeout=30 if path == "begin" else 8) as response:
                 return json.loads(response.read())
         except HTTPError as exc:
             code = "smart_required" if exc.code in {401, 403, 404} else "identity_smart_unavailable"

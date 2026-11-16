@@ -63,3 +63,19 @@ def test_existing_onboard_app_bindings_do_not_require_new_secrets(monkeypatch):
     assert gateway.base == "https://app.example"
     assert gateway.token == "test-existing-token"
     assert gateway.fake is False
+
+
+def test_admission_waits_for_control_plane_and_preserves_a_late_denial(gateway, monkeypatch):
+    from urllib.error import HTTPError
+    from biq_onboard_server import identity_smart
+
+    class Opener:
+        def open(self, request, timeout):
+            assert timeout == 30
+            raise HTTPError(request.full_url, 403, "Forbidden", {}, None)
+
+    monkeypatch.setattr(identity_smart, "build_opener", lambda *_: Opener())
+    with pytest.raises(HTTPException) as error:
+        gateway.begin("club1", "member", "lease", "2026-11-16T10:00:00Z", "https://club.example")
+    assert error.value.status_code == 403
+    assert error.value.detail == "smart_required"

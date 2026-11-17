@@ -17,6 +17,8 @@ router = APIRouter(prefix="/clubs/{club_id}")
 @router.post("/onboard")
 def onboard(club_id: str, payload: OnboardRequest, request: Request) -> dict:
     require_admin(request, club_id)
+    if payload.club_id != club_id:
+        raise HTTPException(422, "club_scope_mismatch")
     try:
         return onboard_club(
             club_id=payload.club_id,

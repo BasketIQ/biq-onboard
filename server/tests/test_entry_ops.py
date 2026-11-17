@@ -160,14 +160,14 @@ class TestIssue:
         assert resp.status_code == 403
 
     def test_issue_returns_token_once(self, client: TestClient) -> None:
-        body = _issue(client, roles=["coach", "assistant"])
+        body = _issue(client, roles=["coach"])
         assert body["token"].startswith("inv_")
         assert body["club_id"] == "c1"
         # Stored record keeps only the digest.
         stored = invitations.get_invitation_store().get(body["invitation_id"])
         assert stored is not None
         assert stored.token_digest != body["token"]
-        assert stored.proposed_roles == ["coach", "assistant"]
+        assert stored.proposed_roles == ["coach"]
 
 
 class TestPreview:
@@ -650,7 +650,7 @@ class TestB1AtomicRedeem:
     def test_replay_does_not_regrant_removed_roles(
         self, client: TestClient
     ) -> None:
-        issued = _issue(client, roles=["coach", "coordinator"])
+        issued = _issue(client, roles=["coach"])
         first = client.post(
             "/api/ops/invitations/redeem",
             json={"token": issued["token"]},
@@ -659,8 +659,8 @@ class TestB1AtomicRedeem:
         assert first.status_code == 200
         member_id = first.json()["membership_subject_id"]
         scope = "club:c1"
-        # The coordinator grant is removed after redemption (demotion).
-        org.get_roles().remove_assignment(f"{member_id}__coordinator__{scope}")
+        # The sole club grant is removed after redemption (revocation).
+        org.get_roles().remove_assignment(f"{member_id}__coach__{scope}")
         replay = client.post(
             "/api/ops/invitations/redeem",
             json={"token": issued["token"]},
@@ -670,7 +670,7 @@ class TestB1AtomicRedeem:
         remaining = [
             a.role for a in org.get_roles().list_assignments(member_id, scope)
         ]
-        assert remaining == ["coach"], (
+        assert remaining == [], (
             "a stale replay must never regrant a removed role"
         )
 
@@ -910,3 +910,12 @@ def test_member_invitation_is_discoverable_and_redeemable_only_by_verified_recip
     member = org.get_registry().get_user(members[0])
     assert member is not None and member.role == "coach" and member.status == "active"
     assert client.get(path, headers=recipient_headers).json() == {"invitations": []}
+
+
+@pytest.mark.parametrize("roles", [["coordinator"], ["assistant"], ["coach", "sports_director"]])
+def test_issue_rejects_legacy_or_multiple_profiles(client, roles):
+    headers = {**_S2S, "X-BIQ-Acting-User-Id": "admin1"}
+    response = client.post("/api/admin/clubs/c1/invitations", json={
+        "proposed_roles": roles, "recipient_email": _RECIPIENT,
+    }, headers=headers)
+    assert response.status_code == 422, response.text

@@ -368,13 +368,13 @@ class TestStrictRedeemAtomicity:
         """Disabled member + removed role after redemption: a replay at the
         Firestore level re-answers 200 and writes nothing."""
         client, fake = fx
-        issued = _issue(client, roles=["coach", "coordinator"])
+        issued = _issue(client, roles=["coach"])
         first = _redeem(client, issued["token"], "acc_s5")
         assert first.status_code == 200
         member_id = first.json()["membership_subject_id"]
         member_path = f"orgs_users/{member_id}"
         fake._docs[member_path]["status"] = "disabled"
-        del fake._docs[f"orgs_clubs/club:c1/roles/{member_id}__coordinator__club:c1"]
+        del fake._docs[f"orgs_clubs/club:c1/roles/{member_id}__coach__club:c1"]
 
         replay = _redeem(client, issued["token"], "acc_s5")
         assert replay.status_code == 200
@@ -382,10 +382,10 @@ class TestStrictRedeemAtomicity:
         assert fake._docs[member_path]["status"] == "disabled", (
             "replay must never reactivate a disabled membership"
         )
-        coordinator_path = (
-            f"orgs_clubs/club:c1/roles/{member_id}__coordinator__club:c1"
+        revoked_path = (
+            f"orgs_clubs/club:c1/roles/{member_id}__coach__club:c1"
         )
-        assert coordinator_path not in fake._docs, (
+        assert revoked_path not in fake._docs, (
             "replay must never regrant a removed role"
         )
 

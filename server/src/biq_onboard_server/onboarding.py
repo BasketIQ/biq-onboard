@@ -7,6 +7,7 @@ server-side. biq-mcp will call the HTTP API instead of running this directly.
 from __future__ import annotations
 
 import re
+import os
 from datetime import datetime, timezone
 
 from biq_core.org import Club, Team, User
@@ -131,6 +132,13 @@ def _find_senior_team(teams: list[Team], slug: str) -> str | None:
     return teams[0].id if teams else None
 
 
+def _require_local_bulk_operation():
+    # Legacy bulk upserts/deletes bypass live membership/ownership transactions.
+    # Deployed clients use entry ops and ordinary scoped mutations instead.
+    if os.environ.get("BIQ_ENV", "local") not in {"local", "test"} or os.environ.get("BIQ_ONBOARD_S2S_SECRET"):
+        raise HTTPException(409, "legacy_bulk_operation_disabled")
+
+
 def onboard_club(
     club_id: str,
     name: str,
@@ -141,6 +149,7 @@ def onboard_club(
     password: str = "b4sk3t.26",
     reset_passwords: bool = False,
 ) -> dict:
+    _require_local_bulk_operation()
     _validate_club_id(club_id)
     registry = org.get_registry()
     roles = org.get_roles()
@@ -222,6 +231,7 @@ def onboard_club(
 
 def offboard_club(club_id: str) -> dict:
     """Delete a club and all its teams, users, and role assignments."""
+    _require_local_bulk_operation()
     _validate_club_id(club_id)
     registry = org.get_registry()
     roles = org.get_roles()

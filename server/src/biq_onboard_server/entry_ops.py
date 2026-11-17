@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter()  # ops: S2S + entry proof
 staff_router = APIRouter()  # staff-scoped issue endpoint
 
-_MEMBER_ROLES = ("administrator", "sports_director", "coach", "assistant", "coordinator")
+_MEMBER_ROLES = ("administrator", "sports_director", "coach")
 _MAX_INVITATION_TTL_DAYS = 14
 
 
@@ -253,6 +253,8 @@ async def invitation_redeem(request: Request) -> dict:
             if not _issuer_still_grants(state, inv, roles):
                 return invitations.RedeemPlan(error=(409, "invitation unavailable"))
             roles = list(dict.fromkeys(canonical_club_role(r) for r in roles))
+            if len(roles) != 1:
+                return invitations.RedeemPlan(error=(409, "invitation unavailable"))
             existing = state.get_user(membership_id) if inv.discoverable else None
             if existing is not None:
                 if (
@@ -511,6 +513,8 @@ def _issue_invitation(club_id: str, issuer: str, body: IssueBody, *, discoverabl
         # Grants must never exceed the issuer's live assignable set.
         raise HTTPException(status_code=403, detail="proposed role not assignable")
     roles = list(dict.fromkeys(canonical_club_role(r) for r in roles))
+    if len(roles) != 1:
+        raise HTTPException(status_code=422, detail="single_club_profile_required")
     inv = invitations.Invitation(
         invitation_id=invitations.new_id(),
         club_id=club_id,

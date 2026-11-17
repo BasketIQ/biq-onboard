@@ -21,3 +21,17 @@ ownership before removing this access».
 
 Validation: Core emulator tests cover demotion, deactivation and deletion and
 existing membership projection regressions. Onboard CI verifies its consumers.
+
+## Service delegation boundary
+
+The environment emergency username grants access only in local/test without
+S2S configured. Staging/production and delegated service calls require a live
+platform grant or active club membership. Global administration routes require
+platform.admin; a generic authenticated user is insufficient. Session-only
+club role administration also checks current membership status. This closes a
+username-based bypass without changing the authenticated BFF delegation header
+contract. Transport role assertions never replace live authorization.
+
+En staging, un token S2S y el nombre del usuario de emergencia no bastan para
+administrar. Las pruebas cubren esta denegación en ES/EN, la revocación del
+administrador y la imposibilidad de acceder a rutas globales como Director.

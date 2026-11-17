@@ -43,7 +43,7 @@ def _authenticate(username: str, password: str) -> bool:
     if user is not None and getattr(user, "password_hash", None):
         return verify_password(password, user.password_hash)
     env_user, env_password = _credentials()
-    return username == env_user and password == env_password
+    return _is_break_glass_admin(username) and password == env_password
 
 
 def session_user(request: Request) -> str:
@@ -56,16 +56,27 @@ def session_user(request: Request) -> str:
 def _is_break_glass_admin(user: str) -> bool:
     """Check if the user authenticated via the shared env credential."""
     env_user, _ = _credentials()
-    return user == env_user
+    return (os.environ.get("BIQ_ENV", "local") in {"local", "test"}
+            and not _s2s_secret() and user == env_user)
+
+
+def _is_platform_admin(user: str) -> bool:
+    try:
+        record = org.get_registry().get_user(user)
+        return bool(record and record.status == "active" and
+                    "platform.admin" in effective_capabilities(user, "platform", org.get_roles()))
+    except Exception as exc:
+        raise HTTPException(503, "identity registry unavailable") from exc
 
 
 def require_admin(request: Request, club_id: str | None = None) -> str:
     """Return the session user or 403 if they lack ``club.admin``."""
     user = session_user(request)
     # Break-glass admin (env credential) has full access.
-    if _is_break_glass_admin(user):
+    if _is_break_glass_admin(user) or _is_platform_admin(user):
         return user
     if club_id:
+        _require_active_member(user, club_id)
         scope = f"club:{club_id}"
         caps = effective_capabilities(user, scope, org.get_roles())
         if "club.admin" not in caps and "roles.manage" not in caps:
@@ -73,6 +84,8 @@ def require_admin(request: Request, club_id: str | None = None) -> str:
                 status_code=403,
                 detail=f"administrator role required for club {club_id}",
             )
+    else:
+        raise HTTPException(403, "platform administrator required")
     return user
 
 
@@ -153,7 +166,7 @@ def _require_active_member(user: str, club_id: str) -> None:
 def require_admin_acting(request: Request, club_id: str) -> str:
     """``require_admin`` over the acting identity (S2S-aware)."""
     user, _email = _resolve_acting_identity(request)
-    if _is_break_glass_admin(user):
+    if _is_break_glass_admin(user) or _is_platform_admin(user):
         return user
     _require_active_member(user, club_id)
     scope = f"club:{club_id}"
@@ -174,7 +187,7 @@ def require_roles_admin_acting(request: Request, club_id: str) -> str:
     club-scoped role-management capabilities are considered.
     """
     user, _email = _resolve_acting_identity(request)
-    if _is_break_glass_admin(user):
+    if _is_break_glass_admin(user) or _is_platform_admin(user):
         return user
     _require_active_member(user, club_id)
     scope = f"club:{club_id}"
@@ -195,8 +208,9 @@ def require_roles_admin(request: Request, club_id: str) -> str:
     is still enforced per-role by ``can_assign_role`` at the endpoint.
     """
     user = session_user(request)
-    if _is_break_glass_admin(user):
+    if _is_break_glass_admin(user) or _is_platform_admin(user):
         return user
+    _require_active_member(user, club_id)
     scope = f"club:{club_id}"
     caps = effective_capabilities(user, scope, org.get_roles())
     if not ({"club.admin", "roles.manage", "roles.manage.sporting"} & set(caps)):

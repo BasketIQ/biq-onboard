@@ -37,3 +37,16 @@ def test_global_admin_route_requires_live_platform_grant(monkeypatch):
     record.status = "deactivated"
     with pytest.raises(HTTPException):
         auth.require_admin(request(user="administrator"))
+
+
+@pytest.mark.parametrize("operation", ["onboard", "offboard"])
+def test_legacy_bulk_writers_cannot_bypass_ownership_in_deployed_environments(monkeypatch, operation):
+    from biq_onboard_server.onboarding import onboard_club, offboard_club
+    monkeypatch.setenv("BIQ_ENV", "staging")
+    with pytest.raises(HTTPException) as denial:
+        if operation == "onboard":
+            onboard_club("club", "Club", "club")
+        else:
+            offboard_club("club")
+    assert denial.value.status_code == 409
+    assert denial.value.detail == "legacy_bulk_operation_disabled"

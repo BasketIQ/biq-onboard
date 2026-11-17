@@ -35,3 +35,17 @@ contract. Transport role assertions never replace live authorization.
 En staging, un token S2S y el nombre del usuario de emergencia no bastan para
 administrar. Las pruebas cubren esta denegación en ES/EN, la revocación del
 administrador y la imposibilidad de acceder a rutas globales como Director.
+
+New invitations accept exactly one canonical club profile. The administrator
+alias remains a compatibility input for sports_director; assistant/coordinator
+and multiple-profile invitations are rejected. Legacy pending invitations with
+unsupported roles fail closed on redemption rather than creating new profiles.
+Replay tests now revoke the sole canonical grant and verify it is not restored.
+
+The old bulk onboard/offboard routines perform non-transactional wholesale
+member/grant writes. They are restricted to local/test without S2S; deployed
+calls receive409 legacy_bulk_operation_disabled. Use the existing signed entry
+flow and scoped member mutations. Club onboarding also rejects a body club ID
+that differs from the authorized URL. This deliberately closes alternate
+writers before provisioning any club ownership, instead of relying on a racy
+preflight owner check. Resource termination requires its dedicated later flow.

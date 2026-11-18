@@ -120,8 +120,22 @@ export class PersonalStaff extends HTMLElement {
       this.teams = teams.teams;
       this.invitations = invitations.invitations;
       this.verificationRequired = invitations.requires_email_verification === true;
-      this.selected = this.teams.some(team => team.team_id === this.selected) ? this.selected : this.teams[0]?.team_id || '';
+      const requested = this.getAttribute('target-team') || this.selected;
+      if (requested && !this.teams.some(team => team.team_id === requested)) {
+        this.selected = '';
+        throw new Error(this.message('conflict'));
+      }
+      this.selected = requested || this.teams[0]?.team_id || '';
       this.directory = this.selected ? await this.request(`/teams/${encodeURIComponent(this.selected)}`) : null;
+      if (generation !== this.generation || !this.isConnected) return;
+      const target = this.getAttribute('target-resource');
+      const action = this.getAttribute('target-action') || '';
+      if (target && this.directory && (
+          (['permission', 'remove', 'transfer'].includes(action) && !this.directory.members.some(row => row.account_id === target)) ||
+          (['resend', 'revoke'].includes(action) && !this.directory.invitations.some(row => row.invitation_id === target)))) {
+        this.directory = null;
+        throw new Error(this.message('conflict'));
+      }
     } catch (error) {
       if (generation !== this.generation || !this.isConnected) return;
       this.error = (error as Error).message;
@@ -250,6 +264,31 @@ export class PersonalStaff extends HTMLElement {
         if (directory?.transfer) void this.command('/transfers/' + action, { transfer_id: directory.transfer.transfer_id });
       });
     }
+    if (!this.busy && directory) {
+      const action = this.getAttribute('target-action') || '';
+      const target = this.getAttribute('target-resource') || '';
+      const candidates = Array.from(this.querySelectorAll<HTMLElement>(
+        '[data-invite], [data-archive], [data-leave], [data-transfer], [data-permission], [data-remove], [data-resend], [data-revoke]'));
+      const node = candidates.find(node => {
+        if (action === 'invite') return node.hasAttribute('data-invite');
+        if (action === 'archive') return node.hasAttribute('data-archive');
+        if (action === 'leave') return node.hasAttribute('data-leave');
+        if (action === 'transfer') return node.hasAttribute('data-transfer');
+        return ['permission', 'remove', 'resend', 'revoke'].includes(action) && node.getAttribute('data-' + action) === target;
+      });
+      if (node) {
+        node.setAttribute('data-continuation-active', 'true');
+        node.setAttribute('tabindex', '-1');
+        node.style.outline = '2px solid var(--color-primary, #c44b00)';
+        node.style.outlineOffset = '4px';
+        queueMicrotask(() => { if (node.isConnected) node.scrollIntoView({block: 'nearest'}); });
+        if (action === 'transfer' && target) {
+          const select = node.querySelector<HTMLSelectElement>('select');
+          if (select) select.value = target;
+        }
+      }
+    }
+
   }
 }
 

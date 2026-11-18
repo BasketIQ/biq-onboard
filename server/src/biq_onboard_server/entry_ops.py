@@ -278,7 +278,7 @@ async def invitation_redeem(request: Request) -> dict:
                 # contacto del nuevo miembro — escribirla aquí evita filas
                 # «Email no disponible» en Miembros para altas por invitación.
                 email=recipient,
-                display_name="",
+                display_name=inv.display_name,
                 role=roles[0],
                 status="active",
             ) if existing is None else None
@@ -295,6 +295,8 @@ async def invitation_redeem(request: Request) -> dict:
                 invitation=inv,
                 member=member,
                 assignments=assignments,
+                staff_team_ids=inv.staff_team_ids if member is not None or (
+                    existing and existing.get("role") == "coach") else [],
                 response={
                     "club_id": inv.club_id,
                     "membership_subject_id": membership_id,

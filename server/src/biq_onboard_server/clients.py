@@ -91,7 +91,7 @@ def season_plan_present(team_ids: list[str]) -> bool | None:
         return None
 
 
-def send_invite(to: str, club_name: str, club_id: str) -> dict:
+def send_invite(to: str, club_name: str, club_id: str, *, idempotency_key=None, locale=None) -> dict:
     """Ask biq-app to send a club invite email (Mi Club Phase 5).
 
     ``POST {BIQ_APP_URL}/internal/email/invite`` with the canonical
@@ -105,7 +105,9 @@ def send_invite(to: str, club_name: str, club_id: str) -> dict:
     try:
         resp = httpx.post(
             f"{base}/internal/email/invite",
-            json={"to": to, "club_name": club_name, "club_id": club_id},
+            json={"to": to, "club_name": club_name, "club_id": club_id,
+                  **({"idempotency_key": idempotency_key} if idempotency_key else {}),
+                  **({"locale": locale} if locale else {})},
             headers={"X-Internal-Token": _internal_token()},
             timeout=10.0,
         )

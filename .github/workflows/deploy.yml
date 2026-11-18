@@ -423,6 +423,7 @@ jobs:
 
       - name: Health check
         env:
+          TARGET_ENV: ${{ inputs.env }}
           PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
           RUN_SERVICE: ${{ vars.GCP_RUN_SERVICE }}
         run: |
@@ -438,6 +439,21 @@ jobs:
             URL="$(jq -er --arg tag "${CANDIDATE_TAG}" \
               '.status.traffic[] | select(.tag == $tag and (.percent // 0) == 0) | .url' <<< "$route")"
             echo "Candidate revision URL: ${URL}" >> "$GITHUB_STEP_SUMMARY"
+          elif [ "$TARGET_ENV" = staging ]; then
+            # After a preview, Cloud Run can retain its pin to the old revision.
+            revision="$(gcloud run services describe "${RUN_SERVICE}" --project "${PROJECT_ID}" \
+              --region europe-west1 --format='value(status.latestCreatedRevisionName)')"
+            image="$(gcloud run revisions describe "$revision" --project "${PROJECT_ID}" \
+              --region europe-west1 --format='value(status.imageDigest)')"
+            test "$image" = "$DEPLOY_IMAGE"
+            gcloud run services update-traffic "${RUN_SERVICE}" --project "${PROJECT_ID}" \
+              --region europe-west1 --to-revisions "$revision=100"
+            serving="$(gcloud run services describe "${RUN_SERVICE}" --project "${PROJECT_ID}" \
+              --region europe-west1 --format='json(status.traffic)')"
+            jq -e --arg revision "$revision" \
+              '[.status.traffic[] | select((.percent // 0) > 0)] as $live
+               | ($live | length) == 1 and $live[0].percent == 100 and $live[0].revisionName == $revision' \
+              <<< "$serving" >/dev/null
           fi
           echo "SERVICE_URL=${URL}" >> "${GITHUB_ENV}"
           for i in 1 2 3 4 5; do

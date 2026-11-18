@@ -16,7 +16,7 @@ import re
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from .. import clients, entry_ops, org
+from .. import clients, club_import, entry_ops, org
 from ..clients import UpstreamServiceError
 from ..auth import require_roles_admin_acting
 
@@ -29,6 +29,15 @@ _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 class InviteRequest(BaseModel):
     email: str
+
+
+@router.post("/import/commit")
+def commit_import(club_id: str, command: club_import.Commit, request: Request):
+    from .teams import _require_teams_manage
+
+    director = require_roles_admin_acting(request, club_id)
+    _require_teams_manage(request, club_id)
+    return club_import.apply(command, club_id, director)
 
 
 @router.post("/invite")

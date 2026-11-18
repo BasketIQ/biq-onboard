@@ -16,6 +16,10 @@ on:
         required: false
         type: string
         default: main
+      candidate_pr:
+        description: "Internal PR with successful exact-head CI. Staging only, no traffic."
+        type: string
+        default: ""
       confirm:
         description: "Must equal DEPLOY-PRODUCTION when env=production."
         required: false
@@ -34,6 +38,10 @@ on:
         required: false
         type: string
         default: main
+      candidate_pr:
+        description: "Internal PR with successful exact-head CI. Staging only, no traffic."
+        type: string
+        default: ""
       confirm:
         description: "Must equal DEPLOY-PRODUCTION when env=production."
         required: false
@@ -46,6 +54,7 @@ concurrency:
 
 permissions:
   contents: read
+  pull-requests: read
   actions: read
   id-token: write
   deployments: write
@@ -104,17 +113,35 @@ jobs:
           echo "/opt/homebrew/bin" >> "$GITHUB_PATH"
           echo "/usr/local/bin" >> "$GITHUB_PATH"
 
-      - name: Verify checkout provenance and exact main CI
+      - name: Verify checkout provenance and exact CI
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           REQUESTED_REF: ${{ inputs.ref || 'main' }}
           TARGET_ENV: ${{ inputs.env }}
+          CANDIDATE_PR: ${{ inputs.candidate_pr }}
         run: |
           set -euo pipefail
           CHECKED_OUT_SHA="$(git rev-parse HEAD)"
           echo "CHECKED_OUT_SHA=${CHECKED_OUT_SHA}" >> "$GITHUB_ENV"
-          if [ "$TARGET_ENV" = staging ]; then
+          if [ -n "$CANDIDATE_PR" ]; then
+            test "$TARGET_ENV" = staging
+            test "$GITHUB_EVENT_NAME" = workflow_dispatch
+            [[ "$CANDIDATE_PR" =~ ^[1-9][0-9]{0,8}$ ]]
+            [[ "$REQUESTED_REF" =~ ^[a-f0-9]{40}$ ]]
+            test "$CHECKED_OUT_SHA" = "$REQUESTED_REF"
+            pr="$(gh api "repos/${GH_REPO}/pulls/${CANDIDATE_PR}")"
+            jq -e --arg sha "$CHECKED_OUT_SHA" --arg repo "$GH_REPO" \
+              '.state == "open" and .base.ref == "main" and .head.sha == $sha
+               and (.head.repo.full_name | ascii_downcase) == ($repo | ascii_downcase)' <<< "$pr" >/dev/null
+            head_branch="$(jq -er .head.ref <<< "$pr")"
+            test "$GITHUB_REF" = "refs/heads/$head_branch"
+            RUN_ID="$(gh api "repos/${GH_REPO}/actions/workflows/ci.yml/runs?event=pull_request&head_sha=${CHECKED_OUT_SHA}&per_page=100" \
+              --jq '[.workflow_runs[] | select(.head_sha == "'"$CHECKED_OUT_SHA"'" and .event == "pull_request")] | sort_by(.created_at) | last | .id // empty')"
+            test -n "$RUN_ID"
+            gh run watch "$RUN_ID" --repo "$GH_REPO" --exit-status --interval 10
+            echo "CANDIDATE_TAG=pr-${CANDIDATE_PR}-${CHECKED_OUT_SHA:0:7}" >> "$GITHUB_ENV"
+          elif [ "$TARGET_ENV" = staging ]; then
             [[ "$REQUESTED_REF" = main || "$REQUESTED_REF" =~ ^[a-f0-9]{40}$ ]] || exit 1
             test "$GITHUB_REF" = refs/heads/main
             EXPECTED_SHA="$(gh api "repos/${GH_REPO}/commits/${REQUESTED_REF}" --jq .sha)"
@@ -377,6 +404,12 @@ jobs:
           test -n "${EMBED_VERSION_STATE}" \
             || { echo "::error::BIQ_EMBED_JWT_SECRET has no enabled Secret Manager version — refusing to deploy (entry proofs would fail closed)"; exit 1; }
 
+          candidate_flags=()
+          if [ -n "${CANDIDATE_TAG:-}" ]; then
+            gcloud run services describe "${RUN_SERVICE}" --project "${PROJECT_ID}" \
+              --region europe-west1 --format='json(status.traffic)' > "$RUNNER_TEMP/methodology-before.json"
+            candidate_flags=(--no-traffic --tag "${CANDIDATE_TAG}")
+          fi
           gcloud run deploy "${RUN_SERVICE}" \
             --project "${PROJECT_ID}" \
             --region europe-west1 \
@@ -386,7 +419,7 @@ jobs:
             --port 8080 \
             --set-env-vars "BIQ_ENV=prod,BIQ_ORG_STORE=firestore,BIQ_ROLES_STORE=firestore,GCP_PROJECT_ID=${{ vars.GCP_PROJECT_ID }},GOOGLE_CLOUD_PROJECT=${{ vars.GCP_PROJECT_ID }},BIQ_ONBOARD_USER=${{ secrets.BIQ_ONBOARD_USER }},BIQ_ONBOARD_PASSWORD=${{ secrets.BIQ_ONBOARD_PASSWORD }},BIQ_ONBOARD_SESSION_SECRET=${{ secrets.BIQ_ONBOARD_SESSION_SECRET }},BIQ_ONBOARD_S2S_SECRET=${{ secrets.BIQ_ONBOARD_S2S_SECRET }}${LEGACY_CALLBACK_ENV},BIQ_CLOUD_TASKS_QUEUE=club-theme-generation,GCP_TASKS_QUEUE=club-theme-generation,GCP_TASKS_LOCATION=europe-west1,GCP_THEME_JOB_NAME=club-theme-generation,GCP_TASK_INVOKER_SA=${TASK_INVOKER_SA},BIQ_ONBOARD_CALLBACK_URL=${{ vars.BIQ_ONBOARD_CALLBACK_URL }},BIQ_METHODOLOGY_URL=https://biq-methodology-staging-859603579451.europe-west1.run.app,BIQ_SEASON_PLAN_URL=https://biq-season-plan-staging-859603579451.europe-west1.run.app,BIQ_APP_URL=https://biq-app-staging-859603579451.europe-west1.run.app" \
             --set-secrets "BIQ_INTERNAL_TOKEN=BIQ_INTERNAL_TOKEN:${INTERNAL_TOKEN_VERSION},BIQ_EMBED_JWT_SECRET=BIQ_EMBED_JWT_SECRET:${PINNED_EMBED_VERSION}${CALLBACK_SECRET_MAPPING}" \
-            --service-account "${DEFAULT_SA}"
+            --service-account "${DEFAULT_SA}" "${candidate_flags[@]}"
 
       - name: Health check
         env:
@@ -397,6 +430,15 @@ jobs:
             --project "${PROJECT_ID}" \
             --region europe-west1 \
             --format='value(status.url)')
+          if [ -n "${CANDIDATE_TAG:-}" ]; then
+            route="$(gcloud run services describe "${RUN_SERVICE}" --project "${PROJECT_ID}" \
+              --region europe-west1 --format='json(status.traffic)')"
+            served='.status.traffic | map(select((.percent // 0) > 0) | {revisionName, percent}) | sort_by(.revisionName)'
+            test "$(jq -c "$served" "$RUNNER_TEMP/methodology-before.json")" = "$(jq -c "$served" <<< "$route")"
+            URL="$(jq -er --arg tag "${CANDIDATE_TAG}" \
+              '.status.traffic[] | select(.tag == $tag and (.percent // 0) == 0) | .url' <<< "$route")"
+            echo "Candidate revision URL: ${URL}" >> "$GITHUB_STEP_SUMMARY"
+          fi
           echo "SERVICE_URL=${URL}" >> "${GITHUB_ENV}"
           for i in 1 2 3 4 5; do
             echo "Health check attempt ${i}..."

@@ -48,6 +48,8 @@ class Invitation:
     redeemed_account_id: str = ""
     membership_subject_id: str = ""
     discoverable: bool = False
+    staff_team_ids: list[str] = field(default_factory=list)
+    display_name: str = ""
 
     def is_live(self, now_iso: str) -> bool:
         return self.status == "pending" and (not self.expires_at or self.expires_at > now_iso)
@@ -92,6 +94,8 @@ def _from_dict(inv_id: str, data: dict[str, Any]) -> Invitation:
         redeemed_account_id=str(data.get("redeemed_account_id", "")),
         membership_subject_id=str(data.get("membership_subject_id", "")),
         discoverable=bool(data.get("discoverable", False)),
+        staff_team_ids=list(data.get("staff_team_ids") or []),
+        display_name=str(data.get("display_name") or ""),
     )
 
 
@@ -101,6 +105,16 @@ class MemoryInvitationStore:
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self._docs: dict[str, dict[str, Any]] = {}
+        self._imports: dict[str, dict[str, Any]] = {}
+
+    def import_record(self, key, value=None):
+        with self._lock:
+            return self._imports.setdefault(key, value) if value is not None else self._imports.get(key)
+
+    def create_once(self, inv):
+        with self._lock:
+            doc = self._docs.setdefault(inv.invitation_id, _to_dict(inv))
+            return _from_dict(inv.invitation_id, doc)
 
     def put(self, inv: Invitation) -> None:
         with self._lock:
@@ -153,6 +167,27 @@ class FirestoreInvitationStore:
 
     def put(self, inv: Invitation) -> None:
         self._ref(inv.invitation_id).set(_to_dict(inv))
+
+    def import_record(self, key, value=None):
+        from google.api_core.exceptions import AlreadyExists
+
+        ref = self._client.collection("club_import_operations").document(key)
+        if value is not None:
+            try:
+                ref.create(value)
+                return value
+            except AlreadyExists:
+                pass
+        return self._snap_dict(ref.get())
+
+    def create_once(self, inv):
+        from google.api_core.exceptions import AlreadyExists
+
+        try:
+            self._ref(inv.invitation_id).create(_to_dict(inv))
+            return inv
+        except AlreadyExists:
+            return self.get(inv.invitation_id)
 
     def get(self, invitation_id: str) -> Invitation | None:
         doc = self._snap_dict(self._ref(invitation_id).get())
@@ -232,6 +267,7 @@ class RedeemPlan:
     assignments: list[Any] = field(default_factory=list)
     response: dict[str, Any] | None = None
     error: tuple[int, str] | None = None
+    staff_team_ids: list[str] = field(default_factory=list)
 
 
 def transact_redeem(
@@ -294,6 +330,10 @@ def transact_redeem(
                 (a.scope, a.id): role_registry._assignments.get((a.scope, a.id))
                 for a in plan.assignments
             }
+            prior_teams = {
+                team.id: team for team in registry.list_teams(plan.invitation.club_id)
+                if team.id in plan.staff_team_ids and not team.archived
+            } if plan.staff_team_ids and plan.invitation else {}
             try:
                 if plan.invitation is not None:
                     store.put(plan.invitation)
@@ -301,6 +341,10 @@ def transact_redeem(
                     registry.upsert_user(plan.member)
                 for assignment in plan.assignments:
                     role_registry.put_assignment(assignment)
+                for team in prior_teams.values():
+                    registry.upsert_team(team.model_copy(update={
+                        "staff_user_ids": list(dict.fromkeys([*team.staff_user_ids, plan.invitation.membership_subject_id])),
+                    }))
             except Exception:
                 if prior_inv_doc is None:
                     store._docs.pop(invitation_id, None)
@@ -316,6 +360,8 @@ def transact_redeem(
                         role_registry._assignments.pop(key, None)
                     else:
                         role_registry._assignments[key] = prior
+                for team in prior_teams.values():
+                    registry.upsert_team(team)
                 raise
             return plan
 
@@ -366,6 +412,19 @@ def transact_redeem(
             plan = decide(RedeemRead(inv, _get_user, _list_assignments))
             if plan.error:
                 return plan
+            staff_targets = []
+            if plan.invitation is not None:
+                for team_id in plan.staff_team_ids:
+                    ref = clubs_col.document(plan.invitation.club_id).collection("teams").document(team_id)
+                    snapshot = ref.get()
+                    row = FirestoreInvitationStore._snap_dict(snapshot)
+                    if row and row.get("club_id") == plan.invitation.club_id and not row.get("archived"):
+                        staff = list(dict.fromkeys([*row.get("staff_user_ids", []),
+                                                  plan.invitation.membership_subject_id]))
+                        staff_targets.append((ref, snapshot.update_time, staff))
+            for ref, version, staff in staff_targets:
+                transaction.update(ref, {"staff_user_ids": staff},
+                                   option=client.write_option(last_update_time=version))
             if plan.invitation is not None:
                 transaction.set(inv_ref, _to_dict(plan.invitation))
             if plan.member is not None:

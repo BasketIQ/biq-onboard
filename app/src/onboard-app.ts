@@ -526,6 +526,7 @@ const ENTRY_PLUS_SVG =
 
 class BiqOnboardApp extends HTMLElement {
   i18n?: { locale?: string };
+  private disposeClubImport?: () => void;
   private get locale() { return this.i18n?.locale || document.documentElement.lang || 'es-ES'; }
   private get oc(): OnboardCopy { return onboardCopy(this.locale); }
 
@@ -862,6 +863,8 @@ class BiqOnboardApp extends HTMLElement {
     // in-flight reads invalidated; an async response guard cannot stop that
     // paint. A fresh fetch under the new tier repopulates below.
     if (clubChanged || roleChanged) {
+      this.disposeClubImport?.();
+      this.disposeClubImport = undefined;
       this._clearMembersState();
       // The club edit surface is org-scoped — a different club or a role
       // transition retires an open editor and its drafts synchronously.
@@ -3818,6 +3821,7 @@ class BiqOnboardApp extends HTMLElement {
 
   // C11: Lifecycle — stop polling on disconnect, resume on reconnect
   disconnectedCallback(): void {
+    this.disposeClubImport?.();
     window.removeEventListener("biq-locale:changed", this.onLocaleChanged);
     this._stopPolling();
     this._stopSeedingPolling();
@@ -5880,6 +5884,9 @@ class BiqOnboardApp extends HTMLElement {
           </select>
         </label>` : ''}
       </div>
+      ${this._org?.role === 'sports_director' ? `<biq-smart-entry task="onboard.club-import"
+        label="${escapeHtml(clubImportLabel(this.locale))}" data-smart-bind requires-team="false"
+        data-club-import></biq-smart-entry>` : ''}
       ${seedingBanner}
       ${this._teamsError ? `<div class="onboard-error" role="alert">${escapeHtml(this._teamsError)}</div>` : ''}
       ${sections || `<p class="onboard-card-desc">${this.oc.noTeams}</p>`}
@@ -6582,6 +6589,17 @@ class BiqOnboardApp extends HTMLElement {
   }
 
   private wireTeamsEvents(clubId: string): void {
+    this.shadow.querySelector('[data-club-import]')?.addEventListener('smart-entry:activate', event => {
+      if ((event as CustomEvent).detail?.action !== 'activate' || this._org?.role !== 'sports_director') return;
+      this.disposeClubImport?.();
+      this.disposeClubImport = openClubImport(this.locale,
+        () => this.isConnected && this._org?.club?.id === clubId && this._org.role === 'sports_director',
+        () => void this.loadTeams(clubId), {
+          category: PERSONAL_CATEGORIES.map(c => [c.key, this.oc.categories[c.key] ?? c.label]),
+          gender: TEAM_GENDER_OPTIONS.map(g => [g.value, this.oc.genders[g.value] ?? g.label]),
+          level: COMPETITIVE_LEVEL_OPTIONS.map(level => [level.value, this.oc.levels[level.value] ?? level.label]),
+        });
+    });
     // Navigation (same as wireEvents but routes to teams-specific wiring)
     this.shadow.querySelectorAll('[data-nav]').forEach(btn => {
       btn.addEventListener('click', () => {
@@ -6798,3 +6816,4 @@ customElements.define('biq-onboard-app', BiqOnboardApp);
 // F7: Exports for unit testing (not part of the public bundle API)
 export { canCreateClub, clubTabsForMembershipState, defaultClubTab, normaliseWebsiteUrl };
 export type { ClubTab };
+import { clubImportLabel, openClubImport } from './club-import';

@@ -6,6 +6,8 @@ const texts = {
     gender: 'Género', level: 'Nivel', email: 'Correo', role: 'Rol', teams: 'Equipos separados por coma',
     help: 'Revisa o elimina filas antes de confirmar. Los entrenadores deben aceptar la invitación.',
     previewError: 'No se pudo leer el fichero. Comprueba el formato, el tamaño y Smart.',
+    documentTooLarge: 'El fichero supera 5 MB.', badFormat: 'El formato del fichero no es compatible.',
+    badRows: 'No se pudieron extraer filas válidas.',
     confirmError: 'No se confirmó el resultado. Puedes reintentar la misma confirmación.',
     busy: 'Procesando…', empty: 'El fichero no contiene equipos ni entrenadores reconocibles.',
     created: 'Equipo creado', invited: 'Invitación pendiente de aceptación',
@@ -25,6 +27,8 @@ const texts = {
     gender: 'Gender', level: 'Level', email: 'Email', role: 'Role', teams: 'Teams separated by commas',
     help: 'Review or remove rows before confirming. Coaches must accept their invitation.',
     previewError: 'Could not read the file. Check its format, size and Smart access.',
+    documentTooLarge: 'The file exceeds 5 MB.', badFormat: 'This file format is unsupported.',
+    badRows: 'No valid rows could be extracted.',
     confirmError: 'The result could not be confirmed. You can retry the same confirmation.',
     busy: 'Processing…', empty: 'The file contains no recognizable teams or coaches.',
     created: 'Team created', invited: 'Invitation awaiting acceptance',
@@ -67,11 +71,12 @@ export function openClubImport(locale: string, current: () => boolean, refresh: 
     borderRadius: '1rem', padding: '1rem', overflow: 'auto'});
   const abort = new AbortController();
   let rows: Row[] | null = null;
+  let warnings = new WeakMap<Row, string[]>();
   let outcomes: Outcome[] | null = null;
   let error = '';
   let busy = false;
   let pendingCommit: string | null = null;
-  let previewKey: { fingerprint: string; operation: string } | undefined;
+
 
   const node = <K extends keyof HTMLElementTagNameMap>(tag: K, text?: string) => {
     const element = document.createElement(tag);
@@ -91,7 +96,7 @@ export function openClubImport(locale: string, current: () => boolean, refresh: 
       method: 'POST', credentials: 'include', signal: abort.signal,
       headers: {'Content-Type': 'application/json'}, body: typeof body === 'string' ? body : JSON.stringify(body),
     });
-    if (!response.ok || !current()) throw new Error('request failed');
+    if (!response.ok || !current()) throw new Error(String(response.status));
     return response.json();
   }
   function render() {
@@ -109,6 +114,7 @@ export function openClubImport(locale: string, current: () => boolean, refresh: 
         const group = node('fieldset');
         group.disabled = busy || pendingCommit !== null;
         group.append(node('legend', `${index + 1}. ${t[row.type]}`));
+        for (const warning of warnings.get(row) || []) group.append(node('p', warning));
         const fields = row.type === 'team' ? ['name', 'category', 'gender', 'level'] as const
           : ['name', 'email', 'role', 'teams'] as const;
         for (const field of fields) {
@@ -130,6 +136,7 @@ export function openClubImport(locale: string, current: () => boolean, refresh: 
           input.style.width = '100%';
           input.value = field === 'teams' ? value : row[field] || '';
           input.addEventListener('input', () => {
+            warnings.delete(row);
             if (field === 'teams') row.teams = input.value.split(',').map(s => s.trim()).filter(Boolean);
             else row[field] = input.value;
           });
@@ -160,19 +167,32 @@ export function openClubImport(locale: string, current: () => boolean, refresh: 
     dialog.append(button(t.close, () => dialog.close()));
   }
   async function preview(file: File) {
-    if (!file.size || file.size > FILE_LIMIT) { error = t.previewError; render(); return; }
+    if (!file.size || file.size > FILE_LIMIT) {
+      error = file.size > FILE_LIMIT ? t.documentTooLarge : t.badRows;
+      render();
+      return;
+    }
     busy = true; error = ''; render();
     try {
       const bytes = await file.arrayBuffer();
       const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
-      const fingerprint = file.name + ':' + encode(hash);
-      if (previewKey?.fingerprint !== fingerprint) previewKey = {fingerprint, operation: crypto.randomUUID()};
-      const body = await request('preview', {operation_id: previewKey.operation, locale: wireLocale,
+      const identity = new TextEncoder().encode(JSON.stringify([wireLocale, file.name, encode(hash)]));
+      const operation = new Uint8Array(await crypto.subtle.digest('SHA-256', identity));
+      const operationId = 'preview-' + Array.from(operation, byte => byte.toString(16).padStart(2, '0')).join('');
+      const body = await request('preview', {operation_id: operationId, locale: wireLocale,
         filename: file.name, content_b64: encode(new Uint8Array(bytes))});
       if (body.contract !== 'document-import/1.0' || !Array.isArray(body.candidates)) throw new Error('invalid preview');
-      rows = body.candidates;
-    } catch {
-      error = t.previewError;
+      rows = body.candidates as Row[];
+      warnings = new WeakMap();
+      for (const hint of body.warnings || []) {
+        const row = rows[hint.row - 1];
+        const reason = t.errors[hint.reason as keyof typeof t.errors];
+        if (row && reason) warnings.set(row, [...warnings.get(row) || [], reason]);
+      }
+    } catch (cause) {
+      const status = cause instanceof Error ? cause.message : '';
+      error = status === '413' ? t.documentTooLarge : status === '415' ? t.badFormat
+        : status === '422' ? t.badRows : t.previewError;
     } finally {
       busy = false;
       if (dialog.isConnected) render();

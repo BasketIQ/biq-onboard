@@ -157,3 +157,27 @@ test('English renders Coach, staff actions and Smart permission without overflow
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= 1280));
   }, 1280, 'en');
 });
+
+
+for (const lang of ['es-ES','en']) test(`continuation selects the exact team and member without performing a command (${lang})`, async () => {
+  const state = initial();
+  state.teams.unshift({team_id:'other',name:'Other team'});
+  await scenario(state, async () => {throw new Error('Navigation must not write');}, async (page, operations) => {
+    await page.locator('biq-personal-staff').evaluate(el => {
+      const next = el.cloneNode(false);
+      next.setAttribute('target-team','team-one');
+      next.setAttribute('target-action','permission');
+      next.setAttribute('target-resource','guest');
+      el.replaceWith(next);
+    });
+    await page.locator('[data-permission="guest"][data-continuation-active]').waitFor();
+    assert.equal(await page.locator('[data-team]').inputValue(),'team-one');
+    assert.equal(operations.length,0);
+    await page.locator('biq-personal-staff').evaluate(el => {
+      const next=el.cloneNode(false);next.setAttribute('target-resource','revoked');el.replaceWith(next);
+    });
+    await page.getByRole('alert').waitFor();
+    assert.equal(await page.locator('[data-permission]').count(),0);
+    assert.equal(operations.length,0);
+  },390,lang);
+});

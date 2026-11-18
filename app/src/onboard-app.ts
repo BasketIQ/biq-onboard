@@ -586,6 +586,7 @@ class BiqOnboardApp extends HTMLElement {
   private _bootstrap: BootstrapPayload | null = null;
   private _bootstrapLoading = false;
   private _bootstrapFailed = false;
+  private _staffIntent = {team: '', action: '', target: ''};
   private _personalTeams: PersonalTeamRow[] | null = null;
   // OB60-3: the feed is a real state machine — 'uninitialized' means never
   // attempted (first load may trigger), 'loading' in flight, 'error' failed
@@ -2141,6 +2142,7 @@ class BiqOnboardApp extends HTMLElement {
     // `edit=<teamId>` (from Home «Plantilla») asks for the edit modal; any
     // route without it drops a stale pending request.
     this._pendingEditTeamId = params?.get('edit') || null;
+    this._staffIntent = {team: params?.get('staff_team') || '', action: params?.get('staff_action') || '', target: params?.get('staff_target') || ''};
     if(params?.get('delete'))this._deleteConfirmTeamId=params.get('delete');
     // `invite=<token>` — invitation links arrive by email; the token rides
     // the deep link and the Mi club block shows the confirm card.
@@ -5348,7 +5350,7 @@ class BiqOnboardApp extends HTMLElement {
       <div class="entry-step">
         <h2 class="entry-title">${entryCopy.myPersonalSpace}</h2>
         <p><a class="onboard-btn" href="#/subscription">${entryCopy.subscriptions}</a></p>
-        ${this.staffEnabled ? `<biq-personal-staff lang="${escapeHtml(this.locale)}"></biq-personal-staff>` : ''}
+        ${this.staffEnabled ? `<biq-personal-staff target-team="${escapeHtml(this._staffIntent.team)}" target-action="${escapeHtml(this._staffIntent.action)}" target-resource="${escapeHtml(this._staffIntent.target)}" lang="${escapeHtml(this.locale)}"></biq-personal-staff>` : ''}
         <button class="onboard-btn" data-personal-switch-space>${entryCopy.switchSpace}</button>
         ${this._entryError ? `<p class="entry-error" role="alert">${escapeHtml(this._entryError)}</p>` : ''}
         ${this._personalTeamsStatus === 'loading' || this._personalTeamsStatus === 'uninitialized'

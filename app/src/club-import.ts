@@ -1,7 +1,7 @@
 const texts = {
   es: {
     title: 'Importar equipos y entrenadores', file: 'Fichero de hasta 5 MB', preview: 'Preparar vista previa',
-    confirm: 'Confirmar altas e invitaciones', close: 'Cerrar', discard: 'Quitar fila',
+    confirm: 'Confirmar altas e invitaciones', close: 'Cerrar', discard: 'Quitar fila', discardPreview: 'Descartar vista previa',
     team: 'Equipo', coach: 'Entrenador', name: 'Nombre', category: 'Categoría',
     gender: 'Género', level: 'Nivel', email: 'Correo', role: 'Rol', teams: 'Equipos separados por coma',
     help: 'Revisa o elimina filas antes de confirmar. Los entrenadores deben aceptar la invitación.',
@@ -22,7 +22,7 @@ const texts = {
   },
   en: {
     title: 'Import teams and coaches', file: 'File up to 5 MB', preview: 'Prepare preview',
-    confirm: 'Confirm teams and invitations', close: 'Close', discard: 'Remove row',
+    confirm: 'Confirm teams and invitations', close: 'Close', discard: 'Remove row', discardPreview: 'Discard preview',
     team: 'Team', coach: 'Coach', name: 'Name', category: 'Category',
     gender: 'Gender', level: 'Level', email: 'Email', role: 'Role', teams: 'Teams separated by commas',
     help: 'Review or remove rows before confirming. Coaches must accept their invitation.',
@@ -76,6 +76,8 @@ export function openClubImport(locale: string, current: () => boolean, refresh: 
   let error = '';
   let busy = false;
   let pendingCommit: string | null = null;
+  let currentPreviewOperation: string | null = null;
+  let preparing = false;
 
 
   const node = <K extends keyof HTMLElementTagNameMap>(tag: K, text?: string) => {
@@ -93,7 +95,7 @@ export function openClubImport(locale: string, current: () => boolean, refresh: 
   async function request(path: string, body: object | string) {
     if (!current()) throw new Error('context changed');
     const response = await fetch('/api/director-smart/v1/club-import/' + path, {
-      method: 'POST', credentials: 'include', signal: abort.signal,
+      method: 'POST', credentials: 'include', ...(path === 'preview' ? {} : {signal: abort.signal}),
       headers: {'Content-Type': 'application/json'}, body: typeof body === 'string' ? body : JSON.stringify(body),
     });
     if (!response.ok || !current()) throw new Error(String(response.status));
@@ -147,6 +149,11 @@ export function openClubImport(locale: string, current: () => boolean, refresh: 
         dialog.append(group);
       });
       if (rows.length) dialog.append(button(t.confirm, () => void commit()));
+      if (!pendingCommit) dialog.append(button(t.discardPreview, () => {
+        forgetPreview();
+        rows = null;
+        render();
+      }));
     } else {
       const label = node('label', t.file + ' ');
       const field = node('input');
@@ -164,7 +171,34 @@ export function openClubImport(locale: string, current: () => boolean, refresh: 
       message.setAttribute('role', busy ? 'status' : 'alert');
       dialog.append(message);
     }
-    dialog.append(button(t.close, () => dialog.close()));
+    const close = button(t.close, () => dialog.close());
+    if (preparing) close.disabled = false;
+    dialog.append(close);
+  }
+  function loadRows(body: {contract: string; candidates: Row[]; warnings?: {row: number; reason: keyof typeof t.errors}[]}) {
+    if (body.contract !== 'document-import/1.0' || !Array.isArray(body.candidates)) throw new Error('invalid preview');
+    rows = body.candidates;
+    warnings = new WeakMap();
+    for (const hint of body.warnings || []) {
+      const row = rows[hint.row - 1];
+      const reason = t.errors[hint.reason];
+      if (row && reason) warnings.set(row, [...warnings.get(row) || [], reason]);
+    }
+  }
+  async function recoverPreview() {
+    try {
+      const response = await fetch('/api/director-smart/v1/work/club-import', {
+        credentials: 'include', cache: 'no-store', signal: abort.signal,
+      });
+      if (!response.ok || !current() || !dialog.isConnected || busy || rows) return;
+      const previous = await response.json();
+      if (previous.state !== 'ready' || !previous.result || busy || rows) return;
+      loadRows(previous.result);
+      currentPreviewOperation = previous.operation;
+      render();
+    } catch {
+      // Recovery is optional for a new document.
+    }
   }
   async function preview(file: File) {
     if (!file.size || file.size > FILE_LIMIT) {
@@ -172,31 +206,34 @@ export function openClubImport(locale: string, current: () => boolean, refresh: 
       render();
       return;
     }
-    busy = true; error = ''; render();
+    busy = true; preparing = true; error = ''; render();
     try {
       const bytes = await file.arrayBuffer();
       const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
       const identity = new TextEncoder().encode(JSON.stringify([wireLocale, file.name, encode(hash)]));
       const operation = new Uint8Array(await crypto.subtle.digest('SHA-256', identity));
       const operationId = 'preview-' + Array.from(operation, byte => byte.toString(16).padStart(2, '0')).join('');
+      currentPreviewOperation = operationId;
       const body = await request('preview', {operation_id: operationId, locale: wireLocale,
         filename: file.name, content_b64: encode(new Uint8Array(bytes))});
-      if (body.contract !== 'document-import/1.0' || !Array.isArray(body.candidates)) throw new Error('invalid preview');
-      rows = body.candidates as Row[];
-      warnings = new WeakMap();
-      for (const hint of body.warnings || []) {
-        const row = rows[hint.row - 1];
-        const reason = t.errors[hint.reason as keyof typeof t.errors];
-        if (row && reason) warnings.set(row, [...warnings.get(row) || [], reason]);
-      }
+      loadRows(body);
     } catch (cause) {
       const status = cause instanceof Error ? cause.message : '';
       error = status === '413' ? t.documentTooLarge : status === '415' ? t.badFormat
         : status === '422' ? t.badRows : t.previewError;
     } finally {
-      busy = false;
+      busy = false; preparing = false;
+      window.dispatchEvent(new Event('biq-director-smart:work-changed'));
       if (dialog.isConnected) render();
     }
+  }
+  function forgetPreview() {
+    if (!currentPreviewOperation) return;
+    const id = encodeURIComponent(currentPreviewOperation);
+    currentPreviewOperation = null;
+    void fetch('/api/director-smart/v1/work/club-import/' + id, {
+      method: 'DELETE', credentials: 'include',
+    }).catch(() => {}).finally(() => window.dispatchEvent(new Event('biq-director-smart:work-changed')));
   }
   async function commit() {
     if (!rows?.length) return;
@@ -206,6 +243,7 @@ export function openClubImport(locale: string, current: () => boolean, refresh: 
     try {
       const result = await request('commit', pendingCommit);
       outcomes = result.rows;
+      forgetPreview();
       refresh();
     } catch {
       error = t.confirmError;
@@ -214,10 +252,11 @@ export function openClubImport(locale: string, current: () => boolean, refresh: 
       if (dialog.isConnected) render();
     }
   }
-  dialog.addEventListener('cancel', event => { if (busy) event.preventDefault(); });
+  dialog.addEventListener('cancel', event => { if (busy && !preparing) event.preventDefault(); });
   dialog.addEventListener('close', () => { abort.abort(); dialog.remove(); }, {once: true});
   document.body.append(dialog);
   render();
   dialog.showModal();
+  void recoverPreview();
   return () => { abort.abort(); dialog.remove(); };
 }

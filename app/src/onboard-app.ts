@@ -107,9 +107,6 @@ interface ThemeJob {
 // B14: themeJob state matrix — presentation + action per canonical state
 // lives in onboard-copy.ts (themeJob) so it follows the active locale.
 
-// F12: Canonical category taxonomy (mirrors shell.js CATEGORY_ORDER)
-const CATEGORY_ORDER = ['babybasket', 'prebenjamin', 'benjamin', 'alevin', 'infantil', 'cadete', 'junior', 'senior', 'veteranos'];
-
 // Competition level dropdown — the same 7-option list the retired A-04
 // questionnaire used (biq-methodology, removed in d8b33e6). Stored value is
 // the option code; the wire format stays a free string.
@@ -160,11 +157,11 @@ function competitiveLevelOptionsHtml(current: string, copy: OnboardCopy = onboar
 // stored value outside the list is preserved as an extra selected option
 // — the same rule competitiveLevelOptionsHtml applies to legacy levels.
 // "" maps to «Selecciona…» and clears the field on save.
-function categoryOptionsHtml(current: string, copy: OnboardCopy = onboardCopy()): string {
-  const opts = PERSONAL_CATEGORIES.map(
-    (c) => `<option value="${c.key}"${current === c.key ? ' selected' : ''}>${copy.categories[c.key] ?? c.label}</option>`,
+function categoryOptionsHtml(current: string, categories: {key: string; label: string}[], copy: OnboardCopy): string {
+  const opts = categories.map(
+    (c) => `<option value="${escapeHtml(c.key)}"${current === c.key ? ' selected' : ''}>${escapeHtml(c.label)}</option>`,
   );
-  if (current && !PERSONAL_CATEGORIES.some((c) => c.key === current)) {
+  if (current && !categories.some((c) => c.key === current)) {
     opts.push(`<option value="${escapeHtml(current)}" selected>${escapeHtml(current)}</option>`);
   }
   return `<option value=""${!current ? ' selected' : ''}>${copy.select}</option>${opts.join('')}`;
@@ -326,6 +323,9 @@ interface BootstrapPayload {
   account_id: string;
   identity_verified: boolean;
   identity_scope?: string;
+  team_business_catalog?: {
+    categories: { key: string; labels: { es: string; en: string } }[];
+  };
   contexts: ContextCandidate[];
   active: ContextDescriptor | null;
   entry_actions: Record<string, { allowed: boolean; requires_verification: boolean }>;
@@ -529,6 +529,14 @@ class BiqOnboardApp extends HTMLElement {
   private disposeClubImport?: () => void;
   private get locale() { return this.i18n?.locale || document.documentElement.lang || 'es-ES'; }
   private get oc(): OnboardCopy { return onboardCopy(this.locale); }
+
+  private get teamCategories(): { key: string; label: string }[] {
+    const language = this.locale.toLowerCase().startsWith('en') ? 'en' : 'es';
+    const categories = this._bootstrap?.team_business_catalog?.categories;
+    return categories?.length
+      ? categories.map(({ key, labels }) => ({ key, label: labels[language] }))
+      : PERSONAL_CATEGORIES.map(({ key, label }) => ({ key, label: this.oc.categories[key] ?? label }));
+  }
 
   private readonly onLocaleChanged = () => {
     const guided = this.shadow?.querySelector('.guided-entry');
@@ -4723,7 +4731,7 @@ class BiqOnboardApp extends HTMLElement {
                   <div class="entry-field"><label>${entryCopy.teamName}</label>
                     <input type="text" name="name" maxlength="120" required /></div>
                   <div class="entry-field"><label>${entryCopy.category}</label>
-                    <select name="category_key">${PERSONAL_CATEGORIES.map((c) => `<option value="${c.key}">${this.oc.categories[c.key] ?? c.label}</option>`).join('')}</select></div>
+                    <select name="category_key">${this.teamCategories.map((c) => `<option value="${escapeHtml(c.key)}">${escapeHtml(c.label)}</option>`).join('')}</select></div>
                   <div class="entry-field"><label>${entryCopy.gender}</label>
                     <select name="gender"><option value="X">${entryCopy.mixed}</option><option value="F">${entryCopy.female}</option><option value="M">${entryCopy.male}</option></select></div>
                   <button class="onboard-btn onboard-btn-primary" type="submit" ${busy ? 'disabled' : ''}>${entryCopy.createAndEnter}</button>
@@ -4896,7 +4904,7 @@ class BiqOnboardApp extends HTMLElement {
 
     if (this._guidedEntries !== null && this._entryRecovery?.kind !== 'narrowing' && !this._helpOpen && !this._clubPickerOpen) {
       const nameField=this._guidedNeedsName?`<div class="entry-field"><label>${entryCopy.nickname}</label><input name="nickname" autocomplete="nickname" maxlength="80" required></div>`:'';
-      const coachForm = `<form class="entry-form" data-entry-personal-create>${nameField}<div class="entry-field"><label>${entryCopy.teamName}</label><input name="name" maxlength="120" required></div><div class="entry-field"><label>${entryCopy.category}</label><select name="category_key">${PERSONAL_CATEGORIES.map(c=>`<option value="${c.key}">${this.oc.categories[c.key] ?? c.label}</option>`).join('')}</select></div><div class="entry-field"><label>${entryCopy.gender}</label><select name="gender"><option value="X">${entryCopy.mixed}</option><option value="F">${entryCopy.female}</option><option value="M">${entryCopy.male}</option></select></div><button class="onboard-btn onboard-btn-primary" ${busy?'disabled':''}>${entryCopy.createAndEnterTeam}</button></form>`;
+      const coachForm = `<form class="entry-form" data-entry-personal-create>${nameField}<div class="entry-field"><label>${entryCopy.teamName}</label><input name="name" maxlength="120" required></div><div class="entry-field"><label>${entryCopy.category}</label><select name="category_key">${this.teamCategories.map(c=>`<option value="${escapeHtml(c.key)}">${escapeHtml(c.label)}</option>`).join('')}</select></div><div class="entry-field"><label>${entryCopy.gender}</label><select name="gender"><option value="X">${entryCopy.mixed}</option><option value="F">${entryCopy.female}</option><option value="M">${entryCopy.male}</option></select></div><button class="onboard-btn onboard-btn-primary" ${busy?'disabled':''}>${entryCopy.createAndEnterTeam}</button></form>`;
       const directorForm = `<form class="entry-form" data-entry-club-create>${nameField}<div class="entry-field"><label>${entryCopy.clubName}</label><input name="name" maxlength="200" required></div><button class="onboard-btn onboard-btn-primary" ${busy?'disabled':''}>${entryCopy.createAndEnterClub}</button></form>`;
       const invitationError = this._guidedInvitationsFailed
         ? `<p class="entry-error" role="alert">${entryCopy.invitesFailed} <button class="onboard-btn" type="button" data-guided-retry-invitations>${guidedEntryCopy(this.locale).retry}</button></p>`
@@ -5337,7 +5345,7 @@ class BiqOnboardApp extends HTMLElement {
           <div class="entry-field"><label>${entryCopy.teamName}</label>
             <input type="text" name="name" maxlength="120" required value="${escapeHtml(t.name)}" /></div>
           <div class="entry-field"><label>${entryCopy.category}</label>
-            <select name="category_key">${PERSONAL_CATEGORIES.map((c) => `<option value="${c.key}"${c.key === t.category_key ? ' selected' : ''}>${this.oc.categories[c.key] ?? c.label}</option>`).join('')}</select></div>
+            <select name="category_key">${this.teamCategories.map((c) => `<option value="${escapeHtml(c.key)}"${c.key === t.category_key ? ' selected' : ''}>${escapeHtml(c.label)}</option>`).join('')}</select></div>
           <div class="entry-field"><label>${entryCopy.gender}</label>
             <select name="gender">${['X', 'F', 'M'].map((g) => `<option value="${g}"${g === t.gender ? ' selected' : ''}>${g === 'X' ? entryCopy.mixed : g === 'F' ? entryCopy.female : entryCopy.male}</option>`).join('')}</select></div>
           <button class="onboard-btn onboard-btn-primary" type="submit" ${this._entryBusy ? 'disabled' : ''}>${guidedEntryCopy(this.locale).save}</button>
@@ -5378,7 +5386,7 @@ class BiqOnboardApp extends HTMLElement {
           <div class="entry-field"><label>${entryCopy.teamName}</label>
             <input type="text" name="name" maxlength="120" required /></div>
           <div class="entry-field"><label>${entryCopy.category}</label>
-            <select name="category_key">${PERSONAL_CATEGORIES.map((c) => `<option value="${c.key}">${this.oc.categories[c.key] ?? c.label}</option>`).join('')}</select></div>
+            <select name="category_key">${this.teamCategories.map((c) => `<option value="${escapeHtml(c.key)}">${escapeHtml(c.label)}</option>`).join('')}</select></div>
           <div class="entry-field"><label>${entryCopy.gender}</label>
             <select name="gender"><option value="X">${entryCopy.mixed}</option><option value="F">${entryCopy.female}</option><option value="M">${entryCopy.male}</option></select></div>
           <button class="onboard-btn onboard-btn-primary" type="submit" ${this._entryBusy ? 'disabled' : ''}>${entryCopy.createTeam}</button>
@@ -5757,25 +5765,26 @@ class BiqOnboardApp extends HTMLElement {
 
     // Managers keep every canonical category card so the + add-row is always
     // available; pickers/read-only roles only see categories with teams.
+    const categoryOrder = this.teamCategories.map((category) => category.key);
     const allCategoryIds = new Set<string>();
     for (const t of catalog) {
       if (canManage || !t.archived) allCategoryIds.add(t.category || 'senior');
     }
     if (canManage) {
-      for (const cat of CATEGORY_ORDER) {
+      for (const cat of categoryOrder) {
         allCategoryIds.add(cat);
       }
     }
 
     const sections = Array.from(allCategoryIds).sort((a, b) => {
-      const ia = CATEGORY_ORDER.indexOf(a);
-      const ib = CATEGORY_ORDER.indexOf(b);
+      const ia = categoryOrder.indexOf(a);
+      const ib = categoryOrder.indexOf(b);
       if (ia === -1 && ib === -1) return a.localeCompare(b);
       if (ia === -1) return 1;
       if (ib === -1) return -1;
       return ia - ib;
     }).map((cat) => {
-      const catLabel = this.oc.categories[cat] || cat;
+      const catLabel = this.teamCategories.find(({ key }) => key === cat)?.label ?? cat;
       const teams = groups.get(cat) || [];
       const rows = teams.map((t) => {
         // Gender shows the stored single-letter code (M/F/X) — no Fem/Masc/Mix
@@ -5933,7 +5942,7 @@ class BiqOnboardApp extends HTMLElement {
         ${readOnly ? `<p class="onboard-card-desc" data-edit-readonly-note>${this.oc.teamReadOnlyNote}</p>` : ''}
         ${model.category !== undefined ? `
         <label class="onboard-field-label" for="edit-team-category">${this.oc.category}</label>
-        <select id="edit-team-category" class="onboard-input" data-edit-team-category${off}>${categoryOptionsHtml(this._editCategoryDraft, this.oc)}</select>` : ''}
+        <select id="edit-team-category" class="onboard-input" data-edit-team-category${off}>${categoryOptionsHtml(this._editCategoryDraft, this.teamCategories, this.oc)}</select>` : ''}
         <label class="onboard-field-label" for="edit-team-name">${this.oc.teamName}</label>
         <input id="edit-team-name" type="text" class="onboard-input" data-edit-team-name value="${escapeHtml(this._editNameDraft)}"${off} />
         ${model.gender !== undefined ? `
@@ -6595,7 +6604,7 @@ class BiqOnboardApp extends HTMLElement {
       this.disposeClubImport = openClubImport(this.locale,
         () => this.isConnected && this._org?.club?.id === clubId && this._org.role === 'sports_director',
         () => void this.loadTeams(clubId), {
-          category: PERSONAL_CATEGORIES.map(c => [c.key, this.oc.categories[c.key] ?? c.label]),
+          category: this.teamCategories.map(c => [c.key, c.label]),
           gender: TEAM_GENDER_OPTIONS.map(g => [g.value, this.oc.genders[g.value] ?? g.label]),
           level: COMPETITIVE_LEVEL_OPTIONS.map(level => [level.value, this.oc.levels[level.value] ?? level.label]),
         });

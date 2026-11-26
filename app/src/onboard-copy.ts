@@ -181,7 +181,9 @@ const ES = {
   birthDate: 'Fecha de nacimiento',
   removePlayer: 'Quitar jugador',
   noMorePlayers: 'No hay más jugadoras en las plantillas del club.',
-  linkExistingHelp: '¿Ya figura en otra plantilla del club? Vincúlala para conservar su identidad de scouting.',
+  linkExistingHelp: 'Traslada a alguien de otra plantilla del club para conservar su historial.',
+  confirmRosterTransfer: '¿Trasladar a {player} desde {team} a este equipo?',
+  rosterTransferFailed: 'No se ha podido confirmar el traslado. Actualiza las plantillas antes de intentarlo de nuevo.',
   newPlayer: 'Nueva jugadora',
   saveStatus: {
     idle: '', pending: 'Cambios pendientes', saving: 'Guardando…', saved: 'Guardado',
@@ -417,7 +419,9 @@ const EN: typeof ES = {
   birthDate: 'Date of birth',
   removePlayer: 'Remove player',
   noMorePlayers: 'There are no more players in the club’s rosters.',
-  linkExistingHelp: 'Already in another club roster? Link her to keep her scouting identity.',
+  linkExistingHelp: 'Transfer someone from another club roster to keep their history.',
+  confirmRosterTransfer: 'Transfer {player} from {team} to this team?',
+  rosterTransferFailed: 'The transfer could not be confirmed. Refresh the rosters before trying again.',
   newPlayer: 'New player',
   saveStatus: {
     idle: '', pending: 'Unsaved changes', saving: 'Saving…', saved: 'Saved',

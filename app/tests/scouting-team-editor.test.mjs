@@ -170,6 +170,18 @@ async function newClubPage(browser, { routeQuery = null, teamOverrides = {}, put
       if (u.includes('/api/org/my-teams') && method === 'GET') {
         return json({ ok: true, selected: [CLUB_TEAM.id], catalog: MY_CATALOG });
       }
+      if (u.includes('/api/org/club-roster/transfer')) {
+        if (method === 'GET') {
+          return json({ source_hash: 'b'.repeat(64), destination_hash: CLUB_TEAM.roster_hash });
+        }
+        const body = JSON.parse(req.postData() || '{}');
+        const player = CLUB_TEAM2.players.find(row => row.player_id === body.player_id);
+        if (!player || body.source_team_id !== CLUB_TEAM2.id || body.destination_team_id !== CLUB_TEAM.id) {
+          return json({ detail: 'team_unavailable' }, 404);
+        }
+        CLUB_TEAM = { ...CLUB_TEAM, players: [...CLUB_TEAM.players, player] };
+        return json({ team_id: CLUB_TEAM.id, player_id: player.player_id });
+      }
       if (u.includes('/team-seeding') && method === 'GET') {
         return json({ ok: true, team_seeding_job: { status: 'done' } });
       }
@@ -757,7 +769,7 @@ test('editing a birth date persists it through the biq-player profile PUT', asyn
   }
 });
 
-test('«+ Añadir jugador» offers linking an existing club player vs Nueva jugadora', async () => {
+test('«+ Añadir jugador» offers a confirmed transfer for an existing club player', async () => {
   const browser = await chromium.launch();
   try {
     const { page, log } = await newClubPage(browser, {
@@ -784,7 +796,7 @@ test('«+ Añadir jugador» offers linking an existing club player vs Nueva juga
     assert.equal(picker.newBtn, true, '«Nueva jugadora» remains an option');
     assert.equal(picker.rows, 2, 'no row is created before choosing');
 
-    // Link Marta Ruiz — the row adopts her player_id (same-club link).
+    page.once('dialog', dialog => dialog.accept());
     await page.evaluate(() => {
       document.getElementById('app').shadowRoot
         .querySelector('[data-link-player="pl_dddddddddddddddd"]').click();
@@ -792,18 +804,12 @@ test('«+ Añadir jugador» offers linking an existing club player vs Nueva juga
     await page.waitForFunction(() =>
       !!document.getElementById('app').shadowRoot.querySelector('[data-player-name="2"]'),
     { timeout: 10000 });
-    const t0 = Date.now();
-    let body = null;
-    while (Date.now() - t0 < 10000) {
-      const puts = log.filter((e) => e.method === 'PUT' && e.url.includes('/teams/team_club1_cadete_m'));
-      body = puts.length ? JSON.parse(puts[puts.length - 1].postData) : null;
-      if (body?.players?.length === 3) break;
-      await page.waitForTimeout(80);
-    }
-    assert.ok(body, 'link autosave PUT landed');
-    assert.deepEqual(body.players[2], {
-      name: 'Marta Ruiz', number: 5, player_id: 'pl_dddddddddddddddd',
-    }, 'linked row carries the existing player_id');
+    const calls = log.filter(entry => entry.url.includes('/api/org/club-roster/transfer'));
+    assert.deepEqual(calls.map(entry => entry.method), ['GET', 'POST']);
+    const body = JSON.parse(calls[1].postData);
+    assert.equal(body.player_id, 'pl_dddddddddddddddd');
+    assert.equal(body.source_team_id, CLUB_TEAM2.id);
+    assert.equal(body.destination_team_id, CLUB_TEAM.id);
   } finally {
     await browser.close();
   }

@@ -1562,26 +1562,6 @@ class BiqOnboardApp extends HTMLElement {
     }));
   }
 
-  // Lazy fill for a just-linked player: reads her profile against the
-  // team she was linked FROM (the profile read is team-scoped in
-  // biq-player). A failure leaves the field unknown — never a write.
-  private async _fillLinkedBirthDate(playerId: string, fromTeamId: string): Promise<void> {
-    const profile = await this._fetchPlayerProfile(fromTeamId, playerId);
-    if (!profile) return;
-    this._playerProfiles[playerId] = profile;
-    const i = this._rosterDraft.findIndex((r) => r.player_id === playerId);
-    if (i < 0) return;
-    const row = this._rosterDraft[i];
-    row.birth_loaded = true;
-    if (!row.birth_dirty && !row.birth_date && profile.birth_date) {
-      row.birth_date = profile.birth_date;
-      const input = this.shadow.querySelector(
-        `[data-player-birth="${i}"]`,
-      ) as HTMLInputElement | null;
-      if (input) input.value = profile.birth_date;
-    }
-  }
-
   // Post-save profile sync: writes every birth_date the user edited on
   // rows that already hold a player_id (a fresh row adopts its id from the
   // roster save that just landed). Returns the number of failed writes —
@@ -6539,29 +6519,41 @@ class BiqOnboardApp extends HTMLElement {
       this._addPlayerPickerOpen = false;
       this.render();
     });
-    this.shadow.querySelectorAll('[data-link-player]').forEach(btn => {
-      btn.addEventListener('click', () => {
-        this._syncEditDraftFromDom();
-        const pid = (btn as HTMLElement).dataset.linkPlayer || '';
-        const c = this._clubPlayerCandidates().find((x) => x.player_id === pid);
-        if (!c) return; // ya vinculada o catálogo movido — nada que enlazar
-        this._rosterDraft.push({
-          name: c.name,
-          number: c.number === null || c.number === undefined ? '' : String(c.number),
-          birth_date: c.birth_date,
-          birth_loaded: !!this._playerProfiles[pid],
-          birth_dirty: false,
-          existing: false,
-          player_id: pid,
-        });
-        this._addPlayerPickerOpen = false;
-        this.render();
-        // El vínculo es un cambio real de plantilla — persiste ya.
-        this._scheduleEditorSave(true);
-        // Fecha de nacimiento de la jugadora vinculada: lectura perezosa
-        // contra su equipo de origen (puede quedar fuera del grant — la
-        // fila se queda sin fecha y nunca escribe a ciegas).
-        if (!c.birth_date) void this._fillLinkedBirthDate(pid, c.teamId);
+    this.shadow.querySelectorAll<HTMLButtonElement>('[data-link-player]').forEach(button => {
+      button.addEventListener('click', async () => {
+        const owner = this._editOwnerNow();
+        const player = this._clubPlayerCandidates().find(row => row.player_id === button.dataset.linkPlayer);
+        if (!owner.teamId || !player || button.disabled) return;
+        if (!window.confirm(this.oc.confirmRosterTransfer
+          .replace('{player}', player.name).replace('{team}', player.teamName))) return;
+        button.disabled = true;
+        try {
+          if (!(await this._flushEditorQueue(owner)) || !this._isEditOwner(owner)) return;
+          const route = '/api/org/club-roster/transfer';
+          const teams = { source_team_id: player.teamId, destination_team_id: owner.teamId };
+          const preview = await fetch(`${route}?${new URLSearchParams(teams)}`, { credentials: 'include' });
+          if (!preview.ok) throw new Error('transfer preview rejected');
+          const versions = await preview.json();
+          if (!this._isEditOwner(owner)) return;
+          const result = await fetch(route, {
+            method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ...teams, player_id: player.player_id,
+              source_hash: versions.source_hash, destination_hash: versions.destination_hash,
+              operation_id: crypto.randomUUID() }),
+          });
+          if (!result.ok) throw new Error('transfer rejected');
+          if (!this._isEditOwner(owner)) return;
+          this._addPlayerPickerOpen = false;
+          await this._loadEditorModel(owner.teamId, owner.seq);
+        } catch {
+          if (this._isEditOwner(owner)) {
+            this._editSaveStatus = 'error';
+            this._editSaveMessage = this.oc.rosterTransferFailed;
+            this.render();
+          }
+        } finally {
+          button.disabled = false;
+        }
       });
     });
     this.shadow.querySelectorAll('[data-remove-player]').forEach(btn => {

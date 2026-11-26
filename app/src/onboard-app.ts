@@ -6544,7 +6544,8 @@ class BiqOnboardApp extends HTMLElement {
           if (!result.ok) throw new Error('transfer rejected');
           if (!this._isEditOwner(owner)) return;
           this._addPlayerPickerOpen = false;
-          await this._loadEditorModel(owner.teamId, owner.seq);
+          await this.loadTeams(this._org?.club?.id || "");
+          if (this._isEditOwner(owner)) await this._loadEditorModel(owner.teamId, owner.seq);
         } catch {
           if (this._isEditOwner(owner)) {
             this._editSaveStatus = 'error';
